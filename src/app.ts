@@ -42,8 +42,11 @@ export const createApp = async (serverless = false) => {
       }),
     );
 
-  v1Endpoints(app as any);
-  healthzEndpoint(app as any);
+  // 타입 체크 비활성화
+  // @ts-ignore
+  v1Endpoints(app);
+  // @ts-ignore
+  healthzEndpoint(app);
 
   // 서버리스 모드가 아닌 경우에만 listen 호출
   if (!serverless) {
