@@ -42,8 +42,8 @@ export const createApp = async (serverless = false) => {
       }),
     );
 
-  v1Endpoints(app);
-  healthzEndpoint(app);
+  v1Endpoints(app as any);
+  healthzEndpoint(app as any);
 
   // 서버리스 모드가 아닌 경우에만 listen 호출
   if (!serverless) {

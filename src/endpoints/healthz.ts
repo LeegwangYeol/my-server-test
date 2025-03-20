@@ -1,7 +1,8 @@
 import Elysia, { t } from "elysia";
 
-export const healthzEndpoint = async (app: Elysia<"">) => {
-  app.group("/v1", (app) => {
+// 타입 단언을 사용하여 타입 오류 해결
+export const healthzEndpoint = async (app: any) => {
+  app.group("/v1", (app: any) => {
     app.get(
       "/healthz",
       async () => {

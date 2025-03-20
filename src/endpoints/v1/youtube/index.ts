@@ -11,17 +11,18 @@ import { v1VideoList } from "./video-list";
 // 타입 단언을 사용하여 타입 오류 해결
 export const v1Youtube = (app: any) => {
   app.group("/youtube", (app: any) => {
-    v1AuthCreate(app);
-
-    v1CommentList(app);
-    v1Comment(app);
-    v1CommentDelete(app);
-
-    v1ReplyList(app);
-    v1Reply(app);
-
-    v1ChannelInfo(app);
-    v1VideoList(app);
+    // 모든 함수 호출에 타입 단언 추가
+    v1AuthCreate(app as any);
+    
+    v1CommentList(app as any);
+    v1Comment(app as any);
+    v1CommentDelete(app as any);
+    
+    v1ReplyList(app as any);
+    v1Reply(app as any);
+    
+    v1ChannelInfo(app as any);
+    v1VideoList(app as any);
 
     return app;
   });
