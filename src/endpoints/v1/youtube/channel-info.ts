@@ -5,7 +5,7 @@ import { google } from "googleapis";
 export const v1ChannelInfo = (app: any) => {
   app.post(
     "/channel/info",
-    async ({ body }) => {
+    async ({ body }: { body: any }) => {
       const { accessToken, maxResults, pageToken } = body;
 
       if (!accessToken) {

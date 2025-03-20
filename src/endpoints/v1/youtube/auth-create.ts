@@ -8,7 +8,7 @@ export const v1AuthCreate = (app: any) => {
   app
     .post(
       "/auth/create",
-      async ({ body }) => {
+      async ({ body }: { body: any }) => {
         const oauth2Client = new google.auth.OAuth2(
           body.clientId,
           body.clientSecret,
@@ -68,7 +68,7 @@ export const v1AuthCreate = (app: any) => {
     )
     .get(
       "/auth/confirm",
-      async ({ query }) => {
+      async ({ query }: { query: any }) => {
         const { code, state } = query;
         if (!code || !state) {
           return {

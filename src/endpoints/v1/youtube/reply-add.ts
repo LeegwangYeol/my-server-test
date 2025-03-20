@@ -5,7 +5,7 @@ import { google } from "googleapis";
 export const v1Reply = (app: any) => {
   app.post(
     "/reply",
-    async ({ body }) => {
+    async ({ body }: { body: any }) => {
       const { parentId, text, accessToken } = body;
 
       if (!parentId) {

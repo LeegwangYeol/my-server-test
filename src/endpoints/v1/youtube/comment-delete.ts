@@ -5,7 +5,7 @@ import { google } from "googleapis";
 export const v1CommentDelete = (app: any) => {
   app.post(
     "/comment/delete",
-    async ({ body }) => {
+    async ({ body }: { body: any }) => {
       const { commentId, accessToken } = body;
 
       if (!commentId) {

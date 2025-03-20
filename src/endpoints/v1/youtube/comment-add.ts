@@ -5,7 +5,7 @@ import { google } from "googleapis";
 export const v1Comment = (app: any) => {
   app.post(
     "/comment",
-    async ({ body }) => {
+    async ({ body }: { body: any }) => {
       const { accessToken, videoId, commentText } = body;
 
       try {

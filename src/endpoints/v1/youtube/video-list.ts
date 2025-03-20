@@ -5,7 +5,7 @@ import { google } from "googleapis";
 export const v1VideoList = (app: any) => {
   app.post(
     "/video/list",
-    async ({ body }) => {
+    async ({ body }: { body: any }) => {
       const { handle, accessToken, maxResults, pageToken } = body;
 
       try {

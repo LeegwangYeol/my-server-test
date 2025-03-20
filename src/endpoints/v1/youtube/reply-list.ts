@@ -5,7 +5,7 @@ import { google } from "googleapis";
 export const v1ReplyList = (app: any) => {
   app.post(
     "/reply/list",
-    async ({ body }) => {
+    async ({ body }: { body: any }) => {
       const { parentId, accessToken, maxResults } = body;
 
       if (!parentId) {
