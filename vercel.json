@@ -3,7 +3,10 @@
   "builds": [
     {
       "src": "src/index.ts",
-      "use": "@vercel/node"
+      "use": "@vercel/node",
+      "config": {
+        "includeFiles": ["lib/**", "src/**"]
+      }
     }
   ],
   "routes": [
@@ -12,5 +15,11 @@
       "dest": "src/index.ts"
     }
   ],
-  "framework": null
+  "framework": null,
+  "functions": {
+    "src/index.ts": {
+      "memory": 1024,
+      "maxDuration": 10
+    }
+  }
 }

@@ -4,7 +4,7 @@ import { v1Endpoints } from "./endpoints/v1/v1-endpoints";
 import { healthzEndpoint } from "./endpoints/healthz";
 import { cors } from "@elysiajs/cors";
 
-export const createApp = async () => {
+export const createApp = async (serverless = false) => {
   const app = new Elysia();
 
   app
@@ -30,12 +30,12 @@ export const createApp = async () => {
           "https://unpkg.com/@scalar/api-reference@1.25.52/dist/browser/standalone.js",
         documentation: {
           info: {
-            title: "YouTube API Documentation",
-            description: "API documentation for YouTube integration",
+            title: "API Documentation",
+            description: "API documentation",
             version: "1.0.0",
           },
           tags: [
-            { name: "YouTube", description: "YouTube integration endpoints" },
+            { name: "API", description: "API endpoints" },
             { name: "Health", description: "Health check endpoints" },
           ],
         },
@@ -45,7 +45,10 @@ export const createApp = async () => {
   v1Endpoints(app);
   healthzEndpoint(app);
 
-  app.listen(process.env.PORT ?? 3000);
+  // 서버리스 모드가 아닌 경우에만 listen 호출
+  if (!serverless) {
+    app.listen(process.env.PORT ?? 3000);
+  }
 
   return app;
 };
