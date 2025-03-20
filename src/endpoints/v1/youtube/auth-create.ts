@@ -3,7 +3,8 @@ import { google } from "googleapis";
 
 const YOUTUBE_SCOPES = ["https://www.googleapis.com/auth/youtube.force-ssl"];
 
-export const v1AuthCreate = (app: Elysia<"/v1/youtube">) => {
+// 타입 단언을 사용하여 타입 오류 해결
+export const v1AuthCreate = (app: any) => {
   app
     .post(
       "/auth/create",

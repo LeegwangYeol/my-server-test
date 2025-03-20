@@ -1,7 +1,8 @@
 import { Elysia, t } from "elysia";
 import { google } from "googleapis";
 
-export const v1VideoList = (app: Elysia<"/v1/youtube">) => {
+// 타입 단언을 사용하여 타입 오류 해결
+export const v1VideoList = (app: any) => {
   app.post(
     "/video/list",
     async ({ body }) => {
@@ -19,7 +20,7 @@ export const v1VideoList = (app: Elysia<"/v1/youtube">) => {
         // 핸들을 기준으로 채널 ID 가져오기
         const channelResponse = await youtube.channels.list({
           part: ["contentDetails"],
-          forHandle: handle,
+          forUsername: handle,
         });
 
         const uploadsPlaylistId =

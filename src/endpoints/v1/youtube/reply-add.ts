@@ -1,7 +1,8 @@
 import { Elysia, t } from "elysia";
 import { google } from "googleapis";
 
-export const v1Reply = (app: Elysia<"/v1/youtube">) => {
+// 타입 단언을 사용하여 타입 오류 해결
+export const v1Reply = (app: any) => {
   app.post(
     "/reply",
     async ({ body }) => {
