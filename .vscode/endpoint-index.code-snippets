@@ -1,0 +1,16 @@
+{
+  "llami-endpoint-index": {
+    "prefix": "llami-endpoint-index",
+    "body": [
+      "import Elysia from \"elysia\";",
+      "",
+      "export const v1$1 = async (app: Elysia<\"/v1\">) => {",
+      "  app.group(\"/$2\", (app) => {",
+      "    $3",
+      "    return app;",
+      "  });",
+      "};",
+    ],
+    "description": "Create a new endpoint index using Elysia framework",
+  },
+}

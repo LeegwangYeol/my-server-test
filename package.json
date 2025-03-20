@@ -1,0 +1,54 @@
+{
+  "name": "llami-api",
+  "version": "1.0.50",
+  "scripts": {
+    "dev": "bun run --watch src/index.ts",
+    "build": "bun build src/index.ts --target=node",
+    "start": "NODE_ENV=production bun src/index.ts",
+    "test": "bun test",
+    "introspection": "npx supabase gen types typescript --schema public --project-id pddzchdkbwhhbtpmagsx > lib/supabase/database.types.ts",
+    "prepare": "husky"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "~3.484.0",
+    "@elysiajs/cors": "^1.1.1",
+    "@elysiajs/cron": "^1.1.1",
+    "@elysiajs/swagger": "1.1.1",
+    "@langchain/community": "^0.3.12",
+    "@langchain/core": "^0.3.17",
+    "@langchain/textsplitters": "^0.1.0",
+    "@llami/gpt-torch": "^3.0.5",
+    "@supabase/supabase-js": "^2.43.4",
+    "chalk": "^5.3.0",
+    "dotenv": "^16.4.5",
+    "elysia": "latest",
+    "fetch-event-stream": "^0.1.5",
+    "fetch-retry": "^6.0.0",
+    "google-libphonenumber": "^3.2.38",
+    "googleapis": "^144.0.0",
+    "jsonwebtoken": "^9.0.2",
+    "mammoth": "^1.8.0",
+    "officeparser": "^5.0.0",
+    "openai": "^4.68.4",
+    "pdf-parse": "^1.1.1",
+    "pseudo-shuffle": "^1.0.2",
+    "redaxios": "^0.5.1",
+    "solapi": "^5.3.1",
+    "typescript": "5.4.3"
+  },
+  "devDependencies": {
+    "@types/google-libphonenumber": "^7.4.30",
+    "@types/jsonwebtoken": "^9.0.7",
+    "@types/axios": "^0.14.4",
+    "bun-types": "^1.1.33",
+    "husky": "^9.1.6",
+    "lint-staged": "^15.2.10",
+    "prettier": "^3.3.3"
+  },
+  "module": "src/index.js",
+  "lint-staged": {
+    "**/*.{js,ts,json,md}": [
+      "prettier --write"
+    ]
+  }
+}

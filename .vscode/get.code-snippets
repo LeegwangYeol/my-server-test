@@ -1,0 +1,38 @@
+{
+    "LLAMI GET API 템플릿": {
+        "prefix": "llami-get",
+        "body": [
+            "import { Elysia, t } from \"elysia\";",
+            "",
+            "export const v1$1 = async (app: Elysia<\"/v1/$2\">) => {",
+            "  app.get(",
+            "    \"/$3\",",
+            "    async ({ }) => {",
+            "      $5",
+            "      return {",
+            "        success: true,",
+            "        message: \"\",",
+            "      };",
+            "    },",
+            "    {",
+            "      detail: {",
+            "        tags: [$4],",
+            "        description: \"$5\",",
+            "      },",
+            "      response: t.Object({",
+            "        success: t.Boolean({",
+            "          description: \"Success\",",
+            "          error: \"Success is required\",",
+            "        }),",
+            "        message: t.Optional(t.String({",
+            "          description: \"Message\",",
+            "          error: \"Message is required\",",
+            "        })),",
+            "      }),",
+            "    }",
+            "  );",
+            "};",
+        ],
+        "description": "LLAMI 서비스에서 GET 형태의 API 를 작성시 주로 사용되는 구조입니다."
+    }
+}
