@@ -1,5 +1,5 @@
 {
-  "name": "llami-api",
+  "name": "my-api",
   "version": "1.0.50",
   "scripts": {
     "dev": "bun run --watch src/index.ts",
@@ -17,7 +17,6 @@
     "@langchain/community": "^0.3.12",
     "@langchain/core": "^0.3.17",
     "@langchain/textsplitters": "^0.1.0",
-    "@llami/gpt-torch": "^3.0.5",
     "@supabase/supabase-js": "^2.43.4",
     "chalk": "^5.3.0",
     "dotenv": "^16.4.5",
