@@ -1,10 +1,14 @@
 {
   "name": "my-api",
   "version": "1.0.50",
+  "type": "module",
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "scripts": {
     "dev": "bun run --watch src/index.ts",
-    "build": "bun build src/serverless.ts --target=node --outdir=dist",
-    "start": "NODE_ENV=production bun src/index.ts",
+    "build": "tsc",
+    "start": "NODE_ENV=production node dist/index.js",
     "test": "bun test",
     "introspection": "npx supabase gen types typescript --schema public --project-id pddzchdkbwhhbtpmagsx > lib/supabase/database.types.ts",
     "prepare": "husky"

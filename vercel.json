@@ -7,7 +7,9 @@
       "config": {
         "includeFiles": ["lib/**", "src/**"],
         "nodeVersion": "18.x",
-        "maxLambdaSize": "50mb"
+        "maxLambdaSize": "50mb",
+        "installCommand": "npm install",
+        "buildCommand": "npm run build"
       }
     }
   ],
