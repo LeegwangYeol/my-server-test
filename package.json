@@ -1,9 +1,8 @@
 {
   "name": "my-api",
   "version": "1.0.50",
-  "type": "module",
   "engines": {
-    "node": ">=18.0.0"
+    "node": "18.x"
   },
   "scripts": {
     "dev": "bun run --watch src/index.ts",
