@@ -1,9 +1,4 @@
 {
   "version": 2,
-  "framework": null,
-  "functions": {
-    "api/*.js": {
-      "runtime": "nodejs18.x"
-    }
-  }
+  "framework": null
 }
