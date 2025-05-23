@@ -3,9 +3,10 @@
   "builds": [
     {
       "src": "src/index.ts",
-      "use": "@vercel/node",
+      "use": "@vercel/node@2.15.3",
       "config": {
-        "includeFiles": ["lib/**", "src/**"]
+        "includeFiles": ["lib/**", "src/**"],
+        "nodeVersion": "18.x"
       }
     }
   ],
@@ -18,8 +19,11 @@
   "framework": null,
   "functions": {
     "src/index.ts": {
-      "memory": 1024,
-      "maxDuration": 10
+      "memory": 3008,
+      "maxDuration": 60
     }
+  },
+  "env": {
+    "NODE_ENV": "production"
   }
 }
