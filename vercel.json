@@ -1,4 +1,6 @@
 {
   "version": 2,
-  "framework": null
+  "framework": null,
+  "buildCommand": false,
+  "routes": [{ "src": "/api/(.*)", "dest": "/api/$1" }]
 }
