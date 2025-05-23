@@ -2,7 +2,7 @@
   "version": 2,
   "builds": [
     {
-      "src": "src/index.ts",
+      "src": "src/serverless.ts",
       "use": "@vercel/node@2.15.3",
       "config": {
         "includeFiles": ["lib/**", "src/**"],
@@ -13,12 +13,12 @@
   "routes": [
     {
       "src": "/(.*)",
-      "dest": "src/index.ts"
+      "dest": "src/serverless.ts"
     }
   ],
   "framework": null,
   "functions": {
-    "src/index.ts": {
+    "src/serverless.ts": {
       "memory": 3008,
       "maxDuration": 60
     }
