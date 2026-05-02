@@ -1,6 +1,13 @@
 {
-  "version": 2,
-  "framework": null,
-  "buildCommand": false,
-  "routes": [{ "src": "/api/(.*)", "dest": "/api/$1" }]
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "installCommand": "npm install --legacy-peer-deps",
+  "rewrites": [
+    { "source": "/(.*)", "destination": "/api" }
+  ],
+  "functions": {
+    "api/index.ts": {
+      "maxDuration": 60,
+      "memory": 1024
+    }
+  }
 }

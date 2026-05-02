@@ -1,0 +1,9 @@
+.git
+.husky
+.vscode
+scripts
+bun.lockb
+dist
+README.md
+.editorconfig
+.prettierrc
