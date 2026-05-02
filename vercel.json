@@ -1,7 +1,8 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "framework": null,
-  "buildCommand": "npx --yes esbuild lambda-src/handler.ts --bundle --platform=node --target=node20 --format=cjs --outfile=api/index.js --log-level=info",
+  "buildCommand": "npx --yes esbuild lambda-src/handler.ts --bundle --platform=node --target=node20 --format=cjs --outfile=api/index.js --log-level=info && mkdir -p public",
+  "outputDirectory": "public",
   "rewrites": [
     { "source": "/(.*)", "destination": "/api" }
   ]
