@@ -47,6 +47,7 @@
     "@types/google-libphonenumber": "^7.4.30",
     "@types/jsonwebtoken": "^9.0.7",
     "bun-types": "^1.1.33",
+    "esbuild": "^0.28.0",
     "husky": "^9.1.6",
     "lint-staged": "^15.2.10",
     "prettier": "^3.3.3"
