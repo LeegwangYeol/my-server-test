@@ -1,8 +1,8 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "framework": null,
-  "buildCommand": null,
-  "outputDirectory": null,
+  "buildCommand": "echo \"skip project build — @vercel/node compiles api/*\"",
+  "outputDirectory": ".",
   "rewrites": [
     { "source": "/(.*)", "destination": "/api" }
   ]
