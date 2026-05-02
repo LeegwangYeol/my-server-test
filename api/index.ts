@@ -1,13 +1,11 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { createApp } from "../src/app";
 
-let appPromise: Promise<any> | null = null;
+let appPromise: ReturnType<typeof createApp> | null = null;
 
 const getApp = () => {
   if (!appPromise) {
-    appPromise = (async () => {
-      const { createApp } = await import("../src/app");
-      return createApp(true);
-    })().catch((err) => {
+    appPromise = createApp(true).catch((err) => {
       appPromise = null;
       throw err;
     });
