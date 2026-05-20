@@ -68,9 +68,10 @@ export const v1AuthCreate = (app: any) => {
     )
     .get(
       "/auth/confirm",
-      async ({ query }: { query: any }) => {
+      async ({ query, set }: { query: any; set: any }) => {
         const { code, state } = query;
         if (!code || !state) {
+          set.status = 400;
           return {
             success: false,
             message: "인증 코드 또는 상태 정보가 없습니다.",
@@ -100,6 +101,7 @@ export const v1AuthCreate = (app: any) => {
           };
         } catch (error: any) {
           console.error("YouTube OAuth error:", error);
+          set.status = 400;
           return {
             success: false,
             message: error?.message || "인증 처리 중 오류가 발생했습니다.",
