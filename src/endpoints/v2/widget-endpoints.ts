@@ -119,7 +119,17 @@ export const v2WidgetEndpoints = async (app: any) => {
                   },
                   { role: "user", content: message },
                 ];
-                for await (const token of provider.stream({ messages })) {
+                // OpenRouter free credits cap responses pretty tight, so
+                // we ask for a small reply by default. Override with
+                // LLM_MAX_TOKENS when running on a paid tier.
+                const maxTokens = Number.parseInt(
+                  process.env.LLM_MAX_TOKENS ?? "512",
+                  10,
+                );
+                for await (const token of provider.stream({
+                  messages,
+                  maxTokens: Number.isFinite(maxTokens) ? maxTokens : 512,
+                })) {
                   sendChunk(token);
                 }
               } else {
