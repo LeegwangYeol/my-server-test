@@ -1,2 +1,2 @@
-bun test
+# Run lint-staged. Tests are run in CI, not on every commit.
 bunx lint-staged
