@@ -1,6 +1,7 @@
 import { Elysia } from "elysia";
 import { swagger } from "@elysiajs/swagger";
 import { v1Endpoints } from "./endpoints/v1/v1-endpoints";
+import { v2WidgetEndpoints } from "./endpoints/v2/widget-endpoints";
 import { healthzEndpoint } from "./endpoints/healthz";
 import { cors } from "@elysiajs/cors";
 
@@ -45,6 +46,8 @@ export const createApp = async (serverless = false) => {
   // 타입 체크 비활성화
   // @ts-ignore
   v1Endpoints(app);
+  // @ts-ignore
+  v2WidgetEndpoints(app);
   // @ts-ignore
   healthzEndpoint(app);
 
