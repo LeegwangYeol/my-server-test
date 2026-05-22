@@ -105,6 +105,76 @@ export async function appendMessage(
   }
 }
 
+/* ─── admin / sessions panel ───────────────────────────────────────── */
+
+export interface ThreadSummary {
+  id: string;
+  widget_id: string;
+  created_at: string;
+  updated_at: string;
+  message_count: number;
+  last_user_message: string | null;
+}
+
+/**
+ * Threads for a given widget, newest-updated first. Adds a derived
+ * message_count + a peek at the latest user turn for previews in a
+ * sessions panel.
+ */
+export async function listThreads(
+  widgetId: string,
+  limit = 100,
+): Promise<ThreadSummary[]> {
+  const { data: threads, error } = await supabaseClient
+    // @ts-expect-error — see createThread
+    .from("chat_thread")
+    .select("id, widget_id, created_at, updated_at")
+    .eq("widget_id", widgetId)
+    .eq("is_deleted", false)
+    .order("updated_at", { ascending: false })
+    .limit(limit);
+  if (error) {
+    console.error("[chat-store] listThreads failed:", error.message);
+    return [];
+  }
+  const rows = (threads as ChatThreadRow[]) ?? [];
+  if (rows.length === 0) return [];
+
+  // Fetch counts + last user message per thread in a single round trip.
+  const ids = rows.map((r) => r.id);
+  const { data: msgs } = await supabaseClient
+    // @ts-expect-error — see createThread
+    .from("chat_message")
+    .select("thread_id, role, content, created_at")
+    .in("thread_id", ids)
+    .order("created_at", { ascending: false });
+
+  const byThread = new Map<
+    string,
+    { count: number; lastUser: string | null }
+  >();
+  for (const m of (msgs as ChatMessageRow[]) ?? []) {
+    const entry = byThread.get(m.thread_id) ?? { count: 0, lastUser: null };
+    entry.count += 1;
+    if (m.role === "user" && entry.lastUser === null) {
+      entry.lastUser = m.content;
+    }
+    byThread.set(m.thread_id, entry);
+  }
+
+  return rows.map((r) => {
+    const entry = byThread.get(r.id);
+    return {
+      id: r.id,
+      widget_id: r.widget_id,
+      created_at: r.created_at,
+      updated_at: r.updated_at,
+      message_count: entry?.count ?? 0,
+      last_user_message: entry?.lastUser ?? null,
+    };
+  });
+}
+
 /* ─── widget-facing message shape ──────────────────────────────────── */
 
 /**

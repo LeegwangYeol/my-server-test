@@ -5,6 +5,7 @@ import {
   createThread,
   getThread,
   listMessages,
+  listThreads,
   toWidgetMessage,
 } from "../../../lib/chat-store";
 
@@ -237,6 +238,63 @@ export const v2WidgetEndpoints = async (app: any) => {
           tags: ["API"],
           description: "Stream a chat reply (SSE) + persist both turns",
         },
+      },
+    );
+
+    // ──────────────────────────────────────────────────────────────────
+    // POST /v2/admin/threads — list sessions for a widget
+    // POST /v2/admin/messages — list messages for one thread
+    //
+    // Read-only sessions panel for the dev playground. UUID-based
+    // identification only; do not surface in production hosts until a
+    // proper admin auth layer is added.
+    // ──────────────────────────────────────────────────────────────────
+    app.post(
+      "/admin/threads",
+      async ({ body }: { body: { widgetId?: string } }) => {
+        const widgetId = body?.widgetId?.trim() ?? "";
+        if (!widgetId) return { success: false, threads: [] };
+        const threads = await listThreads(widgetId);
+        return { success: true, threads };
+      },
+      {
+        body: t.Object({ widgetId: t.Optional(t.String()) }),
+        detail: { tags: ["API"], description: "Sessions for a widget" },
+      },
+    );
+
+    app.post(
+      "/admin/messages",
+      async ({ body }: { body: { widgetId?: string; threadId?: string } }) => {
+        const widgetId = body?.widgetId?.trim() ?? "";
+        const threadId = body?.threadId?.trim() ?? "";
+        if (!widgetId || !threadId) {
+          return { success: false, messages: [] };
+        }
+        const thread = await getThread(threadId, widgetId);
+        if (!thread) return { success: false, messages: [] };
+        const rows = await listMessages(threadId, 500);
+        return {
+          success: true,
+          thread: {
+            id: thread.id,
+            widget_id: thread.widget_id,
+            created_at: thread.created_at,
+            updated_at: thread.updated_at,
+          },
+          messages: rows.map((r) => ({
+            role: r.role,
+            content: r.content,
+            created_at: r.created_at,
+          })),
+        };
+      },
+      {
+        body: t.Object({
+          widgetId: t.Optional(t.String()),
+          threadId: t.Optional(t.String()),
+        }),
+        detail: { tags: ["API"], description: "Messages for a thread" },
       },
     );
 
