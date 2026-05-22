@@ -39,7 +39,7 @@ export const v2WidgetEndpoints = async (app: any) => {
         let messages: { role: string; content: string }[] = [];
 
         if (threadId) {
-          const existing = await getThread(threadId);
+          const existing = await getThread(threadId, widgetId);
           if (existing) {
             const rows = await listMessages(threadId);
             messages = rows.map(toWidgetMessage);
@@ -127,7 +127,7 @@ export const v2WidgetEndpoints = async (app: any) => {
 
         // Make sure we have a thread on file before persisting anything.
         if (threadId) {
-          const existing = await getThread(threadId);
+          const existing = await getThread(threadId, widgetId);
           if (!existing) threadId = "";
         }
         if (!threadId) {
@@ -170,9 +170,12 @@ export const v2WidgetEndpoints = async (app: any) => {
               if (provider) {
                 const systemContent =
                   process.env.LLM_SYSTEM_PROMPT ??
-                  "You are a helpful assistant embedded in a website. " +
-                    "Reply in the user's language. Keep responses concise " +
-                    "and accurate. When unsure, say so.";
+                  [
+                    "You are a helpful assistant embedded in a website.",
+                    "Reply in the user's language.",
+                    "Keep every answer to 1–2 short sentences. Never use bullet lists, headings, or long explanations unless the user explicitly asks for detail.",
+                    "If you don't know, say so in one sentence — do not guess.",
+                  ].join(" ");
 
                 // Build context from persisted history (already includes the
                 // user message we just wrote above).

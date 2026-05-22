@@ -45,16 +45,25 @@ export async function createThread(widgetId: string): Promise<string | null> {
   return (data as { id: string } | null)?.id ?? null;
 }
 
+/**
+ * Look up a thread. When widgetId is passed we also require it to match
+ * the row's widget_id, so another widget can't read someone else's
+ * conversation by guessing a UUID.
+ */
 export async function getThread(
   threadId: string,
+  widgetId?: string,
 ): Promise<ChatThreadRow | null> {
-  const { data, error } = await supabaseClient
+  let query = supabaseClient
     // @ts-expect-error — see createThread
     .from("chat_thread")
     .select("*")
     .eq("id", threadId)
-    .eq("is_deleted", false)
-    .maybeSingle();
+    .eq("is_deleted", false);
+  if (widgetId) {
+    query = query.eq("widget_id", widgetId);
+  }
+  const { data, error } = await query.maybeSingle();
   if (error) {
     console.error("[chat-store] getThread failed:", error.message);
     return null;
