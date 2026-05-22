@@ -6,6 +6,7 @@ import {
   getThread,
   listMessages,
   listThreads,
+  listWidgets,
   toWidgetMessage,
 } from "../../../lib/chat-store";
 
@@ -249,6 +250,20 @@ export const v2WidgetEndpoints = async (app: any) => {
     // identification only; do not surface in production hosts until a
     // proper admin auth layer is added.
     // ──────────────────────────────────────────────────────────────────
+    app.post(
+      "/admin/widgets",
+      async () => {
+        const widgets = await listWidgets();
+        return { success: true, widgets };
+      },
+      {
+        detail: {
+          tags: ["API"],
+          description: "Distinct widget IDs that have threads",
+        },
+      },
+    );
+
     app.post(
       "/admin/threads",
       async ({ body }: { body: { widgetId?: string } }) => {

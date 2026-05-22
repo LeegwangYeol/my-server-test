@@ -107,6 +107,55 @@ export async function appendMessage(
 
 /* ─── admin / sessions panel ───────────────────────────────────────── */
 
+export interface WidgetSummary {
+  widget_id: string;
+  thread_count: number;
+  latest_updated_at: string;
+}
+
+/**
+ * Distinct widget_ids that have at least one thread, newest activity first.
+ *
+ * supabase-js doesn't support GROUP BY directly without a SQL view or RPC,
+ * so we pull recent thread rows (capped) and aggregate in JS. Good enough
+ * for an admin panel; switch to a Postgres view if you ever hit thousands
+ * of widgets.
+ */
+export async function listWidgets(limit = 1000): Promise<WidgetSummary[]> {
+  const { data, error } = await supabaseClient
+    // @ts-expect-error — see createThread
+    .from("chat_thread")
+    .select("widget_id, updated_at")
+    .eq("is_deleted", false)
+    .order("updated_at", { ascending: false })
+    .limit(limit);
+  if (error) {
+    console.error("[chat-store] listWidgets failed:", error.message);
+    return [];
+  }
+  const rows = (data as { widget_id: string; updated_at: string }[]) ?? [];
+
+  const byWidget = new Map<string, WidgetSummary>();
+  for (const r of rows) {
+    const key = r.widget_id ?? "";
+    const entry =
+      byWidget.get(key) ??
+      ({
+        widget_id: key,
+        thread_count: 0,
+        latest_updated_at: r.updated_at,
+      } as WidgetSummary);
+    entry.thread_count += 1;
+    if (r.updated_at > entry.latest_updated_at) {
+      entry.latest_updated_at = r.updated_at;
+    }
+    byWidget.set(key, entry);
+  }
+  return Array.from(byWidget.values()).sort((a, b) =>
+    b.latest_updated_at.localeCompare(a.latest_updated_at),
+  );
+}
+
 export interface ThreadSummary {
   id: string;
   widget_id: string;
