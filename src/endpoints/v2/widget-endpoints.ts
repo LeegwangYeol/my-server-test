@@ -1,17 +1,19 @@
 import { t } from "elysia";
+import { createLLMProvider, type ChatMessage } from "../../../lib/llm";
 
 /**
- * v2 widget endpoints — minimal demo backend for the embeddable chat
- * widget. Replace the canned responses below with a real DB lookup +
- * LLM stream when wiring to production.
+ * v2 widget endpoints — backend for the embeddable chat widget.
  *
  *   POST /v2/widget/view          → tenant config keyed by widgetId
  *   POST /v2/widget/create-thread → fresh thread id
  *   POST /v2/ask                  → SSE stream of token chunks
  *
  * The widget's SSE consumer (fetch-event-stream) reads raw `data:`
- * lines and decodes %20 → space, %0a → newline. Encode tokens here
- * the same way.
+ * lines and decodes %20 → space, %0a → newline. We encode the same way
+ * when forwarding LLM tokens.
+ *
+ * /v2/ask uses an LLM provider when LLM_API_KEY is set (see lib/llm),
+ * and falls back to a small canned response set otherwise.
  */
 export const v2WidgetEndpoints = async (app: any) => {
   app.group("/v2", (app: any) => {
@@ -74,14 +76,12 @@ export const v2WidgetEndpoints = async (app: any) => {
     );
 
     // ──────────────────────────────────────────────────────────────────
-    // POST /v2/ask  — SSE
+    // POST /v2/ask  — LLM stream (or canned fallback)
     // ──────────────────────────────────────────────────────────────────
     app.post(
       "/ask",
       ({ body, set }: any) => {
         const message: string = body?.message ?? "";
-        const reply = pickReply(message);
-        const tokens = chunkText(reply);
 
         set.headers["Content-Type"] = "text/event-stream";
         set.headers["Cache-Control"] = "no-cache, no-transform";
@@ -90,15 +90,56 @@ export const v2WidgetEndpoints = async (app: any) => {
         const stream = new ReadableStream({
           async start(controller) {
             const enc = new TextEncoder();
-            for (const tk of tokens) {
-              const safe = tk.replace(/ /g, "%20").replace(/\n/g, "%0a");
+            const sendChunk = (text: string) => {
+              const safe = text.replace(/ /g, "%20").replace(/\n/g, "%0a");
               controller.enqueue(enc.encode(`data: ${safe}\n\n`));
-              await sleep(40);
+            };
+
+            let provider;
+            try {
+              provider = createLLMProvider();
+            } catch (err) {
+              const msg = err instanceof Error ? err.message : String(err);
+              sendChunk(`[LLM 설정 오류] ${msg}`);
+              controller.enqueue(enc.encode(`data: [DONE]\n\n`));
+              controller.close();
+              return;
             }
-            controller.enqueue(enc.encode(`data: [DONE]\n\n`));
-            controller.close();
+
+            try {
+              if (provider) {
+                const messages: ChatMessage[] = [
+                  {
+                    role: "system",
+                    content:
+                      process.env.LLM_SYSTEM_PROMPT ??
+                      "You are a helpful assistant embedded in a website. " +
+                        "Reply in the user's language. Keep responses concise " +
+                        "and accurate. When unsure, say so.",
+                  },
+                  { role: "user", content: message },
+                ];
+                for await (const token of provider.stream({ messages })) {
+                  sendChunk(token);
+                }
+              } else {
+                for (const tk of chunkText(pickReply(message))) {
+                  sendChunk(tk);
+                  await sleep(40);
+                }
+              }
+            } catch (err) {
+              const msg = err instanceof Error ? err.message : String(err);
+              // Surface the provider error verbatim so the widget shows
+              // something actionable instead of going silent.
+              sendChunk(`\n[LLM error] ${msg}`);
+            } finally {
+              controller.enqueue(enc.encode(`data: [DONE]\n\n`));
+              controller.close();
+            }
           },
         });
+
         return new Response(stream);
       },
       {
@@ -117,16 +158,15 @@ export const v2WidgetEndpoints = async (app: any) => {
   });
 };
 
-/* ─── helpers ──────────────────────────────────────────────────────── */
+/* ─── canned-reply fallback (used when LLM_API_KEY is missing) ───────── */
 
 function pickReply(message: string): string {
-  if (/안녕|hi|hello/i.test(message))
-    return "안녕하세요! 무엇을 도와드릴까요?";
+  if (/안녕|hi|hello/i.test(message)) return "안녕하세요! 무엇을 도와드릴까요?";
   if (/기능|뭐 해|뭐할/.test(message))
-    return "텍스트로 자유롭게 질문하시면 답변해 드려요. 지금은 데모 응답만 가능합니다.";
+    return "텍스트로 자유롭게 질문하시면 답변해 드려요. (지금은 LLM이 연결되지 않은 데모 응답이에요.)";
   if (/추천/.test(message))
     return "어떤 분야의 추천을 원하시나요? 좀 더 구체적으로 알려주시면 더 잘 도와드릴 수 있어요.";
-  return `"${message.slice(0, 40)}" 에 대해 답변드릴게요. (지금은 데모 백엔드라 정해진 응답만 가능합니다. 실 운영 시 LLM이 연결되어 자유 대화가 가능합니다.)`;
+  return `"${message.slice(0, 40)}" 에 대해 답변드릴게요. (LLM_API_KEY 미설정 — .env에 키를 추가하면 진짜 LLM 응답으로 전환됩니다.)`;
 }
 
 function chunkText(text: string): string[] {
