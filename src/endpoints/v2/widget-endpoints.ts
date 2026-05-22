@@ -1,19 +1,27 @@
 import { t } from "elysia";
 import { createLLMProvider, type ChatMessage } from "../../../lib/llm";
+import {
+  appendMessage,
+  createThread,
+  getThread,
+  listMessages,
+  toWidgetMessage,
+} from "../../../lib/chat-store";
 
 /**
  * v2 widget endpoints — backend for the embeddable chat widget.
  *
- *   POST /v2/widget/view          → tenant config keyed by widgetId
- *   POST /v2/widget/create-thread → fresh thread id
- *   POST /v2/ask                  → SSE stream of token chunks
+ *   POST /v2/widget/view          → tenant config + restored messages
+ *   POST /v2/widget/create-thread → fresh thread id (UUID, persisted)
+ *   POST /v2/ask                  → SSE stream + persist user + assistant
  *
- * The widget's SSE consumer (fetch-event-stream) reads raw `data:`
- * lines and decodes %20 → space, %0a → newline. We encode the same way
- * when forwarding LLM tokens.
- *
- * /v2/ask uses an LLM provider when LLM_API_KEY is set (see lib/llm),
- * and falls back to a small canned response set otherwise.
+ * Conversation memory:
+ *   - The widget keeps a thread_id in localStorage.
+ *   - On every mount it POSTs to /v2/widget/view with that thread_id, and we
+ *     reply with the full message history so the panel rehydrates.
+ *   - /v2/ask: persists the user message, fetches prior history, hands it to
+ *     the LLM as conversation context, streams the reply, then persists the
+ *     assistant message at the end.
  */
 export const v2WidgetEndpoints = async (app: any) => {
   app.group("/v2", (app: any) => {
@@ -22,12 +30,34 @@ export const v2WidgetEndpoints = async (app: any) => {
     // ──────────────────────────────────────────────────────────────────
     app.post(
       "/widget/view",
-      ({ body }: { body: { widgetId?: string } }) => {
+      async ({ body }: { body: { widgetId?: string; threadId?: string } }) => {
         const widgetId = body?.widgetId ?? "";
+
+        // Resolve thread: use the one the widget sent if it exists and isn't
+        // deleted, otherwise mint a fresh one.
+        let threadId = body?.threadId ?? "";
+        let messages: { role: string; content: string }[] = [];
+
+        if (threadId) {
+          const existing = await getThread(threadId);
+          if (existing) {
+            const rows = await listMessages(threadId);
+            messages = rows.map(toWidgetMessage);
+          } else {
+            // The id the widget held is gone (table wiped, expired, etc.) —
+            // start over so we don't keep handing out a dangling reference.
+            threadId = "";
+          }
+        }
+        if (!threadId) {
+          threadId = (await createThread(widgetId)) ?? "";
+        }
+
         return {
           success: true,
-          thread_id: `thread_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+          thread_id: threadId,
           remain_limit: 999,
+          messages, // ← widget will hydrate state.messages from this
           widget: {
             name: "AI 도우미",
             theme: "noir",
@@ -55,8 +85,14 @@ export const v2WidgetEndpoints = async (app: any) => {
         };
       },
       {
-        body: t.Object({ widgetId: t.Optional(t.String()) }),
-        detail: { tags: ["API"], description: "Get widget config" },
+        body: t.Object({
+          widgetId: t.Optional(t.String()),
+          threadId: t.Optional(t.String()),
+        }),
+        detail: {
+          tags: ["API"],
+          description: "Widget config + restored thread messages",
+        },
       },
     );
 
@@ -65,23 +101,46 @@ export const v2WidgetEndpoints = async (app: any) => {
     // ──────────────────────────────────────────────────────────────────
     app.post(
       "/widget/create-thread",
-      () => {
-        const threadId = `thread_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      async ({ body }: { body: { widgetId?: string } }) => {
+        const widgetId = body?.widgetId ?? "";
+        const threadId = (await createThread(widgetId)) ?? "";
         return { success: true, threadId, thread_id: threadId };
       },
       {
         body: t.Optional(t.Object({ widgetId: t.Optional(t.String()) })),
-        detail: { tags: ["API"], description: "Allocate a new thread id" },
+        detail: {
+          tags: ["API"],
+          description: "Allocate a new persisted thread id",
+        },
       },
     );
 
     // ──────────────────────────────────────────────────────────────────
-    // POST /v2/ask  — LLM stream (or canned fallback)
+    // POST /v2/ask  — LLM stream with persistent history
     // ──────────────────────────────────────────────────────────────────
     app.post(
       "/ask",
-      ({ body, set }: any) => {
-        const message: string = body?.message ?? "";
+      async ({ body, set }: any) => {
+        const widgetId: string = body?.widgetId ?? "";
+        const userMessage: string = body?.message ?? "";
+        let threadId: string = body?.threadId ?? "";
+
+        // Make sure we have a thread on file before persisting anything.
+        if (threadId) {
+          const existing = await getThread(threadId);
+          if (!existing) threadId = "";
+        }
+        if (!threadId) {
+          threadId = (await createThread(widgetId)) ?? "";
+        }
+
+        // Persist the incoming user message and capture history up to this
+        // point. We log the user message first so it shows up in subsequent
+        // history fetches even if the LLM call below crashes.
+        if (threadId && userMessage) {
+          await appendMessage(threadId, "user", userMessage);
+        }
+        const history = threadId ? await listMessages(threadId) : [];
 
         set.headers["Content-Type"] = "text/event-stream";
         set.headers["Cache-Control"] = "no-cache, no-transform";
@@ -106,22 +165,25 @@ export const v2WidgetEndpoints = async (app: any) => {
               return;
             }
 
+            let assistantBuffer = "";
             try {
               if (provider) {
+                const systemContent =
+                  process.env.LLM_SYSTEM_PROMPT ??
+                  "You are a helpful assistant embedded in a website. " +
+                    "Reply in the user's language. Keep responses concise " +
+                    "and accurate. When unsure, say so.";
+
+                // Build context from persisted history (already includes the
+                // user message we just wrote above).
                 const messages: ChatMessage[] = [
-                  {
-                    role: "system",
-                    content:
-                      process.env.LLM_SYSTEM_PROMPT ??
-                      "You are a helpful assistant embedded in a website. " +
-                        "Reply in the user's language. Keep responses concise " +
-                        "and accurate. When unsure, say so.",
-                  },
-                  { role: "user", content: message },
+                  { role: "system", content: systemContent },
+                  ...history.map((m) => ({
+                    role: m.role,
+                    content: m.content,
+                  })),
                 ];
-                // OpenRouter free credits cap responses pretty tight, so
-                // we ask for a small reply by default. Override with
-                // LLM_MAX_TOKENS when running on a paid tier.
+
                 const maxTokens = Number.parseInt(
                   process.env.LLM_MAX_TOKENS ?? "512",
                   10,
@@ -130,20 +192,28 @@ export const v2WidgetEndpoints = async (app: any) => {
                   messages,
                   maxTokens: Number.isFinite(maxTokens) ? maxTokens : 512,
                 })) {
+                  assistantBuffer += token;
                   sendChunk(token);
                 }
               } else {
-                for (const tk of chunkText(pickReply(message))) {
+                const fallback = pickReply(userMessage);
+                for (const tk of chunkText(fallback)) {
+                  assistantBuffer += tk;
                   sendChunk(tk);
                   await sleep(40);
                 }
               }
             } catch (err) {
               const msg = err instanceof Error ? err.message : String(err);
-              // Surface the provider error verbatim so the widget shows
-              // something actionable instead of going silent.
               sendChunk(`\n[LLM error] ${msg}`);
             } finally {
+              // Persist the assistant turn no matter how the stream ended,
+              // as long as we actually produced text.
+              if (threadId && assistantBuffer.trim()) {
+                appendMessage(threadId, "assistant", assistantBuffer).catch(
+                  (e) => console.error("[v2/ask] persist assistant failed:", e),
+                );
+              }
               controller.enqueue(enc.encode(`data: [DONE]\n\n`));
               controller.close();
             }
@@ -160,7 +230,10 @@ export const v2WidgetEndpoints = async (app: any) => {
           browserInfo: t.Optional(t.Any()),
           search: t.Optional(t.Any()),
         }),
-        detail: { tags: ["API"], description: "Stream a chat reply (SSE)" },
+        detail: {
+          tags: ["API"],
+          description: "Stream a chat reply (SSE) + persist both turns",
+        },
       },
     );
 
