@@ -95,8 +95,8 @@ export async function listWidgetsRegistered(): Promise<WidgetRow[]> {
  */
 export async function upsertWidget(
   input: WidgetUpsertInput,
-): Promise<WidgetRow | null> {
-  if (!input.id) return null;
+): Promise<{ row: WidgetRow | null; error?: string }> {
+  if (!input.id) return { row: null, error: "id required" };
 
   const patch: Record<string, unknown> = { id: input.id, is_deleted: false };
   if (input.name !== undefined) patch.name = input.name;
@@ -117,9 +117,9 @@ export async function upsertWidget(
     .single();
   if (error) {
     console.error("[widget-store] upsertWidget failed:", error.message);
-    return null;
+    return { row: null, error: error.message };
   }
-  return normalizeRow(data);
+  return { row: normalizeRow(data) };
 }
 
 /** Soft-delete (sets is_deleted = true). Hard delete is intentionally not exposed. */

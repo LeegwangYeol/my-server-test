@@ -310,7 +310,7 @@ export const v2WidgetEndpoints = async (app: any) => {
       async ({ body }: { body: any }) => {
         const id = (body?.id ?? "").trim();
         if (!id) return { success: false, error: "id required" };
-        const row = await upsertWidget({
+        const result = await upsertWidget({
           id,
           name: body?.name,
           theme: body?.theme,
@@ -321,7 +321,11 @@ export const v2WidgetEndpoints = async (app: any) => {
             ? body.suggested_questions
             : undefined,
         });
-        return { success: !!row, widget: row };
+        return {
+          success: !!result.row,
+          widget: result.row,
+          error: result.error,
+        };
       },
       {
         body: t.Object({
