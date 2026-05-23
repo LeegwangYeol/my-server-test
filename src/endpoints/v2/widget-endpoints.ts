@@ -6,9 +6,16 @@ import {
   getThread,
   listMessages,
   listThreads,
-  listWidgets,
+  listWidgets as listWidgetsByActivity,
   toWidgetMessage,
 } from "../../../lib/chat-store";
+import {
+  deleteWidget,
+  getWidget,
+  listWidgetsRegistered,
+  upsertWidget,
+  type WidgetRow,
+} from "../../../lib/widget-store";
 
 /**
  * v2 widget endpoints — backend for the embeddable chat widget.
@@ -55,35 +62,18 @@ export const v2WidgetEndpoints = async (app: any) => {
           threadId = (await createThread(widgetId)) ?? "";
         }
 
+        // Pull persona from the widget master table if it exists; otherwise
+        // fall back to the hardcoded default so unregistered embeds keep
+        // working.
+        const master = widgetId ? await getWidget(widgetId) : null;
+        const persona = renderPersona(master, widgetId);
+
         return {
           success: true,
           thread_id: threadId,
           remain_limit: 999,
           messages, // ← widget will hydrate state.messages from this
-          widget: {
-            name: "AI 도우미",
-            theme: "noir",
-            animation_theme: null,
-            welcome_message: "안녕하세요! 무엇이든 편하게 물어봐 주세요.",
-            description: "온라인 · 보통 몇 초 안에 답해요",
-            questions: [
-              "어떤 기능을 쓸 수 있나요?",
-              "지금 인기 있는 추천을 알려주세요",
-              "방금 답변, 좀 더 자세히 설명해주세요",
-              "다른 예시도 보여주세요",
-            ],
-            widget_message_title: null,
-            widget_message_content: null,
-            widget_margin_bottom: 24,
-            widget_margin_right: 24,
-            widget_auto_open: false,
-            payment_type: "",
-            font_family: null,
-            icon: null,
-            accept_contact: false,
-            avatar_src: null,
-            widget_id: widgetId,
-          },
+          widget: persona,
         };
       },
       {
@@ -170,8 +160,14 @@ export const v2WidgetEndpoints = async (app: any) => {
             let assistantBuffer = "";
             try {
               if (provider) {
+                // Widget-specific system prompt wins. Fall through to the
+                // env var, then to a tight default.
+                const widgetMaster = widgetId
+                  ? await getWidget(widgetId)
+                  : null;
                 const systemContent =
-                  process.env.LLM_SYSTEM_PROMPT ??
+                  widgetMaster?.system_prompt?.trim() ||
+                  process.env.LLM_SYSTEM_PROMPT ||
                   [
                     "You are a helpful assistant embedded in a website.",
                     "Reply in the user's language.",
@@ -250,17 +246,108 @@ export const v2WidgetEndpoints = async (app: any) => {
     // identification only; do not surface in production hosts until a
     // proper admin auth layer is added.
     // ──────────────────────────────────────────────────────────────────
+    /**
+     * Returns both registered widgets (widget master rows) and unregistered
+     * widget_ids that exist only as activity in chat_thread, so the admin
+     * panel can show everything in one list with a `registered` flag.
+     */
     app.post(
       "/admin/widgets",
       async () => {
-        const widgets = await listWidgets();
+        const [registered, byActivity] = await Promise.all([
+          listWidgetsRegistered(),
+          listWidgetsByActivity(),
+        ]);
+
+        const registeredMap = new Map<string, WidgetRow>();
+        for (const w of registered) registeredMap.set(w.id, w);
+
+        const activityMap = new Map<string, (typeof byActivity)[number]>();
+        for (const w of byActivity) activityMap.set(w.widget_id, w);
+
+        const ids = new Set<string>([
+          ...registeredMap.keys(),
+          ...activityMap.keys(),
+        ]);
+
+        const widgets = Array.from(ids).map((id) => {
+          const reg = registeredMap.get(id);
+          const act = activityMap.get(id);
+          return {
+            widget_id: id,
+            registered: !!reg,
+            name: reg?.name ?? null,
+            theme: reg?.theme ?? null,
+            description: reg?.description ?? null,
+            welcome_message: reg?.welcome_message ?? null,
+            system_prompt: reg?.system_prompt ?? null,
+            suggested_questions: reg?.suggested_questions ?? null,
+            thread_count: act?.thread_count ?? 0,
+            latest_updated_at:
+              act?.latest_updated_at ??
+              reg?.updated_at ??
+              new Date(0).toISOString(),
+          };
+        });
+
+        // Newest activity (or creation) first.
+        widgets.sort((a, b) =>
+          b.latest_updated_at.localeCompare(a.latest_updated_at),
+        );
+
         return { success: true, widgets };
       },
       {
         detail: {
           tags: ["API"],
-          description: "Distinct widget IDs that have threads",
+          description: "Widget master rows + chat_thread activity",
         },
+      },
+    );
+
+    app.post(
+      "/admin/widgets/upsert",
+      async ({ body }: { body: any }) => {
+        const id = (body?.id ?? "").trim();
+        if (!id) return { success: false, error: "id required" };
+        const row = await upsertWidget({
+          id,
+          name: body?.name,
+          theme: body?.theme,
+          description: body?.description,
+          welcome_message: body?.welcome_message,
+          system_prompt: body?.system_prompt,
+          suggested_questions: Array.isArray(body?.suggested_questions)
+            ? body.suggested_questions
+            : undefined,
+        });
+        return { success: !!row, widget: row };
+      },
+      {
+        body: t.Object({
+          id: t.String(),
+          name: t.Optional(t.String()),
+          theme: t.Optional(t.String()),
+          description: t.Optional(t.String()),
+          welcome_message: t.Optional(t.String()),
+          system_prompt: t.Optional(t.Union([t.String(), t.Null()])),
+          suggested_questions: t.Optional(t.Array(t.String())),
+        }),
+        detail: { tags: ["API"], description: "Create or update a widget" },
+      },
+    );
+
+    app.post(
+      "/admin/widgets/delete",
+      async ({ body }: { body: { id?: string } }) => {
+        const id = (body?.id ?? "").trim();
+        if (!id) return { success: false };
+        const ok = await deleteWidget(id);
+        return { success: ok };
+      },
+      {
+        body: t.Object({ id: t.String() }),
+        detail: { tags: ["API"], description: "Soft-delete a widget" },
       },
     );
 
@@ -316,6 +403,49 @@ export const v2WidgetEndpoints = async (app: any) => {
     return app;
   });
 };
+
+/**
+ * Build the `widget` block of the /v2/widget/view payload.
+ *
+ * When a master row exists we use those fields; missing fields and the
+ * unregistered case both fall through to a single hardcoded default so
+ * old embedded sites keep working.
+ */
+function renderPersona(master: WidgetRow | null, widgetId: string) {
+  const DEFAULT_NAME = "AI 도우미";
+  const DEFAULT_THEME = "noir";
+  const DEFAULT_DESCRIPTION = "온라인 · 보통 몇 초 안에 답해요";
+  const DEFAULT_WELCOME = "안녕하세요! 무엇이든 편하게 물어봐 주세요.";
+  const DEFAULT_QUESTIONS = [
+    "어떤 기능을 쓸 수 있나요?",
+    "지금 인기 있는 추천을 알려주세요",
+    "방금 답변, 좀 더 자세히 설명해주세요",
+    "다른 예시도 보여주세요",
+  ];
+
+  return {
+    name: master?.name?.trim() || DEFAULT_NAME,
+    theme: master?.theme || DEFAULT_THEME,
+    animation_theme: null,
+    welcome_message: master?.welcome_message?.trim() || DEFAULT_WELCOME,
+    description: master?.description?.trim() || DEFAULT_DESCRIPTION,
+    questions:
+      master && master.suggested_questions.length > 0
+        ? master.suggested_questions
+        : DEFAULT_QUESTIONS,
+    widget_message_title: null,
+    widget_message_content: null,
+    widget_margin_bottom: 24,
+    widget_margin_right: 24,
+    widget_auto_open: false,
+    payment_type: "",
+    font_family: null,
+    icon: null,
+    accept_contact: false,
+    avatar_src: null,
+    widget_id: widgetId,
+  };
+}
 
 /* ─── canned-reply fallback (used when LLM_API_KEY is missing) ───────── */
 
