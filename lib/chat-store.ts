@@ -28,6 +28,16 @@ export interface ChatThreadRow {
   updated_at: string;
   /** Optional operator-set label. Falls back to UUID prefix in the UI. */
   title: string | null;
+  /**
+   * Optional thread-level system prompt. When set, overrides the widget's
+   * default system_prompt for this session only.
+   */
+  system_prompt: string | null;
+  /**
+   * Optional reference knowledge prepended as a 2nd system message at
+   * /v2/ask time. Used for per-session RAG-style grounding.
+   */
+  context_text: string | null;
 }
 
 /* ─── threads ──────────────────────────────────────────────────────── */
@@ -167,6 +177,10 @@ export interface ThreadSummary {
   last_user_message: string | null;
   /** Operator-set label, NULL = "untitled". */
   title: string | null;
+  /** Thread-level system prompt override (NULL = inherit widget's). */
+  system_prompt: string | null;
+  /** Reference knowledge for this session, prepended to the LLM prompt. */
+  context_text: string | null;
 }
 
 /**
@@ -220,6 +234,12 @@ export async function listThreads(
 
   return rows.map((r) => {
     const entry = byThread.get(r.id);
+    // post-migration columns — coerce undefined → null for pre-migration rows
+    const extra = r as unknown as {
+      title?: string | null;
+      system_prompt?: string | null;
+      context_text?: string | null;
+    };
     return {
       id: r.id,
       widget_id: r.widget_id,
@@ -227,8 +247,9 @@ export async function listThreads(
       updated_at: r.updated_at,
       message_count: entry?.count ?? 0,
       last_user_message: entry?.lastUser ?? null,
-      // `title` may be missing on rows from before the migration — coerce to null.
-      title: (r as unknown as { title?: string | null }).title ?? null,
+      title: extra.title ?? null,
+      system_prompt: extra.system_prompt ?? null,
+      context_text: extra.context_text ?? null,
     };
   });
 }
@@ -254,6 +275,46 @@ export async function renameThread(
     .eq("is_deleted", false);
   if (error) {
     console.error("[chat-store] renameThread failed:", error.message);
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Patch the prompt-tuning fields for one thread. Only the fields that
+ * are passed (i.e. `!== undefined`) are touched, so the playground can
+ * save just the system_prompt without nuking the context_text and vice
+ * versa. Empty strings → null (= "inherit / no extra context").
+ */
+export async function updateThreadPrompt(
+  threadId: string,
+  widgetId: string,
+  patch: {
+    system_prompt?: string | null;
+    context_text?: string | null;
+  },
+): Promise<boolean> {
+  const update: Record<string, unknown> = {};
+  if (patch.system_prompt !== undefined) {
+    const v = patch.system_prompt?.trim() ?? "";
+    update.system_prompt = v.length > 0 ? v : null;
+  }
+  if (patch.context_text !== undefined) {
+    const v = patch.context_text?.trim() ?? "";
+    // Hard cap so a copy-pasted novel doesn't blow up the LLM context window.
+    update.context_text = v.length > 0 ? v.slice(0, 20000) : null;
+  }
+  if (Object.keys(update).length === 0) return true;
+
+  const { error } = await supabaseClient
+    // @ts-expect-error — see createThread
+    .from("chat_thread")
+    .update(update)
+    .eq("id", threadId)
+    .eq("widget_id", widgetId)
+    .eq("is_deleted", false);
+  if (error) {
+    console.error("[chat-store] updateThreadPrompt failed:", error.message);
     return false;
   }
   return true;

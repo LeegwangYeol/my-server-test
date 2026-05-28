@@ -11,6 +11,7 @@ import {
   listWidgets as listWidgetsByActivity,
   renameThread,
   toWidgetMessage,
+  updateThreadPrompt,
 } from "../../../lib/chat-store";
 import {
   deleteWidget,
@@ -163,12 +164,19 @@ export const v2WidgetEndpoints = async (app: any) => {
             let assistantBuffer = "";
             try {
               if (provider) {
-                // Widget-specific system prompt wins. Fall through to the
-                // env var, then to a tight default.
-                const widgetMaster = widgetId
-                  ? await getWidget(widgetId)
-                  : null;
+                // Resolution order for the system prompt:
+                //   thread.system_prompt (per-session override) >
+                //   widget.system_prompt                         >
+                //   LLM_SYSTEM_PROMPT env                        >
+                //   built-in default
+                const [widgetMaster, threadRow] = await Promise.all([
+                  widgetId ? getWidget(widgetId) : Promise.resolve(null),
+                  threadId
+                    ? getThread(threadId, widgetId)
+                    : Promise.resolve(null),
+                ]);
                 const systemContent =
+                  threadRow?.system_prompt?.trim() ||
                   widgetMaster?.system_prompt?.trim() ||
                   process.env.LLM_SYSTEM_PROMPT ||
                   [
@@ -178,10 +186,27 @@ export const v2WidgetEndpoints = async (app: any) => {
                     "If you don't know, say so in one sentence — do not guess.",
                   ].join(" ");
 
-                // Build context from persisted history (already includes the
-                // user message we just wrote above).
+                // RAG-style: if the operator pasted reference material on
+                // this thread, inject it as a 2nd system message so the
+                // model treats it as ground truth for this session.
+                const refText = threadRow?.context_text?.trim();
+
                 const messages: ChatMessage[] = [
                   { role: "system", content: systemContent },
+                  ...(refText
+                    ? [
+                        {
+                          role: "system" as const,
+                          content:
+                            "다음은 이 세션 전용 참고 자료입니다. " +
+                            "사용자 질문에 답할 때 이 자료를 최우선 근거로 활용하고, " +
+                            "자료에 없는 내용은 추측하지 말고 모른다고 답하세요.\n\n" +
+                            "─── 참고 자료 ───\n" +
+                            refText +
+                            "\n─── 참고 자료 끝 ───",
+                        },
+                      ]
+                    : []),
                   ...history.map((m) => ({
                     role: m.role,
                     content: m.content,
@@ -540,6 +565,51 @@ export const v2WidgetEndpoints = async (app: any) => {
       {
         body: t.Object({ widgetId: t.Optional(t.String()) }),
         detail: { tags: ["API"], description: "Sessions for a widget" },
+      },
+    );
+
+    /**
+     * POST /v2/admin/threads/update
+     *
+     * Patch the prompt-tuning fields on a single thread. Used by the
+     * playground "tune this session" form. Fields you don't pass are
+     * left alone (so the title rename + this can co-exist). Pass empty
+     * strings to clear back to "inherit / no extra context".
+     */
+    app.post(
+      "/admin/threads/update",
+      async ({
+        body,
+      }: {
+        body: {
+          widgetId?: string;
+          threadId?: string;
+          system_prompt?: string | null;
+          context_text?: string | null;
+        };
+      }) => {
+        const widgetId = body?.widgetId?.trim() ?? "";
+        const threadId = body?.threadId?.trim() ?? "";
+        if (!widgetId || !threadId) {
+          return { success: false, reason: "widgetId+threadId required" };
+        }
+        const ok = await updateThreadPrompt(threadId, widgetId, {
+          system_prompt: body.system_prompt,
+          context_text: body.context_text,
+        });
+        return { success: ok };
+      },
+      {
+        body: t.Object({
+          widgetId: t.String(),
+          threadId: t.String(),
+          system_prompt: t.Optional(t.Union([t.String(), t.Null()])),
+          context_text: t.Optional(t.Union([t.String(), t.Null()])),
+        }),
+        detail: {
+          tags: ["API"],
+          description: "Tune a session's system_prompt + context_text",
+        },
       },
     );
 
