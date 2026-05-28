@@ -19,6 +19,11 @@ export interface WidgetRow {
   welcome_message: string;
   system_prompt: string | null;
   suggested_questions: string[];
+  /**
+   * Public URL of a custom launcher icon (the floating bubble).
+   * NULL = use the built-in chat-glyph default.
+   */
+  icon_url: string | null;
   is_deleted: boolean;
   created_at: string;
   updated_at: string;
@@ -32,6 +37,8 @@ export interface WidgetUpsertInput {
   welcome_message?: string;
   system_prompt?: string | null;
   suggested_questions?: string[];
+  /** Pass null/'' to clear back to the default glyph. */
+  icon_url?: string | null;
 }
 
 const TABLE = "widget" as const;
@@ -47,6 +54,7 @@ function normalizeRow(row: any): WidgetRow {
     suggested_questions: Array.isArray(row.suggested_questions)
       ? row.suggested_questions
       : [],
+    icon_url: row.icon_url ?? null,
     is_deleted: !!row.is_deleted,
     created_at: row.created_at,
     updated_at: row.updated_at,
@@ -108,6 +116,12 @@ export async function upsertWidget(
     patch.system_prompt = input.system_prompt;
   if (input.suggested_questions !== undefined)
     patch.suggested_questions = input.suggested_questions;
+  if (input.icon_url !== undefined) {
+    // empty string is treated as "clear" so the playground form can
+    // simply send `""` to revert to the default glyph.
+    const v = input.icon_url?.trim();
+    patch.icon_url = v ? v : null;
+  }
 
   const { data, error } = await supabaseClient
     // @ts-expect-error — widget table not in generated types yet

@@ -1,4 +1,5 @@
 import { t } from "elysia";
+import { supabaseClient } from "../../../lib/supabase/client";
 import { createLLMProvider, type ChatMessage } from "../../../lib/llm";
 import {
   appendMessage,
@@ -283,6 +284,7 @@ export const v2WidgetEndpoints = async (app: any) => {
             welcome_message: reg?.welcome_message ?? null,
             system_prompt: reg?.system_prompt ?? null,
             suggested_questions: reg?.suggested_questions ?? null,
+            icon_url: reg?.icon_url ?? null,
             thread_count: act?.thread_count ?? 0,
             latest_updated_at:
               act?.latest_updated_at ??
@@ -321,6 +323,7 @@ export const v2WidgetEndpoints = async (app: any) => {
           suggested_questions: Array.isArray(body?.suggested_questions)
             ? body.suggested_questions
             : undefined,
+          icon_url: body?.icon_url,
         });
         return {
           success: !!result.row,
@@ -337,8 +340,70 @@ export const v2WidgetEndpoints = async (app: any) => {
           welcome_message: t.Optional(t.String()),
           system_prompt: t.Optional(t.Union([t.String(), t.Null()])),
           suggested_questions: t.Optional(t.Array(t.String())),
+          icon_url: t.Optional(t.Union([t.String(), t.Null()])),
         }),
         detail: { tags: ["API"], description: "Create or update a widget" },
+      },
+    );
+
+    /**
+     * POST /v2/admin/widgets/upload-icon
+     *
+     * Multipart upload — accepts a single image file under `file` plus
+     * the target `widgetId`. Stores the object under
+     *   widget-icons/<widgetId>/<timestamp>-<random>.<ext>
+     * and returns its public URL. The caller is expected to follow up
+     * with /admin/widgets/upsert{ icon_url } to persist the link.
+     *
+     * Service-role client (SUPABASE_SERVICE_KEY) is used so the upload
+     * bypasses RLS. The bucket itself is public-read.
+     */
+    app.post(
+      "/admin/widgets/upload-icon",
+      async ({ body }: { body: { widgetId: string; file: File } }) => {
+        const widgetId = (body?.widgetId ?? "").trim();
+        const file = body?.file;
+        if (!widgetId) return { success: false, error: "widgetId required" };
+        if (!file) return { success: false, error: "file required" };
+        if (!file.type?.startsWith("image/")) {
+          return { success: false, error: "image/* required" };
+        }
+        // Hard cap to avoid abuse — anything past 2 MiB likely needs a
+        // CDN-resized variant anyway.
+        const MAX = 2 * 1024 * 1024;
+        if (file.size > MAX) {
+          return { success: false, error: `file too large (>${MAX} bytes)` };
+        }
+
+        const safeWid = widgetId.replace(/[^a-zA-Z0-9_-]/g, "_");
+        const ext =
+          (file.name.split(".").pop() || "png").toLowerCase().slice(0, 4) ||
+          "png";
+        const rand = Math.random().toString(36).slice(2, 8);
+        const path = `${safeWid}/${Date.now()}-${rand}.${ext}`;
+
+        const buf = await file.arrayBuffer();
+        const { error } = await supabaseClient.storage
+          .from("widget-icons")
+          .upload(path, new Uint8Array(buf), {
+            contentType: file.type,
+            upsert: false,
+          });
+        if (error) {
+          console.error("[upload-icon] failed:", error.message);
+          return { success: false, error: error.message };
+        }
+        const { data } = supabaseClient.storage
+          .from("widget-icons")
+          .getPublicUrl(path);
+        return { success: true, icon_url: data.publicUrl, path };
+      },
+      {
+        body: t.Object({
+          widgetId: t.String(),
+          file: t.File({ type: "image" }),
+        }),
+        detail: { tags: ["API"], description: "Upload a launcher icon" },
       },
     );
 
@@ -482,7 +547,9 @@ function renderPersona(master: WidgetRow | null, widgetId: string) {
     widget_auto_open: false,
     payment_type: "",
     font_family: null,
-    icon: null,
+    // Custom launcher icon (the floating bubble). When NULL the widget
+    // bundle falls back to its built-in chat-glyph SVG.
+    icon: master?.icon_url ?? null,
     accept_contact: false,
     avatar_src: null,
     widget_id: widgetId,
