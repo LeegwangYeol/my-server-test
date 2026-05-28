@@ -139,3 +139,4 @@ bunfig.toml
 
 # Vercel build output
 .vercel
+.claude/
