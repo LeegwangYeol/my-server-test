@@ -26,6 +26,8 @@ export interface ChatThreadRow {
   is_deleted: boolean;
   created_at: string;
   updated_at: string;
+  /** Optional operator-set label. Falls back to UUID prefix in the UI. */
+  title: string | null;
 }
 
 /* ─── threads ──────────────────────────────────────────────────────── */
@@ -163,6 +165,8 @@ export interface ThreadSummary {
   updated_at: string;
   message_count: number;
   last_user_message: string | null;
+  /** Operator-set label, NULL = "untitled". */
+  title: string | null;
 }
 
 /**
@@ -177,7 +181,7 @@ export async function listThreads(
   const { data: threads, error } = await supabaseClient
     // @ts-expect-error — see createThread
     .from("chat_thread")
-    .select("id, widget_id, created_at, updated_at")
+    .select("id, widget_id, created_at, updated_at, title")
     .eq("widget_id", widgetId)
     .eq("is_deleted", false)
     .order("updated_at", { ascending: false })
@@ -220,8 +224,35 @@ export async function listThreads(
       updated_at: r.updated_at,
       message_count: entry?.count ?? 0,
       last_user_message: entry?.lastUser ?? null,
+      title: r.title ?? null,
     };
   });
+}
+
+/**
+ * Set or clear the operator-visible title for a session. Pass title=null
+ * (or empty string) to revert to "untitled". widgetId guards against
+ * cross-tenant renames if a UUID happens to leak.
+ */
+export async function renameThread(
+  threadId: string,
+  widgetId: string,
+  title: string | null,
+): Promise<boolean> {
+  const normalized =
+    title && title.trim().length > 0 ? title.trim().slice(0, 200) : null;
+  const { error } = await supabaseClient
+    // @ts-expect-error — see createThread
+    .from("chat_thread")
+    .update({ title: normalized })
+    .eq("id", threadId)
+    .eq("widget_id", widgetId)
+    .eq("is_deleted", false);
+  if (error) {
+    console.error("[chat-store] renameThread failed:", error.message);
+    return false;
+  }
+  return true;
 }
 
 /* ─── widget-facing message shape ──────────────────────────────────── */

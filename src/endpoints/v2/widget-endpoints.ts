@@ -7,6 +7,7 @@ import {
   listMessages,
   listThreads,
   listWidgets as listWidgetsByActivity,
+  renameThread,
   toWidgetMessage,
 } from "../../../lib/chat-store";
 import {
@@ -366,6 +367,43 @@ export const v2WidgetEndpoints = async (app: any) => {
       {
         body: t.Object({ widgetId: t.Optional(t.String()) }),
         detail: { tags: ["API"], description: "Sessions for a widget" },
+      },
+    );
+
+    /**
+     * POST /v2/admin/threads/rename
+     *
+     * Set or clear the human-readable title shown in the admin sessions
+     * panel. Pass an empty string (or omit `title`) to revert to "untitled".
+     * widgetId is required so a leaked thread UUID can't be relabeled
+     * by another tenant.
+     */
+    app.post(
+      "/admin/threads/rename",
+      async ({
+        body,
+      }: {
+        body: { widgetId?: string; threadId?: string; title?: string | null };
+      }) => {
+        const widgetId = body?.widgetId?.trim() ?? "";
+        const threadId = body?.threadId?.trim() ?? "";
+        if (!widgetId || !threadId) {
+          return { success: false, reason: "widgetId+threadId required" };
+        }
+        const ok = await renameThread(
+          threadId,
+          widgetId,
+          (body?.title ?? null) as string | null,
+        );
+        return { success: ok };
+      },
+      {
+        body: t.Object({
+          widgetId: t.String(),
+          threadId: t.String(),
+          title: t.Optional(t.Union([t.String(), t.Null()])),
+        }),
+        detail: { tags: ["API"], description: "Rename a session" },
       },
     );
 
