@@ -1,6 +1,7 @@
 import { t } from "elysia";
 import { supabaseClient } from "../../../lib/supabase/client";
 import { createLLMProvider, type ChatMessage } from "../../../lib/llm";
+import { MIGRATIONS } from "../../generated-migrations";
 import {
   appendMessage,
   createThread,
@@ -346,6 +347,110 @@ export const v2WidgetEndpoints = async (app: any) => {
           chat_bubble_size: t.Optional(t.Union([t.String(), t.Null()])),
         }),
         detail: { tags: ["API"], description: "Create or update a widget" },
+      },
+    );
+
+    /**
+     * POST /v2/admin/db/migrate
+     *
+     * Applies every supabase/migrations/*.sql file that isn't already
+     * recorded in public._migration_history (in lexicographic order).
+     * Each file is executed atomically; on the first failure we stop and
+     * return what succeeded plus the failing entry.
+     *
+     * Auth: pass the shared secret via the `X-Admin-Token` header
+     * matching the ADMIN_TOKEN env var. If ADMIN_TOKEN is unset the
+     * endpoint refuses to run (fail-closed).
+     *
+     * Body (all optional):
+     *   { dryRun?: boolean }  — only report what would run; doesn't mutate
+     */
+    app.post(
+      "/admin/db/migrate",
+      async ({
+        headers,
+        body,
+      }: {
+        headers: Record<string, string | undefined>;
+        body: { dryRun?: boolean } | undefined;
+      }) => {
+        const expected = process.env.ADMIN_TOKEN?.trim();
+        if (!expected) {
+          return {
+            success: false,
+            error: "ADMIN_TOKEN env var not set on server",
+          };
+        }
+        const token = (headers["x-admin-token"] || "").trim();
+        if (token !== expected) {
+          return { success: false, error: "unauthorized" };
+        }
+
+        // Read history
+        const { data: appliedRows, error: histErr } = await supabaseClient
+          // @ts-expect-error — table not in generated types
+          .from("_migration_history")
+          .select("name");
+        if (histErr) {
+          return {
+            success: false,
+            error: `read history failed: ${histErr.message}`,
+          };
+        }
+        const appliedSet = new Set(
+          ((appliedRows as { name: string }[]) ?? []).map((r) => r.name),
+        );
+        const pending = MIGRATIONS.filter((m) => !appliedSet.has(m.name));
+
+        if (body?.dryRun) {
+          return {
+            success: true,
+            dryRun: true,
+            applied: appliedRows ?? [],
+            pending: pending.map((m) => m.name),
+          };
+        }
+
+        const results: { name: string; ok: boolean; error?: string }[] = [];
+        for (const m of pending) {
+          const { error: execErr } = await supabaseClient.rpc(
+            "admin_exec_sql" as never,
+            { sql: m.content } as never,
+          );
+          if (execErr) {
+            results.push({ name: m.name, ok: false, error: execErr.message });
+            break;
+          }
+          const { error: trackErr } = await supabaseClient
+            // @ts-expect-error — table not in generated types
+            .from("_migration_history")
+            .insert({ name: m.name });
+          if (trackErr) {
+            results.push({
+              name: m.name,
+              ok: false,
+              error: `applied but history insert failed: ${trackErr.message}`,
+            });
+            break;
+          }
+          results.push({ name: m.name, ok: true });
+        }
+
+        const allOk = results.every((r) => r.ok);
+        const pendingNotRun = pending.slice(results.length).map((m) => m.name);
+        return {
+          success: allOk,
+          ran: results,
+          remaining: pendingNotRun,
+          totalPending: pending.length,
+        };
+      },
+      {
+        body: t.Optional(t.Object({ dryRun: t.Optional(t.Boolean()) })),
+        detail: {
+          tags: ["API"],
+          description: "Auto-apply pending Supabase migrations",
+        },
       },
     );
 

@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "bun run --watch src/index.ts",
     "build": "tsc",
+    "bundle:api": "node scripts/build-migrations.mjs && npx esbuild lambda-src/handler.ts --bundle --platform=node --target=node20 --format=cjs --outfile=api/index.js --legal-comments=none",
     "start": "NODE_ENV=production node dist/index.js",
     "test": "bun test",
     "introspection": "npx supabase gen types typescript --schema public --project-id pddzchdkbwhhbtpmagsx > lib/supabase/database.types.ts",
