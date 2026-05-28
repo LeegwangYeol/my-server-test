@@ -285,6 +285,7 @@ export const v2WidgetEndpoints = async (app: any) => {
             system_prompt: reg?.system_prompt ?? null,
             suggested_questions: reg?.suggested_questions ?? null,
             icon_url: reg?.icon_url ?? null,
+            chat_bubble_size: reg?.chat_bubble_size ?? null,
             thread_count: act?.thread_count ?? 0,
             latest_updated_at:
               act?.latest_updated_at ??
@@ -324,6 +325,7 @@ export const v2WidgetEndpoints = async (app: any) => {
             ? body.suggested_questions
             : undefined,
           icon_url: body?.icon_url,
+          chat_bubble_size: body?.chat_bubble_size,
         });
         return {
           success: !!result.row,
@@ -341,6 +343,7 @@ export const v2WidgetEndpoints = async (app: any) => {
           system_prompt: t.Optional(t.Union([t.String(), t.Null()])),
           suggested_questions: t.Optional(t.Array(t.String())),
           icon_url: t.Optional(t.Union([t.String(), t.Null()])),
+          chat_bubble_size: t.Optional(t.Union([t.String(), t.Null()])),
         }),
         detail: { tags: ["API"], description: "Create or update a widget" },
       },
@@ -544,6 +547,9 @@ function renderPersona(master: WidgetRow | null, widgetId: string) {
     widget_message_content: null,
     widget_margin_bottom: 24,
     widget_margin_right: 24,
+    // Operator-set launcher size (CSS string, e.g. "48px"). NULL lets
+    // the widget bundle fall back to its own default.
+    widget_bubble_size: master?.chat_bubble_size ?? null,
     widget_auto_open: false,
     payment_type: "",
     font_family: null,

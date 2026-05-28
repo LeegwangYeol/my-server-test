@@ -24,6 +24,12 @@ export interface WidgetRow {
    * NULL = use the built-in chat-glyph default.
    */
   icon_url: string | null;
+  /**
+   * CSS size for the launcher bubble (e.g. "48px", "64px"). NULL = use
+   * the widget bundle's built-in default. Independent of the icon's
+   * intrinsic dimensions.
+   */
+  chat_bubble_size: string | null;
   is_deleted: boolean;
   created_at: string;
   updated_at: string;
@@ -39,6 +45,8 @@ export interface WidgetUpsertInput {
   suggested_questions?: string[];
   /** Pass null/'' to clear back to the default glyph. */
   icon_url?: string | null;
+  /** Pass null/'' to clear back to the bundle default (48px). */
+  chat_bubble_size?: string | null;
 }
 
 const TABLE = "widget" as const;
@@ -55,6 +63,7 @@ function normalizeRow(row: any): WidgetRow {
       ? row.suggested_questions
       : [],
     icon_url: row.icon_url ?? null,
+    chat_bubble_size: row.chat_bubble_size ?? null,
     is_deleted: !!row.is_deleted,
     created_at: row.created_at,
     updated_at: row.updated_at,
@@ -121,6 +130,10 @@ export async function upsertWidget(
     // simply send `""` to revert to the default glyph.
     const v = input.icon_url?.trim();
     patch.icon_url = v ? v : null;
+  }
+  if (input.chat_bubble_size !== undefined) {
+    const v = input.chat_bubble_size?.trim();
+    patch.chat_bubble_size = v ? v : null;
   }
 
   const { data, error } = await supabaseClient
