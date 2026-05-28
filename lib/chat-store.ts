@@ -178,10 +178,13 @@ export async function listThreads(
   widgetId: string,
   limit = 100,
 ): Promise<ThreadSummary[]> {
+  // NOTE: select("*") so this keeps working both before and after the
+  // `title` column migration lands. Once title is everywhere we can
+  // tighten this back to an explicit column list.
   const { data: threads, error } = await supabaseClient
     // @ts-expect-error — see createThread
     .from("chat_thread")
-    .select("id, widget_id, created_at, updated_at, title")
+    .select("*")
     .eq("widget_id", widgetId)
     .eq("is_deleted", false)
     .order("updated_at", { ascending: false })
@@ -224,7 +227,8 @@ export async function listThreads(
       updated_at: r.updated_at,
       message_count: entry?.count ?? 0,
       last_user_message: entry?.lastUser ?? null,
-      title: r.title ?? null,
+      // `title` may be missing on rows from before the migration — coerce to null.
+      title: (r as unknown as { title?: string | null }).title ?? null,
     };
   });
 }
