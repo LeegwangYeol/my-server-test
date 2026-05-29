@@ -10,8 +10,7 @@
     "bundle:api": "node scripts/build-migrations.mjs && npx esbuild lambda-src/handler.ts --bundle --platform=node --target=node20 --format=cjs --outfile=api/index.js --legal-comments=none",
     "start": "NODE_ENV=production node dist/index.js",
     "test": "bun test",
-    "introspection": "npx supabase gen types typescript --schema public --project-id pddzchdkbwhhbtpmagsx > lib/supabase/database.types.ts",
-    "prepare": "husky"
+    "introspection": "npx supabase gen types typescript --schema public --project-id pddzchdkbwhhbtpmagsx > lib/supabase/database.types.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "~3.484.0",
@@ -49,7 +48,6 @@
     "@types/jsonwebtoken": "^9.0.7",
     "bun-types": "^1.1.33",
     "esbuild": "^0.28.0",
-    "husky": "^9.1.6",
     "lint-staged": "^15.2.10",
     "prettier": "^3.3.3"
   },
