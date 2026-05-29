@@ -21,6 +21,29 @@ import {
   type WidgetRow,
 } from "../../../lib/widget-store";
 
+/** Headers bag as Elysia hands it to a POST handler. */
+type AdminHeaders = Record<string, string | undefined>;
+
+/**
+ * Gate for every /admin/* endpoint. Returns an error payload to `return`
+ * when the `x-admin-token` header doesn't match the server's ADMIN_TOKEN,
+ * or null when the caller is authorized. The token is the single shared
+ * secret held in the ADMIN_TOKEN env var (Vercel + local .env) — the admin
+ * playground sends it on every call; without it these endpoints used to be
+ * wide open to anyone who knew the URL.
+ */
+function requireAdmin(
+  headers: AdminHeaders,
+): { success: false; error: string } | null {
+  const expected = process.env.ADMIN_TOKEN?.trim();
+  if (!expected) {
+    return { success: false, error: "ADMIN_TOKEN env var not set on server" };
+  }
+  const token = (headers?.["x-admin-token"] || "").trim();
+  if (token !== expected) return { success: false, error: "unauthorized" };
+  return null;
+}
+
 /**
  * v2 widget endpoints — backend for the embeddable chat widget.
  *
@@ -281,7 +304,9 @@ export const v2WidgetEndpoints = async (app: any) => {
      */
     app.post(
       "/admin/widgets",
-      async () => {
+      async ({ headers }: { headers: AdminHeaders }) => {
+        const deny = requireAdmin(headers);
+        if (deny) return deny;
         const [registered, byActivity] = await Promise.all([
           listWidgetsRegistered(),
           listWidgetsByActivity(),
@@ -337,7 +362,9 @@ export const v2WidgetEndpoints = async (app: any) => {
 
     app.post(
       "/admin/widgets/upsert",
-      async ({ body }: { body: any }) => {
+      async ({ headers, body }: { headers: AdminHeaders; body: any }) => {
+        const deny = requireAdmin(headers);
+        if (deny) return deny;
         const id = (body?.id ?? "").trim();
         if (!id) return { success: false, error: "id required" };
         const result = await upsertWidget({
@@ -399,17 +426,8 @@ export const v2WidgetEndpoints = async (app: any) => {
         headers: Record<string, string | undefined>;
         body: { dryRun?: boolean } | undefined;
       }) => {
-        const expected = process.env.ADMIN_TOKEN?.trim();
-        if (!expected) {
-          return {
-            success: false,
-            error: "ADMIN_TOKEN env var not set on server",
-          };
-        }
-        const token = (headers["x-admin-token"] || "").trim();
-        if (token !== expected) {
-          return { success: false, error: "unauthorized" };
-        }
+        const deny = requireAdmin(headers);
+        if (deny) return deny;
 
         // Read history
         const { data: appliedRows, error: histErr } = await supabaseClient
@@ -493,7 +511,15 @@ export const v2WidgetEndpoints = async (app: any) => {
      */
     app.post(
       "/admin/widgets/upload-icon",
-      async ({ body }: { body: { widgetId: string; file: File } }) => {
+      async ({
+        headers,
+        body,
+      }: {
+        headers: AdminHeaders;
+        body: { widgetId: string; file: File };
+      }) => {
+        const deny = requireAdmin(headers);
+        if (deny) return deny;
         const widgetId = (body?.widgetId ?? "").trim();
         const file = body?.file;
         if (!widgetId) return { success: false, error: "widgetId required" };
@@ -542,7 +568,15 @@ export const v2WidgetEndpoints = async (app: any) => {
 
     app.post(
       "/admin/widgets/delete",
-      async ({ body }: { body: { id?: string } }) => {
+      async ({
+        headers,
+        body,
+      }: {
+        headers: AdminHeaders;
+        body: { id?: string };
+      }) => {
+        const deny = requireAdmin(headers);
+        if (deny) return deny;
         const id = (body?.id ?? "").trim();
         if (!id) return { success: false };
         const ok = await deleteWidget(id);
@@ -556,7 +590,15 @@ export const v2WidgetEndpoints = async (app: any) => {
 
     app.post(
       "/admin/threads",
-      async ({ body }: { body: { widgetId?: string } }) => {
+      async ({
+        headers,
+        body,
+      }: {
+        headers: AdminHeaders;
+        body: { widgetId?: string };
+      }) => {
+        const deny = requireAdmin(headers);
+        if (deny) return deny;
         const widgetId = body?.widgetId?.trim() ?? "";
         if (!widgetId) return { success: false, threads: [] };
         const threads = await listThreads(widgetId);
@@ -579,8 +621,10 @@ export const v2WidgetEndpoints = async (app: any) => {
     app.post(
       "/admin/threads/update",
       async ({
+        headers,
         body,
       }: {
+        headers: AdminHeaders;
         body: {
           widgetId?: string;
           threadId?: string;
@@ -588,6 +632,8 @@ export const v2WidgetEndpoints = async (app: any) => {
           context_text?: string | null;
         };
       }) => {
+        const deny = requireAdmin(headers);
+        if (deny) return deny;
         const widgetId = body?.widgetId?.trim() ?? "";
         const threadId = body?.threadId?.trim() ?? "";
         if (!widgetId || !threadId) {
@@ -624,10 +670,14 @@ export const v2WidgetEndpoints = async (app: any) => {
     app.post(
       "/admin/threads/rename",
       async ({
+        headers,
         body,
       }: {
+        headers: AdminHeaders;
         body: { widgetId?: string; threadId?: string; title?: string | null };
       }) => {
+        const deny = requireAdmin(headers);
+        if (deny) return deny;
         const widgetId = body?.widgetId?.trim() ?? "";
         const threadId = body?.threadId?.trim() ?? "";
         if (!widgetId || !threadId) {
@@ -652,7 +702,15 @@ export const v2WidgetEndpoints = async (app: any) => {
 
     app.post(
       "/admin/messages",
-      async ({ body }: { body: { widgetId?: string; threadId?: string } }) => {
+      async ({
+        headers,
+        body,
+      }: {
+        headers: AdminHeaders;
+        body: { widgetId?: string; threadId?: string };
+      }) => {
+        const deny = requireAdmin(headers);
+        if (deny) return deny;
         const widgetId = body?.widgetId?.trim() ?? "";
         const threadId = body?.threadId?.trim() ?? "";
         if (!widgetId || !threadId) {
