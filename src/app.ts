@@ -2,6 +2,7 @@ import { Elysia } from "elysia";
 import { swagger } from "@elysiajs/swagger";
 import { v1Endpoints } from "./endpoints/v1/v1-endpoints";
 import { v2WidgetEndpoints } from "./endpoints/v2/widget-endpoints";
+import { v2MailEndpoints } from "./endpoints/v2/mail-endpoints";
 import { healthzEndpoint } from "./endpoints/healthz";
 import { cors } from "@elysiajs/cors";
 
@@ -48,6 +49,8 @@ export const createApp = async (serverless = false) => {
   v1Endpoints(app);
   // @ts-ignore
   v2WidgetEndpoints(app);
+  // @ts-ignore
+  v2MailEndpoints(app);
   // @ts-ignore
   healthzEndpoint(app);
 
