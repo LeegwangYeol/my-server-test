@@ -28,15 +28,22 @@ export const v2MailEndpoints = async (app: any) => {
           from?: string;
         };
       }) => {
-        const expected = process.env.ADMIN_TOKEN?.trim();
-        if (!expected) {
+        // Auth: accept MAIL_SEND_TOKEN (mail-only scope, preferred for the
+        // 맥스 routine) or ADMIN_TOKEN (full admin). Fail-closed when neither
+        // is configured — sending mail is an abusable capability.
+        const mailToken = process.env.MAIL_SEND_TOKEN?.trim();
+        const adminToken = process.env.ADMIN_TOKEN?.trim();
+        if (!mailToken && !adminToken) {
           return {
             success: false,
-            error: "ADMIN_TOKEN env var not set on server",
+            error: "neither MAIL_SEND_TOKEN nor ADMIN_TOKEN is set on server",
           };
         }
         const token = (headers["x-admin-token"] || "").trim();
-        if (token !== expected) {
+        const authorized =
+          (!!mailToken && token === mailToken) ||
+          (!!adminToken && token === adminToken);
+        if (!authorized) {
           return { success: false, error: "unauthorized" };
         }
 
@@ -44,7 +51,7 @@ export const v2MailEndpoints = async (app: any) => {
           return {
             success: false,
             error:
-              "NAVER_MAIL_USER / NAVER_MAIL_PASSWORD 미설정 (네이버 SMTP 사용 설정 필요).",
+              "네이버 SMTP 미설정 — NAVER_ID+NAVER_APP_PASSWORD 또는 NAVER_MAIL_USER+NAVER_MAIL_PASSWORD 환경변수 필요.",
           };
         }
 
@@ -111,7 +118,7 @@ export const v2MailEndpoints = async (app: any) => {
         detail: {
           tags: ["API"],
           description:
-            "네이버 SMTP로 메일 발송. X-Admin-Token 헤더 필요(서버 ADMIN_TOKEN과 일치). body엔 text 또는 html 중 하나 필수.",
+            "네이버 SMTP로 메일 발송. X-Admin-Token 헤더 필요(서버 MAIL_SEND_TOKEN 또는 ADMIN_TOKEN과 일치). body엔 text 또는 html 중 하나 필수.",
           // Documents the auth header in the API explorer (the handler reads it
           // manually, so this is OpenAPI-only — no runtime validation change).
           parameters: [
@@ -120,7 +127,7 @@ export const v2MailEndpoints = async (app: any) => {
               in: "header",
               required: true,
               description:
-                "관리자 인증 토큰 — 서버의 ADMIN_TOKEN 환경변수와 일치해야 합니다.",
+                "인증 토큰 — 서버의 MAIL_SEND_TOKEN(메일 전용) 또는 ADMIN_TOKEN과 일치해야 합니다.",
               schema: { type: "string" },
             },
           ],
