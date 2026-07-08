@@ -11,6 +11,8 @@
     "start": "NODE_ENV=production node dist/index.js",
     "test": "bun test",
     "mail:test": "node --env-file=.env scripts/send-test-mail.ts",
+    "sms:test": "node --env-file=.env scripts/send-test-sms.ts",
+    "greetings": "node --env-file=.env scripts/send-greetings.ts",
     "introspection": "npx supabase gen types typescript --schema public --project-id pddzchdkbwhhbtpmagsx > lib/supabase/database.types.ts"
   },
   "dependencies": {
