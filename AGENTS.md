@@ -81,7 +81,12 @@ lib/
   llm/                  ← 멀티-벤더 LLM 추상화 (openrouter/openai/groq/...). /v2/ask가 사용.
   chat-store.ts         ← chat_thread / chat_message CRUD (Supabase)
   widget-store.ts       ← widget_master CRUD (per-widget 페르소나)
-  sms/solapi.ts         ← SMS/카카오. ⚠️ 자격증명 env화 완료 (아래 보안 주의)
+  sms/
+    index.ts            ← SMS_PROVIDER 스위치로 3개 백엔드 통합 (phone/solapi/pushbullet)
+    solapi.ts           ← SOLAPI SMS/카카오알림톡 (유료, 건당 과금). lazy-init 리팩터 완료(module-load throw 금지 패턴 적용)
+    phone-gateway.ts    ← SMS Gate 안드로이드 게이트웨이 앱 API (APK 사이드로드 설치, 0원, 발송량 한도 없음)
+    pushbullet.ts       ← Pushbullet API (Play스토어 정식 앱, 0원, 무료 계정 월 ~100건 한도)
+  ⚠️ 자격증명 전부 env화 완료. 과거 SOLAPI 키 평문 노출 이력 있음 (7번 보안 주의 참고)
 supabase/migrations/    ← SQL 마이그레이션 (chat_history, widget_master, thread_title)
 vercel.json             ← 배포 설정 (2번 절 참고)
 .env.example            ← 전체 env 변수 레퍼런스
@@ -146,8 +151,11 @@ curl -s https://my-server-test.vercel.app/v1/heartbeat        # → {"status":"a
 | `/v2/admin/threads` · `/threads/rename` · `/threads/update` · `/messages` | POST | 세션/메시지 조회·관리 (per-session prompt·reference text 포함) 🔒 |
 | `/v2/admin/db/migrate` | POST | SQL 마이그레이션 실행 (self-serve runner) 🔒⚠️ |
 | `/v2/admin/mail/send` | POST | 네이버 SMTP 메일 발송 🔒 (`X-Admin-Token`: `MAIL_SEND_TOKEN` 또는 `ADMIN_TOKEN`) |
+| `/v2/admin/sms/send` | POST | SMS 발송 🔒 — `SMS_PROVIDER` env로 백엔드 선택(9번 절 참고). ⚠️ **소스엔 등록됐으나 `api/index.js` 미재번들 — 프로덕션 미배포 상태**(4번 절 표준 절차로 배포 전까지는 로컬(`bun run dev`)에서만 동작) |
 
 🔒 = `x-admin-token` 헤더 필수 (7번 절 참고). 토큰 없거나 불일치 → `{success:false, error:"unauthorized"}`.
+
+> 명절 인사 등 **일괄 SMS 발송은 이 HTTP 엔드포인트가 아니라 `scripts/send-greetings.ts`를 로컬에서 직접 실행**하는 게 정석 경로다(9번 절). Vercel 배포와 무관하게 동작한다.
 
 **검증 시 기대 응답:** valid 입력 → 200, 입력 누락 → 422(Elysia validation), 미존재 경로 → 404, admin 토큰 누락 → `success:false`. `/v1/youtube/auth/confirm`은 에러 시 **400 + `{success:false, message}`** (200 schema와 분리하려고 `set.status=400` 명시함 — 빼면 422 validation wrapper로 깨짐).
 
@@ -165,7 +173,10 @@ curl -s https://my-server-test.vercel.app/v1/heartbeat        # → {"status":"a
 | `LLM_MODEL`, `LLM_MAX_TOKENS`(기본512), `LLM_SYSTEM_PROMPT` | 선택 튜닝 | 기본값 |
 | `ADMIN_TOKEN` | `/v2/admin/*` 인증 시크릿 | **미설정 시 모든 admin 요청 거부(fail-closed)** |
 | `MAIL_SEND_TOKEN`, `NAVER_MAIL_USER`, `NAVER_MAIL_PASSWORD`, `NAVER_MAIL_FROM_NAME` | `/v2/admin/mail/send` 네이버 SMTP | 메일 발송 거부 |
-| `SOLAPI_API_KEY/SECRET/ADMIN_PHONE_NUMBER`, `KAKAO_BUSINESS_CHANNEL_ID` | SMS/카카오 | 해당 코드 호출 시 throw |
+| `SMS_PROVIDER` | SMS 백엔드 선택(`phone`/`solapi`/`pushbullet`) | 미설정 시 `phone` 기본값 |
+| `PUSHBULLET_ACCESS_TOKEN`, `PUSHBULLET_DEVICE_IDEN` | `SMS_PROVIDER=pushbullet` | 발송 거부(`isSmsConfigured()`가 false) |
+| `SMS_GATEWAY_URL/USERNAME/PASSWORD/SIM` | `SMS_PROVIDER=phone` (SMS Gate 앱) | 발송 거부 |
+| `SOLAPI_API_KEY/SECRET/ADMIN_PHONE_NUMBER`, `KAKAO_BUSINESS_CHANNEL_ID` | `SMS_PROVIDER=solapi` (건당 과금) | 발송 거부 — 카카오 알림톡 전용 함수 호출 시에만 채널ID 필요 |
 
 > Vercel 환경변수는 **대시보드 → Settings → Environment Variables**에서 설정. 추가 후 재배포 필요.
 
@@ -178,6 +189,7 @@ curl -s https://my-server-test.vercel.app/v1/heartbeat        # → {"status":"a
 2. **`/v2/admin/db/migrate` 는 SQL 마이그레이션을 실행하는 위험 엔드포인트**다. `x-admin-token` 뒤에 있지만, 토큰이 유출되면 DB 조작이 가능하다. `ADMIN_TOKEN`은 강한 시크릿으로 유지하고 로그/커밋에 절대 남기지 말 것.
 3. **`lib/sms/solapi.ts`의 Solapi 자격증명이 과거 평문 커밋되어 public GitHub에 노출된 이력**이 있다. 코드는 env로 분리했으나, **노출된 키는 솔라피 대시보드에서 폐기/재발급해야 한다**(아직 안 됐다면).
 4. 새 비밀값을 코드에 하드코딩하지 말 것. 전부 `process.env`로.
+5. **`PUSHBULLET_ACCESS_TOKEN`은 그 계정에 연결된 폰으로 SMS를 보낼 수 있는 권한을 통째로 준다** — `ADMIN_TOKEN`급으로 취급할 것. 로컬 `.env`에만 두고 로그/커밋 금지 (9번 절).
 
 ---
 
@@ -190,3 +202,43 @@ curl -s https://my-server-test.vercel.app/v1/heartbeat        # → {"status":"a
 - [ ] module-load 시점에 throw하는 코드를 넣지 않았나? (lazy 패턴 유지)
 - [ ] 검증은 `my-server-test.vercel.app` 도메인으로 했나?
 - [ ] `vercel.json`의 4개 키(framework/buildCommand/outputDirectory/rewrites)를 이유 없이 바꾸지 않았나?
+
+---
+
+## 9. SMS 발송 (명절 인사 등 일괄 문자)
+
+**배경:** 유료 SMS(SOLAPI 등)를 쓰지 않고 **0원으로** 문자를 보내고 싶다는 요구에서 시작. "공짜 + 쉬움 + APK 사이드로드 없음"을 동시에 만족하는 방법을 찾아 3가지 백엔드를 `lib/sms/index.ts`의 `SMS_PROVIDER` 스위치로 통합했다.
+
+### 백엔드 3종 비교
+
+| `SMS_PROVIDER` | 방식 | 비용 | 설치 | 한도 |
+|---|---|---|---|---|
+| `pushbullet` | Play스토어 정식 앱(Pushbullet)이 본인 폰으로 발송 | 0원(문자무제한 요금제 전제) | 앱 설치만, APK 사이드로드 없음 | **무료 계정 월 ~100건** |
+| `phone` (기본값) | SMS Gate 앱(APK)이 안드로이드 공기계로 발송 | 0원 | GitHub Releases APK 사이드로드 필요 | 없음 |
+| `solapi` | SOLAPI(구 CoolSMS) 유료 API | 건당 과금(SMS ~13원) | 없음(API 키만) | 과금 기반이라 사실상 없음 |
+
+세 백엔드 모두 **import 시점에 절대 throw하지 않는다**(4번 항목의 lazy 패턴 준수) — `isSmsConfigured()`로 설정 여부만 확인하고, 실제 미설정 시 에러는 발송 함수 호출 시점에만 던진다.
+
+### 실사용 경로: `scripts/send-greetings.ts` (로컬 실행, HTTP 엔드포인트 아님)
+
+```bash
+cp scripts/contacts.example.csv contacts.csv   # name,phone — git에 안 잡힘(PII, .gitignore 처리됨)
+cp scripts/greeting.example.txt greeting.txt   # {name}/{이름} 치환됨
+
+node --env-file=.env scripts/send-greetings.ts --csv contacts.csv --template greeting.txt          # 미리보기(기본, 발송 안 함)
+node --env-file=.env scripts/send-greetings.ts --csv contacts.csv --template greeting.txt --send   # 실제 발송
+```
+
+- **`--send` 없으면 무조건 미리보기만** — 실수로 100명에게 오발송하는 사고 방지용 안전장치. 절대 이 기본값을 바꾸지 말 것.
+- `SMS_SEND_DELAY_MS`(기본 2000ms)로 발송 간 딜레이 — 통신사 스팸필터 회피용. 낮추지 말 것.
+- 이 스크립트는 `lib/sms/phone-gateway.ts`·`lib/sms/pushbullet.ts`를 **`.ts` 확장자 포함 직접 import**한다(barrel `lib/sms/index.ts`를 쓰지 않음) — `node --env-file`의 네이티브 ESM 리졸버가 확장자 생략·barrel의 extensionless 서브 import를 못 풀기 때문. 이 스크립트를 고칠 때 barrel import로 "정리"하지 말 것 — 조용히 깨진다.
+
+### `/v2/admin/sms/send` (HTTP 엔드포인트)
+
+Vercel에 올리려면 4번 절 표준 절차(재번들+커밋)가 별도로 필요하다 — **현재 미배포 상태**(위 5번 절 표 참고). 일괄 발송 용도로는 쓸 일이 없고(위 로컬 스크립트가 정석), 외부 시스템에서 SMS를 트리거해야 하는 시나리오가 생기면 그때 배포할 것.
+
+### 검증된 사실 (재조사 불필요)
+
+- Pushbullet 무료 한도 월 100건은 **공식 블로그**(blog.pushbullet.com, 2020) 원문 확인: "Pro is required to send more than 100 messages per month" — 100건까지는 무료 계정으로 API 발송 가능.
+- SMS Gate(`sms-gate.app`)는 Play스토어/F-Droid 미등재, GitHub Releases APK가 유일한 정식 설치 경로. Play스토어의 동명 "SMS Gateway" 계열 앱들은 전부 무관한 별개 앱(사칭 아님, 그냥 다른 제품).
+- 무료문자 웹사이트(문자나라/문자라인 등), 네이버클라우드 SENS 무료크레딧(3개월 한정+카드등록), Termux Play스토어판(SMS 명령 없음), U+ 웹문자(기업용 유료) — 전부 이 프로젝트 용도(100명 개인화 일괄발송)엔 부적합함을 확인 후 기각.
