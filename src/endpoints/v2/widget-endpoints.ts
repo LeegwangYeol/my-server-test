@@ -144,6 +144,31 @@ export const v2WidgetEndpoints = async (app: any) => {
         const userMessage: string = body?.message ?? "";
         let threadId: string = body?.threadId ?? "";
 
+        // ── Guard 1: 요청당 메시지 길이 상한 — 단일 요청 토큰 폭탄 방어 ──
+        const MAX_MESSAGE_CHARS = 4000;
+        if (userMessage.length > MAX_MESSAGE_CHARS) {
+          set.status = 413;
+          return {
+            success: false,
+            error: `message too long (${userMessage.length} > ${MAX_MESSAGE_CHARS} chars)`,
+          };
+        }
+
+        // ── Guard 2: 등록 위젯 화이트리스트 ──
+        // widget master 테이블에 등록된 widget_id 만 /ask 를 호출할 수 있다.
+        // 빈/미등록 id 는 거부 — 인증 없는 공개 엔드포인트가 무제한 LLM
+        // 비용에 노출되는 것을 막는다. 운영자는 /v2/admin/widgets/upsert 로
+        // 위젯을 먼저 등록해야 한다.
+        const widgetMaster = widgetId ? await getWidget(widgetId) : null;
+        if (!widgetMaster) {
+          set.status = 403;
+          return {
+            success: false,
+            error:
+              "unregistered widget_id — register it via /v2/admin/widgets/upsert first",
+          };
+        }
+
         // Make sure we have a thread on file before persisting anything.
         if (threadId) {
           const existing = await getThread(threadId, widgetId);
@@ -202,12 +227,11 @@ export const v2WidgetEndpoints = async (app: any) => {
                 //   widget.system_prompt                         >
                 //   LLM_SYSTEM_PROMPT env                        >
                 //   built-in default
-                const [widgetMaster, threadRow] = await Promise.all([
-                  widgetId ? getWidget(widgetId) : Promise.resolve(null),
-                  threadId
-                    ? getThread(threadId, widgetId)
-                    : Promise.resolve(null),
-                ]);
+                // widgetMaster 는 위 화이트리스트 가드에서 이미 조회했으므로
+                // 재사용한다 (중복 DB 조회 제거). threadRow 만 여기서 가져온다.
+                const threadRow = threadId
+                  ? await getThread(threadId, widgetId)
+                  : null;
                 const systemContent =
                   threadRow?.system_prompt?.trim() ||
                   widgetMaster?.system_prompt?.trim() ||
