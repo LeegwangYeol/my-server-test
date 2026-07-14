@@ -18,8 +18,10 @@ export const v2MailEndpoints = async (app: any) => {
       async ({
         headers,
         body,
+        set,
       }: {
         headers: Record<string, string | undefined>;
+        set: { status?: number | string };
         body: {
           to: string;
           subject: string;
@@ -34,6 +36,7 @@ export const v2MailEndpoints = async (app: any) => {
         const mailToken = process.env.MAIL_SEND_TOKEN?.trim();
         const adminToken = process.env.ADMIN_TOKEN?.trim();
         if (!mailToken && !adminToken) {
+          set.status = 500;
           return {
             success: false,
             error: "neither MAIL_SEND_TOKEN nor ADMIN_TOKEN is set on server",
@@ -44,6 +47,7 @@ export const v2MailEndpoints = async (app: any) => {
           (!!mailToken && token === mailToken) ||
           (!!adminToken && token === adminToken);
         if (!authorized) {
+          set.status = 401;
           return { success: false, error: "unauthorized" };
         }
 

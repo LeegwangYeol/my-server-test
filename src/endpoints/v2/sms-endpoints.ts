@@ -25,8 +25,10 @@ export const v2SmsEndpoints = async (app: any) => {
       async ({
         headers,
         body,
+        set,
       }: {
         headers: Record<string, string | undefined>;
+        set: { status?: number | string };
         body: {
           to: string;
           text: string;
@@ -34,6 +36,7 @@ export const v2SmsEndpoints = async (app: any) => {
       }) => {
         const expected = process.env.ADMIN_TOKEN?.trim();
         if (!expected) {
+          set.status = 500;
           return {
             success: false,
             error: "ADMIN_TOKEN env var not set on server",
@@ -41,6 +44,7 @@ export const v2SmsEndpoints = async (app: any) => {
         }
         const token = (headers["x-admin-token"] || "").trim();
         if (token !== expected) {
+          set.status = 401;
           return { success: false, error: "unauthorized" };
         }
 

@@ -34,13 +34,19 @@ type AdminHeaders = Record<string, string | undefined>;
  */
 function requireAdmin(
   headers: AdminHeaders,
+  set?: { status?: number | string },
 ): { success: false; error: string } | null {
   const expected = process.env.ADMIN_TOKEN?.trim();
   if (!expected) {
+    // 서버 설정 오류 — 클라이언트 잘못이 아니므로 500.
+    if (set) set.status = 500;
     return { success: false, error: "ADMIN_TOKEN env var not set on server" };
   }
   const token = (headers?.["x-admin-token"] || "").trim();
-  if (token !== expected) return { success: false, error: "unauthorized" };
+  if (token !== expected) {
+    if (set) set.status = 401;
+    return { success: false, error: "unauthorized" };
+  }
   return null;
 }
 
@@ -338,8 +344,8 @@ export const v2WidgetEndpoints = async (app: any) => {
      */
     app.post(
       "/admin/widgets",
-      async ({ headers }: { headers: AdminHeaders }) => {
-        const deny = requireAdmin(headers);
+      async ({ headers, set }: { headers: AdminHeaders; set: any }) => {
+        const deny = requireAdmin(headers, set);
         if (deny) return deny;
         const [registered, byActivity] = await Promise.all([
           listWidgetsRegistered(),
@@ -396,8 +402,16 @@ export const v2WidgetEndpoints = async (app: any) => {
 
     app.post(
       "/admin/widgets/upsert",
-      async ({ headers, body }: { headers: AdminHeaders; body: any }) => {
-        const deny = requireAdmin(headers);
+      async ({
+        headers,
+        body,
+        set,
+      }: {
+        headers: AdminHeaders;
+        body: any;
+        set: any;
+      }) => {
+        const deny = requireAdmin(headers, set);
         if (deny) return deny;
         const id = (body?.id ?? "").trim();
         if (!id) return { success: false, error: "id required" };
@@ -456,11 +470,12 @@ export const v2WidgetEndpoints = async (app: any) => {
       async ({
         headers,
         body,
+        set,
       }: {
         headers: Record<string, string | undefined>;
         body: { dryRun?: boolean } | undefined;
       }) => {
-        const deny = requireAdmin(headers);
+        const deny = requireAdmin(headers, set);
         if (deny) return deny;
 
         // Read history
@@ -548,11 +563,12 @@ export const v2WidgetEndpoints = async (app: any) => {
       async ({
         headers,
         body,
+        set,
       }: {
         headers: AdminHeaders;
         body: { widgetId: string; file: File };
       }) => {
-        const deny = requireAdmin(headers);
+        const deny = requireAdmin(headers, set);
         if (deny) return deny;
         const widgetId = (body?.widgetId ?? "").trim();
         const file = body?.file;
@@ -605,11 +621,12 @@ export const v2WidgetEndpoints = async (app: any) => {
       async ({
         headers,
         body,
+        set,
       }: {
         headers: AdminHeaders;
         body: { id?: string };
       }) => {
-        const deny = requireAdmin(headers);
+        const deny = requireAdmin(headers, set);
         if (deny) return deny;
         const id = (body?.id ?? "").trim();
         if (!id) return { success: false };
@@ -627,11 +644,12 @@ export const v2WidgetEndpoints = async (app: any) => {
       async ({
         headers,
         body,
+        set,
       }: {
         headers: AdminHeaders;
         body: { widgetId?: string };
       }) => {
-        const deny = requireAdmin(headers);
+        const deny = requireAdmin(headers, set);
         if (deny) return deny;
         const widgetId = body?.widgetId?.trim() ?? "";
         if (!widgetId) return { success: false, threads: [] };
@@ -657,6 +675,7 @@ export const v2WidgetEndpoints = async (app: any) => {
       async ({
         headers,
         body,
+        set,
       }: {
         headers: AdminHeaders;
         body: {
@@ -666,7 +685,7 @@ export const v2WidgetEndpoints = async (app: any) => {
           context_text?: string | null;
         };
       }) => {
-        const deny = requireAdmin(headers);
+        const deny = requireAdmin(headers, set);
         if (deny) return deny;
         const widgetId = body?.widgetId?.trim() ?? "";
         const threadId = body?.threadId?.trim() ?? "";
@@ -706,11 +725,12 @@ export const v2WidgetEndpoints = async (app: any) => {
       async ({
         headers,
         body,
+        set,
       }: {
         headers: AdminHeaders;
         body: { widgetId?: string; threadId?: string; title?: string | null };
       }) => {
-        const deny = requireAdmin(headers);
+        const deny = requireAdmin(headers, set);
         if (deny) return deny;
         const widgetId = body?.widgetId?.trim() ?? "";
         const threadId = body?.threadId?.trim() ?? "";
@@ -739,11 +759,12 @@ export const v2WidgetEndpoints = async (app: any) => {
       async ({
         headers,
         body,
+        set,
       }: {
         headers: AdminHeaders;
         body: { widgetId?: string; threadId?: string };
       }) => {
-        const deny = requireAdmin(headers);
+        const deny = requireAdmin(headers, set);
         if (deny) return deny;
         const widgetId = body?.widgetId?.trim() ?? "";
         const threadId = body?.threadId?.trim() ?? "";
