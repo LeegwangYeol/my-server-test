@@ -11,8 +11,8 @@
     "start": "NODE_ENV=production node dist/index.js",
     "test": "bun test",
     "mail:test": "node --env-file=.env scripts/send-test-mail.ts",
-    "sms:test": "node --env-file=.env scripts/send-test-sms.ts",
     "greetings": "node --env-file=.env scripts/send-greetings.ts",
+    "widget:upsert": "node --env-file=.env scripts/upsert-widget.ts",
     "introspection": "npx supabase gen types typescript --schema public --project-id pddzchdkbwhhbtpmagsx > lib/supabase/database.types.ts"
   },
   "dependencies": {
@@ -43,7 +43,6 @@
     "pdf-parse": "^1.1.1",
     "pseudo-shuffle": "^1.0.2",
     "redaxios": "^0.5.1",
-    "solapi": "^5.3.1",
     "typescript": "5.4.3"
   },
   "devDependencies": {
