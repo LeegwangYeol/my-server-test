@@ -169,7 +169,17 @@ export const v2WidgetEndpoints = async (app: any) => {
           async start(controller) {
             const enc = new TextEncoder();
             const sendChunk = (text: string) => {
-              const safe = text.replace(/ /g, "%20").replace(/\n/g, "%0a");
+              // Percent-encode the chunk so it can't contain a raw newline
+              // (SSE event boundary) or a leading space (trimmed by the
+              // "data: " parser). '%' MUST be escaped first — otherwise a
+              // literal '%' in the model output (e.g. "50%", "C++ 100%")
+              // becomes a dangling percent that throws URIError in the
+              // client's decodeURIComponent and truncates the stream.
+              const safe = text
+                .replace(/%/g, "%25")
+                .replace(/ /g, "%20")
+                .replace(/\n/g, "%0a")
+                .replace(/\r/g, "%0d");
               controller.enqueue(enc.encode(`data: ${safe}\n\n`));
             };
 
