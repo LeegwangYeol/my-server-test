@@ -13,6 +13,7 @@
     "mail:test": "node --env-file=.env scripts/send-test-mail.ts",
     "greetings": "node --env-file=.env scripts/send-greetings.ts",
     "widget:upsert": "node --env-file=.env scripts/upsert-widget.ts",
+    "sms:usage": "node --env-file=.env scripts/sms-usage.ts",
     "introspection": "npx supabase gen types typescript --schema public --project-id pddzchdkbwhhbtpmagsx > lib/supabase/database.types.ts"
   },
   "dependencies": {

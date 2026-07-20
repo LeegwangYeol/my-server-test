@@ -29,10 +29,17 @@ import {
   sendViaPushbullet,
   isPushbulletConfigured,
 } from "../lib/sms/pushbullet.ts";
+import {
+  getCount,
+  recordSends,
+  freeLimit,
+  currentMonth,
+} from "../lib/sms/usage.ts";
 import { readFileSync } from "node:fs";
 
 const usePushbullet =
   process.env.SMS_PROVIDER?.trim().toLowerCase() === "pushbullet";
+const provider = usePushbullet ? "pushbullet" : "phone";
 
 const argv = process.argv.slice(2);
 const flagValue = (flag: string): string | undefined => {
@@ -97,10 +104,25 @@ async function main() {
   console.log(
     `대상 ${contacts.length}명 · ${doSend ? "🚀 실제 발송" : "👀 미리보기(dry-run)"} · 경로 ${usePushbullet ? "Pushbullet(본인폰)" : "SMS Gate(폰 게이트웨이)"} · 발송 간격 ${delayMs}ms`,
   );
-  if (usePushbullet && contacts.length > 100) {
-    console.warn(
-      `⚠ Pushbullet 무료 계정은 월 ~100건 한도입니다 — 대상이 ${contacts.length}명이라 초과분은 실패할 수 있습니다.`,
+
+  // ── 이번 달 발송량(무료 한도) 안내 ──────────────────────────────
+  const limit = freeLimit(provider); // pushbullet=100, 그 외 null
+  if (limit !== null) {
+    const used = getCount(provider);
+    const projected = used + contacts.length;
+    console.log(
+      `이번 달(${currentMonth()}) ${provider} 사용: ${used}/${limit} · 이번 발송 ${contacts.length}건 → 예상 ${projected}/${limit}`,
     );
+    if (projected > limit) {
+      console.warn(
+        `⚠ 이번 발송으로 월 무료 한도(${limit})를 넘깁니다 (예상 ${projected}). 초과분은 발송이 실패할 수 있어요.\n` +
+          "  → 다음 달에 나눠 보내거나, SMS_PROVIDER=phone(SMS Gate)로 바꾸면 한도가 없습니다.",
+      );
+    } else if (projected > limit * 0.9) {
+      console.warn(
+        `⚠ 월 무료 한도의 90%에 근접합니다 (예상 ${projected}/${limit}).`,
+      );
+    }
   }
   console.log("─".repeat(56));
 
@@ -152,6 +174,7 @@ async function main() {
         : await sendViaPhoneGateway({ phoneNumber: c.phone, text });
       if (r.ok) {
         success++;
+        recordSends(provider, 1); // 성공 즉시 매건 기록(중간 크래시 대비)
         console.log(`✓ ${("state" in r ? r.state : undefined) ?? "queued"}`);
       } else {
         failures.push({
@@ -174,6 +197,12 @@ async function main() {
 
   console.log("─".repeat(56));
   console.log(`완료: 성공 ${success}명 / 실패 ${failures.length}명`);
+  if (limit !== null) {
+    const nowUsed = getCount(provider);
+    console.log(
+      `이번 달 ${provider} 누적: ${nowUsed}/${limit} (남은 ${Math.max(0, limit - nowUsed)}건)`,
+    );
+  }
   if (failures.length > 0) {
     console.log("실패 목록 (재발송 참고):");
     for (const f of failures) console.log(`  - ${f.name} (${f.phone}): ${f.error}`);

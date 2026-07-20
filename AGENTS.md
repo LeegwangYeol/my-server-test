@@ -231,6 +231,7 @@ node --env-file=.env scripts/send-greetings.ts --csv contacts.csv --template gre
 
 - **`--send` 없으면 무조건 미리보기만** — 실수로 100명에게 오발송하는 사고 방지용 안전장치. 절대 이 기본값을 바꾸지 말 것.
 - `SMS_SEND_DELAY_MS`(기본 2000ms)로 발송 간 딜레이 — 통신사 스팸필터 회피용. 낮추지 말 것.
+- **발송량 카운터**: `lib/sms/usage.ts`가 월별·provider별 성공 건수를 `.sms-usage.json`(로컬, gitignore, 전화번호 미저장)에 누적. send-greetings.ts가 발송 전 `사용/한도 → 예상`을 출력하고 성공마다 기록한다. pushbullet은 `PUSHBULLET_FREE_LIMIT`(기본 100) 초과 예상 시 **경고만**(차단 안 함). `npm run sms:usage`로 이번 달 사용량 조회. ⚠️ 이 맥에서 보낸 것만 집계(로컬 추정), 월 경계는 달력월 근사 → 90건쯤 여유 권장.
 - 이 스크립트는 `lib/sms/phone-gateway.ts`·`lib/sms/pushbullet.ts`를 **`.ts` 확장자 포함 직접 import**한다(barrel `lib/sms/index.ts`를 쓰지 않음) — `node --env-file`의 네이티브 ESM 리졸버가 확장자 생략·barrel의 extensionless 서브 import를 못 풀기 때문. 이 스크립트를 고칠 때 barrel import로 "정리"하지 말 것 — 조용히 깨진다.
 
 ### `/v2/admin/sms/send` (HTTP 엔드포인트)

@@ -145,3 +145,6 @@ bunfig.toml
 # 명절 인사 일괄발송용 개인정보 (이름/전화번호) — 커밋 금지. *.example 만 추적.
 contacts.csv
 greeting.txt
+
+# SMS 월별 발송량 카운터 (로컬 런타임 상태)
+.sms-usage.json
