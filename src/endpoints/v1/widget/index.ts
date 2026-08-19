@@ -20,11 +20,6 @@ import { v1WidgetReferenceFileList } from "./reference-file-list";
 import { v1WidgetReferenceFileUpload } from "./reference-file-upload";
 import { v1WidgetCustomIconUpload } from "./custom-icon-upload";
 import { v1WidgetThreadContact } from "./thread-contact";
-import { v1NewsImageUpload } from "./news-image-upload";
-import { v1UpdateNews } from "./news-update";
-import { v1NewsList } from "./news-list";
-import { v1NewsWidget } from "./news-widget";
-import { v1DeleteNews } from "./news-delete";
 import { v1PaymentWorkspace } from "./payment";
 import { v1WidgetThreadContactList } from "./thread-contact-list";
 import { v1WidgetMessageCount } from "./message-count";
@@ -64,12 +59,6 @@ export const v1Widget = async (app: Elysia<"/v1">) => {
     v1WidgetCustomIconUpload(app);
     v1WidgetCustomLogoUpload(app);
     v1WidgetThreadContact(app);
-
-    v1NewsImageUpload(app);
-    v1UpdateNews(app);
-    v1NewsList(app);
-    v1NewsWidget(app);
-    v1DeleteNews(app);
 
     v1PaymentWorkspace(app);
 
