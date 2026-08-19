@@ -35,3 +35,19 @@ export const supabaseClient = new Proxy({} as ReturnType<typeof createSupabaseCl
 });
 
 export type Supabase = ReturnType<typeof createSupabaseClient<"public">>;
+
+/**
+ * Escape hatch for tables that aren't in `database.types.ts` yet
+ * (chat_thread, chat_message, widget — Supabase introspection needs re-running).
+ *
+ * The generated `Database` type turns every chained call on an unknown table
+ * into a type error, and a `@ts-expect-error` only suppresses the ONE line
+ * that follows it — so it can never cover a
+ * `.from().select().eq().order().limit()` chain. That left ~1100 errors in
+ * `next build`. Route those queries through this handle instead; it is the
+ * same client object at runtime, only the compile-time types are loosened.
+ *
+ * Delete this once the tables are in the generated types.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export const supabaseUntyped = supabaseClient as unknown as { from: (table: string) => any };

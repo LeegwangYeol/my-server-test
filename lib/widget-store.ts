@@ -9,7 +9,7 @@
  * widget hasn't been registered yet.
  */
 
-import { supabaseClient } from "./supabase/client";
+import { supabaseUntyped } from "./supabase/client";
 
 export interface WidgetRow {
   id: string;
@@ -73,8 +73,7 @@ function normalizeRow(row: any): WidgetRow {
 /** Read one widget row, ignoring soft-deleted entries. */
 export async function getWidget(id: string): Promise<WidgetRow | null> {
   if (!id) return null;
-  const { data, error } = await supabaseClient
-    // @ts-expect-error — widget table not in generated types yet
+  const { data, error } = await supabaseUntyped
     .from(TABLE)
     .select("*")
     .eq("id", id)
@@ -89,8 +88,7 @@ export async function getWidget(id: string): Promise<WidgetRow | null> {
 
 /** List all live widgets, newest activity first. */
 export async function listWidgetsRegistered(): Promise<WidgetRow[]> {
-  const { data, error } = await supabaseClient
-    // @ts-expect-error — widget table not in generated types yet
+  const { data, error } = await supabaseUntyped
     .from(TABLE)
     .select("*")
     .eq("is_deleted", false)
@@ -136,8 +134,7 @@ export async function upsertWidget(
     patch.chat_bubble_size = v ? v : null;
   }
 
-  const { data, error } = await supabaseClient
-    // @ts-expect-error — widget table not in generated types yet
+  const { data, error } = await supabaseUntyped
     .from(TABLE)
     .upsert(patch, { onConflict: "id" })
     .select("*")
@@ -152,8 +149,7 @@ export async function upsertWidget(
 /** Soft-delete (sets is_deleted = true). Hard delete is intentionally not exposed. */
 export async function deleteWidget(id: string): Promise<boolean> {
   if (!id) return false;
-  const { error } = await supabaseClient
-    // @ts-expect-error — widget table not in generated types yet
+  const { error } = await supabaseUntyped
     .from(TABLE)
     .update({ is_deleted: true })
     .eq("id", id);

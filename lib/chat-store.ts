@@ -8,7 +8,7 @@
  * so this module ONLY runs on the server.
  */
 
-import { supabaseClient } from "./supabase/client";
+import { supabaseUntyped } from "./supabase/client";
 
 export type ChatRole = "system" | "user" | "assistant";
 
@@ -43,9 +43,7 @@ export interface ChatThreadRow {
 /* ─── threads ──────────────────────────────────────────────────────── */
 
 export async function createThread(widgetId: string): Promise<string | null> {
-  const { data, error } = await supabaseClient
-    // @ts-expect-error — chat_thread table isn't in the auto-generated types
-    // yet (Supabase introspection needs to be re-run). Runtime-safe.
+  const { data, error } = await supabaseUntyped
     .from("chat_thread")
     .insert({ widget_id: widgetId })
     .select("id")
@@ -66,8 +64,7 @@ export async function getThread(
   threadId: string,
   widgetId?: string,
 ): Promise<ChatThreadRow | null> {
-  let query = supabaseClient
-    // @ts-expect-error — see createThread
+  let query = supabaseUntyped
     .from("chat_thread")
     .select("*")
     .eq("id", threadId)
@@ -89,8 +86,7 @@ export async function listMessages(
   threadId: string,
   limit = 50,
 ): Promise<ChatMessageRow[]> {
-  const { data, error } = await supabaseClient
-    // @ts-expect-error — see createThread
+  const { data, error } = await supabaseUntyped
     .from("chat_message")
     .select("*")
     .eq("thread_id", threadId)
@@ -108,8 +104,7 @@ export async function appendMessage(
   role: ChatRole,
   content: string,
 ): Promise<void> {
-  const { error } = await supabaseClient
-    // @ts-expect-error — see createThread
+  const { error } = await supabaseUntyped
     .from("chat_message")
     .insert({ thread_id: threadId, role, content });
   if (error) {
@@ -134,8 +129,7 @@ export interface WidgetSummary {
  * of widgets.
  */
 export async function listWidgets(limit = 1000): Promise<WidgetSummary[]> {
-  const { data, error } = await supabaseClient
-    // @ts-expect-error — see createThread
+  const { data, error } = await supabaseUntyped
     .from("chat_thread")
     .select("widget_id, updated_at")
     .eq("is_deleted", false)
@@ -195,8 +189,7 @@ export async function listThreads(
   // NOTE: select("*") so this keeps working both before and after the
   // `title` column migration lands. Once title is everywhere we can
   // tighten this back to an explicit column list.
-  const { data: threads, error } = await supabaseClient
-    // @ts-expect-error — see createThread
+  const { data: threads, error } = await supabaseUntyped
     .from("chat_thread")
     .select("*")
     .eq("widget_id", widgetId)
@@ -212,8 +205,7 @@ export async function listThreads(
 
   // Fetch counts + last user message per thread in a single round trip.
   const ids = rows.map((r) => r.id);
-  const { data: msgs } = await supabaseClient
-    // @ts-expect-error — see createThread
+  const { data: msgs } = await supabaseUntyped
     .from("chat_message")
     .select("thread_id, role, content, created_at")
     .in("thread_id", ids)
@@ -266,8 +258,7 @@ export async function renameThread(
 ): Promise<boolean> {
   const normalized =
     title && title.trim().length > 0 ? title.trim().slice(0, 200) : null;
-  const { error } = await supabaseClient
-    // @ts-expect-error — see createThread
+  const { error } = await supabaseUntyped
     .from("chat_thread")
     .update({ title: normalized })
     .eq("id", threadId)
@@ -306,8 +297,7 @@ export async function updateThreadPrompt(
   }
   if (Object.keys(update).length === 0) return true;
 
-  const { error } = await supabaseClient
-    // @ts-expect-error — see createThread
+  const { error } = await supabaseUntyped
     .from("chat_thread")
     .update(update)
     .eq("id", threadId)
