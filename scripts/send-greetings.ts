@@ -204,7 +204,12 @@ async function main() {
       if (r.ok) {
         success++;
         recordSends(provider, 1); // 성공 즉시 매건 기록(중간 크래시 대비)
-        console.log(`✓ ${("state" in r ? r.state : undefined) ?? "queued"}`);
+        // imessage 는 "메시지앱 접수"까지만 확인된다(배달 보장 아님) → 표시를 구분한다.
+        const label =
+          ("deliveryConfirmed" in r && r.deliveryConfirmed === false)
+            ? "접수(배달 미확인)"
+            : (("state" in r ? r.state : undefined) ?? "queued");
+        console.log(`✓ ${label}`);
       } else {
         failures.push({
           name: c.name,
@@ -225,7 +230,14 @@ async function main() {
   }
 
   console.log("─".repeat(56));
-  console.log(`완료: 성공 ${success}명 / 실패 ${failures.length}명`);
+  console.log(`완료: 접수 ${success}명 / 실패 ${failures.length}명`);
+  if (provider === "imessage") {
+    console.warn(
+      "⚠️ iMessage 경로는 **배달 확인이 불가**합니다. 위 '접수'는 메시지 앱에 넣었다는 뜻일 뿐입니다.\n" +
+        "   메시지 앱을 열어 빨간 ! (전송 안 됨) 표시가 없는지 꼭 확인하세요.\n" +
+        "   참고: 중계 중인 아이폰 '본인 번호'로는 배달되지 않습니다(테스트는 다른 번호로).",
+    );
+  }
   if (limit !== null) {
     const nowUsed = getCount(provider);
     console.log(

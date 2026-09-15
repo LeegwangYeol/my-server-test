@@ -48,9 +48,17 @@ export function isIMessageConfigured(): boolean {
 }
 
 export interface IMessageResult {
+  /**
+   * ⚠️ **배달 성공이 아니라 "메시지 앱 접수 성공"이다.**
+   * AppleScript 는 큐에 넣는 것까지만 알려주고, 실제 배달 실패(전송 안 됨)는
+   * 나중에 메시지 앱에서 빨간 ! 로만 나타난다. 동기적으로 확인할 방법이 없다.
+   * 특히 **자기 자신의 번호로는 배달되지 않는다**(중계 중인 아이폰 본인 회선).
+   */
   ok: boolean;
-  /** osascript 종료 코드 (0 = 성공) */
+  /** osascript 종료 코드 (0 = 접수됨) */
   status: number;
+  /** 이 경로는 배달 확인을 제공하지 못함을 호출측에 알린다. */
+  deliveryConfirmed: false;
   raw?: unknown;
 }
 
@@ -101,7 +109,7 @@ export async function sendViaIMessage({
       clearTimeout(timer);
       const status = code ?? -1;
       if (status === 0) {
-        resolve({ ok: true, status });
+        resolve({ ok: true, status, deliveryConfirmed: false });
       } else {
         // 권한 거부(-1743) 등 자주 나오는 원인을 사람이 읽을 수 있게 덧붙인다.
         const hint = /-1743|not allowed|권한/.test(stderr)
@@ -110,6 +118,7 @@ export async function sendViaIMessage({
         resolve({
           ok: false,
           status,
+          deliveryConfirmed: false,
           raw: (stderr.trim() || `exit ${status}`) + hint,
         });
       }
