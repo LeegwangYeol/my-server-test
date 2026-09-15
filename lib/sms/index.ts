@@ -17,13 +17,15 @@ import {
   sendViaPhoneGateway,
 } from "./phone-gateway";
 import { isPushbulletConfigured, sendViaPushbullet } from "./pushbullet";
+import { isIMessageConfigured, sendViaIMessage } from "./imessage";
 
-export type SmsProvider = "phone" | "pushbullet";
+export type SmsProvider = "phone" | "pushbullet" | "imessage";
 
 /** Active provider from env. Defaults to the free phone gateway. */
 export function activeProvider(): SmsProvider {
   const v = process.env.SMS_PROVIDER?.trim().toLowerCase();
   if (v === "pushbullet") return "pushbullet";
+  if (v === "imessage") return "imessage";
   // "solapi" 를 포함한 그 외 값은 전부 무료 phone gateway 로 폴백한다.
   return "phone";
 }
@@ -32,6 +34,7 @@ export function activeProvider(): SmsProvider {
 export function isSmsConfigured(): boolean {
   const provider = activeProvider();
   if (provider === "pushbullet") return isPushbulletConfigured();
+  if (provider === "imessage") return isIMessageConfigured();
   return isPhoneGatewayConfigured();
 }
 
@@ -52,6 +55,10 @@ export async function sendSms({
   const provider = activeProvider();
   if (provider === "pushbullet") {
     const detail = await sendViaPushbullet({ phoneNumber, text });
+    return { ok: detail.ok, provider, detail };
+  }
+  if (provider === "imessage") {
+    const detail = await sendViaIMessage({ phoneNumber, text });
     return { ok: detail.ok, provider, detail };
   }
   const detail = await sendViaPhoneGateway({ phoneNumber, text });

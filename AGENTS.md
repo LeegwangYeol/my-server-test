@@ -85,7 +85,8 @@ lib/
     index.ts            ← SMS_PROVIDER 스위치로 3개 백엔드 통합 (phone/solapi/pushbullet)
     solapi.ts           ← SOLAPI SMS/카카오알림톡 (유료, 건당 과금). lazy-init 리팩터 완료(module-load throw 금지 패턴 적용)
     phone-gateway.ts    ← SMS Gate 안드로이드 게이트웨이 앱 API (APK 사이드로드 설치, 0원, 발송량 한도 없음)
-    pushbullet.ts       ← Pushbullet API (Play스토어 정식 앱, 0원, 무료 계정 월 ~100건 한도)
+    pushbullet.ts       ← Pushbullet API (안드로이드폰, 0원, 무료 계정 월 ~100건 한도). 별명→iden 자동 해석 지원
+    imessage.ts         ← 맥 Messages + 아이폰 문자전달 (osascript, 0원, 한도없음, 맥 로컬 전용)
   ⚠️ 자격증명 전부 env화 완료. 과거 SOLAPI 키 평문 노출 이력 있음 (7번 보안 주의 참고)
 supabase/migrations/    ← SQL 마이그레이션 (chat_history, widget_master, thread_title)
 vercel.json             ← 배포 설정 (2번 절 참고)
@@ -173,8 +174,9 @@ curl -s https://my-server-test.vercel.app/v1/heartbeat        # → {"status":"a
 | `LLM_MODEL`, `LLM_MAX_TOKENS`(기본512), `LLM_SYSTEM_PROMPT` | 선택 튜닝 | 기본값 |
 | `ADMIN_TOKEN` | `/v2/admin/*` 인증 시크릿 | **미설정 시 모든 admin 요청 거부(fail-closed)** |
 | `MAIL_SEND_TOKEN`, `NAVER_MAIL_USER`, `NAVER_MAIL_PASSWORD`, `NAVER_MAIL_FROM_NAME` | `/v2/admin/mail/send` 네이버 SMTP | 메일 발송 거부 |
-| `SMS_PROVIDER` | SMS 백엔드 선택(`phone`/`solapi`/`pushbullet`) | 미설정 시 `phone` 기본값 |
-| `PUSHBULLET_ACCESS_TOKEN`, `PUSHBULLET_DEVICE_IDEN` | `SMS_PROVIDER=pushbullet` | 발송 거부(`isSmsConfigured()`가 false) |
+| `SMS_PROVIDER` | SMS 백엔드 선택(`pushbullet`/`imessage`/`phone`) | 미설정 시 `phone` 기본값 |
+| `PUSHBULLET_ACCESS_TOKEN` + (`PUSHBULLET_DEVICE_NICKNAME` 또는 `PUSHBULLET_DEVICE_IDEN`) | `SMS_PROVIDER=pushbullet` | 발송 거부(`isSmsConfigured()`가 false) |
+| `IMESSAGE_SERVICE_ID`(선택), `IMESSAGE_SEND_TIMEOUT_MS`(선택) | `SMS_PROVIDER=imessage` | 자동 선택/기본 30초 |
 | `SMS_GATEWAY_URL/USERNAME/PASSWORD/SIM` | `SMS_PROVIDER=phone` (SMS Gate 앱) | 발송 거부 |
 | `SOLAPI_API_KEY/SECRET/ADMIN_PHONE_NUMBER`, `KAKAO_BUSINESS_CHANNEL_ID` | `SMS_PROVIDER=solapi` (건당 과금) | 발송 거부 — 카카오 알림톡 전용 함수 호출 시에만 채널ID 필요 |
 
@@ -213,9 +215,18 @@ curl -s https://my-server-test.vercel.app/v1/heartbeat        # → {"status":"a
 
 | `SMS_PROVIDER` | 방식 | 비용 | 설치 | 한도 |
 |---|---|---|---|---|
-| `pushbullet` | Play스토어 정식 앱(Pushbullet)이 본인 폰으로 발송 | 0원(문자무제한 요금제 전제) | 앱 설치만, APK 사이드로드 없음 | **무료 계정 월 ~100건** |
+| `pushbullet` | Play스토어 앱(Pushbullet)이 **안드로이드폰**(본인/가족)으로 발송 | 0원(문자무제한 요금제 전제) | 앱 설치만, APK 사이드로드 없음 | **무료 계정 월 ~100건** |
+| `imessage` | 맥 **메시지앱** + 본인 **아이폰**(문자 메시지 전달)으로 녹색 SMS 발송 | 0원(문자무제한 요금제 전제) | 설치 없음(macOS 기본앱) | 없음 |
 | `phone` (기본값) | SMS Gate 앱(APK)이 안드로이드 공기계로 발송 | 0원 | GitHub Releases APK 사이드로드 필요 | 없음 |
-| `solapi` | SOLAPI(구 CoolSMS) 유료 API | 건당 과금(SMS ~13원) | 없음(API 키만) | 과금 기반이라 사실상 없음 |
+
+> **폰 갈아끼우기**: `.env` 의 `SMS_PROVIDER` 만 바꾸면 경로가 바뀐다. 안드로이드 기기 교체는
+> `PUSHBULLET_DEVICE_NICKNAME=<폰 별명>` 한 줄이면 되고(iden 자동 조회), 지금 쓸 수 있는
+> 기기·서비스는 **`npm run sms:devices`** 로 확인한다.
+>
+> **`imessage` 제약**: `osascript` 가 필요해 **맥 로컬에서만** 동작한다(Vercel 불가). 아이폰이
+> 켜져 있고 "문자 메시지 전달"이 켜져 있어야 하며, 첫 실행 시 macOS 자동화 권한 허용이 필요하다.
+> 전화번호·본문은 AppleScript 문자열에 보간하지 않고 **argv 로 전달**해 인젝션을 차단한다
+> (`lib/sms/imessage.ts` — 이 방식을 바꾸지 말 것).
 
 세 백엔드 모두 **import 시점에 절대 throw하지 않는다**(4번 항목의 lazy 패턴 준수) — `isSmsConfigured()`로 설정 여부만 확인하고, 실제 미설정 시 에러는 발송 함수 호출 시점에만 던진다.
 
@@ -232,7 +243,7 @@ node --env-file=.env scripts/send-greetings.ts --csv contacts.csv --template gre
 - **`--send` 없으면 무조건 미리보기만** — 실수로 100명에게 오발송하는 사고 방지용 안전장치. 절대 이 기본값을 바꾸지 말 것.
 - `SMS_SEND_DELAY_MS`(기본 2000ms)로 발송 간 딜레이 — 통신사 스팸필터 회피용. 낮추지 말 것.
 - **발송량 카운터**: `lib/sms/usage.ts`가 월별·provider별 성공 건수를 `.sms-usage.json`(로컬, gitignore, 전화번호 미저장)에 누적. send-greetings.ts가 발송 전 `사용/한도 → 예상`을 출력하고 성공마다 기록한다. pushbullet은 `PUSHBULLET_FREE_LIMIT`(기본 100) 초과 예상 시 **경고만**(차단 안 함). `npm run sms:usage`로 이번 달 사용량 조회. ⚠️ 이 맥에서 보낸 것만 집계(로컬 추정), 월 경계는 달력월 근사 → 90건쯤 여유 권장.
-- 이 스크립트는 `lib/sms/phone-gateway.ts`·`lib/sms/pushbullet.ts`를 **`.ts` 확장자 포함 직접 import**한다(barrel `lib/sms/index.ts`를 쓰지 않음) — `node --env-file`의 네이티브 ESM 리졸버가 확장자 생략·barrel의 extensionless 서브 import를 못 풀기 때문. 이 스크립트를 고칠 때 barrel import로 "정리"하지 말 것 — 조용히 깨진다.
+- 이 스크립트는 `lib/sms/phone-gateway.ts`·`lib/sms/pushbullet.ts`·`lib/sms/imessage.ts`를 **`.ts` 확장자 포함 직접 import**한다(barrel `lib/sms/index.ts`를 쓰지 않음) — `node --env-file`의 네이티브 ESM 리졸버가 확장자 생략·barrel의 extensionless 서브 import를 못 풀기 때문. 이 스크립트를 고칠 때 barrel import로 "정리"하지 말 것 — 조용히 깨진다.
 
 ### `/v2/admin/sms/send` (HTTP 엔드포인트)
 

@@ -30,6 +30,10 @@ import {
   isPushbulletConfigured,
 } from "../lib/sms/pushbullet.ts";
 import {
+  sendViaIMessage,
+  isIMessageConfigured,
+} from "../lib/sms/imessage.ts";
+import {
   getCount,
   recordSends,
   freeLimit,
@@ -37,9 +41,44 @@ import {
 } from "../lib/sms/usage.ts";
 import { readFileSync } from "node:fs";
 
-const usePushbullet =
-  process.env.SMS_PROVIDER?.trim().toLowerCase() === "pushbullet";
-const provider = usePushbullet ? "pushbullet" : "phone";
+// 발송 경로 3종. 폰을 갈아끼울 때는 .env 의 SMS_PROVIDER 만 바꾸면 된다.
+//   pushbullet → 안드로이드폰(본인/가족) 경유. 기기는 IDEN 또는 NICKNAME 으로 지정
+//   imessage   → 맥 메시지앱 + 본인 아이폰(문자 메시지 전달). 맥 로컬 전용
+//   phone      → SMS Gate 게이트웨이 앱(APK). 기본값
+const rawProvider = process.env.SMS_PROVIDER?.trim().toLowerCase();
+const provider: "pushbullet" | "imessage" | "phone" =
+  rawProvider === "pushbullet"
+    ? "pushbullet"
+    : rawProvider === "imessage"
+      ? "imessage"
+      : "phone";
+
+const PROVIDER_LABEL = {
+  pushbullet: "Pushbullet(안드로이드폰)",
+  imessage: "iMessage(맥+아이폰 문자전달)",
+  phone: "SMS Gate(폰 게이트웨이)",
+} as const;
+
+const isConfiguredFor = {
+  pushbullet: isPushbulletConfigured,
+  imessage: isIMessageConfigured,
+  phone: isPhoneGatewayConfigured,
+} as const;
+
+const CONFIG_HINT = {
+  pushbullet:
+    "PUSHBULLET_ACCESS_TOKEN 과 (PUSHBULLET_DEVICE_IDEN 또는 PUSHBULLET_DEVICE_NICKNAME) 을 .env 에 넣으세요.\n  목록 확인: npm run sms:devices",
+  imessage:
+    "iMessage 경로는 macOS 에서만 동작합니다. 아이폰 설정 > 메시지 > 문자 메시지 전달에서 이 맥을 켜고,\n  맥에 Messages 자동화 권한을 허용하세요. 확인: npm run sms:devices",
+  phone:
+    "SMS_GATEWAY_URL / SMS_GATEWAY_USERNAME / SMS_GATEWAY_PASSWORD 를 .env 에 넣으세요. (SMS Gate 앱 'Local server' 화면 값)",
+} as const;
+
+const sendOne = {
+  pushbullet: sendViaPushbullet,
+  imessage: sendViaIMessage,
+  phone: sendViaPhoneGateway,
+} as const;
 
 const argv = process.argv.slice(2);
 const flagValue = (flag: string): string | undefined => {
@@ -102,7 +141,7 @@ async function main() {
   }
 
   console.log(
-    `대상 ${contacts.length}명 · ${doSend ? "🚀 실제 발송" : "👀 미리보기(dry-run)"} · 경로 ${usePushbullet ? "Pushbullet(본인폰)" : "SMS Gate(폰 게이트웨이)"} · 발송 간격 ${delayMs}ms`,
+    `대상 ${contacts.length}명 · ${doSend ? "🚀 실제 발송" : "👀 미리보기(dry-run)"} · 경로 ${PROVIDER_LABEL[provider]} · 발송 간격 ${delayMs}ms`,
   );
 
   // ── 이번 달 발송량(무료 한도) 안내 ──────────────────────────────
@@ -146,17 +185,9 @@ async function main() {
   }
 
   // ── 실제 발송 모드 ──────────────────────────────────────────────
-  if (usePushbullet && !isPushbulletConfigured()) {
+  if (!isConfiguredFor[provider]()) {
     console.error(
-      "✗ Pushbullet 미설정. .env 에 PUSHBULLET_ACCESS_TOKEN / PUSHBULLET_DEVICE_IDEN 을 넣으세요.\n" +
-        "  (pushbullet.com > Settings > Create Access Token, 폰 device iden)",
-    );
-    process.exit(1);
-  }
-  if (!usePushbullet && !isPhoneGatewayConfigured()) {
-    console.error(
-      "✗ 폰 게이트웨이 미설정. .env 에 SMS_GATEWAY_URL / SMS_GATEWAY_USERNAME / " +
-        "SMS_GATEWAY_PASSWORD 를 넣으세요. (SMS Gate 앱 'Local server' 화면 값)",
+      `✗ ${PROVIDER_LABEL[provider]} 경로가 설정되지 않았습니다.\n  ${CONFIG_HINT[provider]}`,
     );
     process.exit(1);
   }
@@ -169,9 +200,7 @@ async function main() {
     const text = personalize(template, c.name);
     process.stdout.write(`[${i + 1}/${contacts.length}] ${c.name} (${c.phone}) … `);
     try {
-      const r = usePushbullet
-        ? await sendViaPushbullet({ phoneNumber: c.phone, text })
-        : await sendViaPhoneGateway({ phoneNumber: c.phone, text });
+      const r = await sendOne[provider]({ phoneNumber: c.phone, text });
       if (r.ok) {
         success++;
         recordSends(provider, 1); // 성공 즉시 매건 기록(중간 크래시 대비)
