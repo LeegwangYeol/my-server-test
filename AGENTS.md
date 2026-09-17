@@ -227,6 +227,15 @@ curl -s https://my-server-test.vercel.app/v1/heartbeat        # → {"status":"a
 > 켜져 있고 "문자 메시지 전달"이 켜져 있어야 하며, 첫 실행 시 macOS 자동화 권한 허용이 필요하다.
 > 전화번호·본문은 AppleScript 문자열에 보간하지 않고 **argv 로 전달**해 인젝션을 차단한다
 > (`lib/sms/imessage.ts` — 이 방식을 바꾸지 말 것).
+>
+> **`imessage` 배달 확인**: AppleScript 는 "접수"까지만 알려주므로, 발송 후 `lib/sms/imessage-verify.ts`
+> 가 메시지 앱 DB(`~/Library/Messages/chat.db`)의 `is_sent`/`error` 를 읽어 수신자별 실제 결과를
+> 대조한다 — **터미널에 macOS '전체 디스크 접근' 권한이 있어야** 동작하며, 없으면 권한 안내만 하고
+> 발송은 막지 않는다. 나중에 재확인: `npm run sms:verify -- --csv contacts.csv --since 2h`.
+> 주의: 중계 중인 아이폰 **본인 번호로는 배달되지 않는다**(테스트는 다른 번호로).
+>
+> **명단 분할**: `--limit N` / `--skip N` 으로 100명을 30명씩 등 나눠 보낼 수 있다(dry-run 에도 적용).
+> 예: `npm run greetings -- --send --limit 30` → 다음 `--skip 30 --limit 30` … 출력에 다음 묶음 값이 안내된다.
 
 세 백엔드 모두 **import 시점에 절대 throw하지 않는다**(4번 항목의 lazy 패턴 준수) — `isSmsConfigured()`로 설정 여부만 확인하고, 실제 미설정 시 에러는 발송 함수 호출 시점에만 던진다.
 

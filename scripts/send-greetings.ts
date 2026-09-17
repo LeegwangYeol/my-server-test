@@ -34,6 +34,11 @@ import {
   isIMessageConfigured,
 } from "../lib/sms/imessage.ts";
 import {
+  canReadMessagesDb,
+  verifyDeliveries,
+  STATE_LABEL,
+} from "../lib/sms/imessage-verify.ts";
+import {
   getCount,
   recordSends,
   freeLimit,
@@ -91,6 +96,18 @@ const csvPath = flagValue("--csv") ?? "contacts.csv";
 const templatePath = flagValue("--template") ?? "greeting.txt";
 const doSend = hasFlag("--send");
 const delayMs = Number(process.env.SMS_SEND_DELAY_MS ?? "2000");
+// 명단 분할: --limit N (이번에 몇 명) / --skip N (앞에서 몇 명 건너뛰기).
+// 100명을 30명씩 나눠 보내면 통신사 스팸 차단 위험이 줄고, 중간 점검이 가능하다.
+const batchLimit = flagValue("--limit") ? Number(flagValue("--limit")) : Infinity;
+const batchSkip = flagValue("--skip") ? Number(flagValue("--skip")) : 0;
+if (
+  !Number.isInteger(batchSkip) ||
+  batchSkip < 0 ||
+  (batchLimit !== Infinity && (!Number.isInteger(batchLimit) || batchLimit <= 0))
+) {
+  console.error("✗ --limit 은 1 이상, --skip 은 0 이상의 정수여야 합니다.");
+  process.exit(1);
+}
 
 interface Contact {
   name: string;
@@ -129,15 +146,33 @@ function readOrExit(path: string, label: string): string {
 
 async function main() {
   const template = readOrExit(templatePath, "템플릿").trim();
-  const contacts = parseCsv(readOrExit(csvPath, "연락처 CSV"));
+  const allContacts = parseCsv(readOrExit(csvPath, "연락처 CSV"));
 
   if (!template) {
     console.error(`✗ 템플릿이 비어 있습니다: ${templatePath}`);
     process.exit(1);
   }
-  if (contacts.length === 0) {
+  if (allContacts.length === 0) {
     console.error(`✗ 발송 대상이 없습니다 (CSV: ${csvPath})`);
     process.exit(1);
+  }
+  // --skip / --limit 적용. 미리보기(dry-run)에도 똑같이 적용돼 묶음 단위로 확인 가능.
+  const contacts = allContacts.slice(
+    batchSkip,
+    batchLimit === Infinity ? undefined : batchSkip + batchLimit,
+  );
+  if (contacts.length === 0) {
+    console.error(
+      `✗ --skip ${batchSkip} 이후 대상이 없습니다 (전체 ${allContacts.length}명)`,
+    );
+    process.exit(1);
+  }
+  if (batchSkip > 0 || batchLimit !== Infinity) {
+    const end = batchSkip + contacts.length;
+    console.log(
+      `📦 명단 분할: 전체 ${allContacts.length}명 중 ${batchSkip + 1}~${end}번째 (${contacts.length}명)` +
+        (end < allContacts.length ? ` · 다음 묶음: --skip ${end}` : " · 마지막 묶음"),
+    );
   }
 
   console.log(
@@ -192,6 +227,7 @@ async function main() {
     process.exit(1);
   }
 
+  const sendStartedAt = Date.now(); // 배달 검증 시 이 시각 이후 메시지만 대조
   let success = 0;
   const failures: { name: string; phone: string; error: string }[] = [];
 
@@ -211,12 +247,15 @@ async function main() {
             : (("state" in r ? r.state : undefined) ?? "queued");
         console.log(`✓ ${label}`);
       } else {
+        // imessage 는 osascript 종료코드, 나머지는 HTTP 상태코드 — 표기를 구분한다.
+        const codeLabel =
+          provider === "imessage" ? `exit ${r.status}` : `HTTP ${r.status}`;
         failures.push({
           name: c.name,
           phone: c.phone,
-          error: `HTTP ${r.status} ${JSON.stringify(r.raw ?? "")}`,
+          error: `${codeLabel} ${JSON.stringify(r.raw ?? "")}`,
         });
-        console.log(`✗ HTTP ${r.status}`);
+        console.log(`✗ ${codeLabel}`);
       }
     } catch (e) {
       failures.push({
@@ -232,11 +271,49 @@ async function main() {
   console.log("─".repeat(56));
   console.log(`완료: 접수 ${success}명 / 실패 ${failures.length}명`);
   if (provider === "imessage") {
-    console.warn(
-      "⚠️ iMessage 경로는 **배달 확인이 불가**합니다. 위 '접수'는 메시지 앱에 넣었다는 뜻일 뿐입니다.\n" +
-        "   메시지 앱을 열어 빨간 ! (전송 안 됨) 표시가 없는지 꼭 확인하세요.\n" +
-        "   참고: 중계 중인 아이폰 '본인 번호'로는 배달되지 않습니다(테스트는 다른 번호로).",
-    );
+    if (canReadMessagesDb()) {
+      // 배달은 비동기라 잠깐 기다린 뒤 메시지 앱 DB(chat.db)로 실제 결과를 대조한다.
+      const settleMs = Number(process.env.IMESSAGE_VERIFY_WAIT_MS ?? "8000");
+      console.log(`⏳ 배달 결과 확인 중… (${settleMs / 1000}초 대기)`);
+      await sleep(settleMs);
+      const results = verifyDeliveries(
+        contacts.map((c) => c.phone),
+        sendStartedAt,
+      );
+      const failed: string[] = [];
+      const unsettled: string[] = [];
+      for (let i = 0; i < contacts.length; i++) {
+        const r = results[i];
+        const who = `${contacts[i].name} (${contacts[i].phone})`;
+        if (r.state === "failed") failed.push(`${who} error=${r.error}`);
+        else if (r.state === "pending" || r.state === "not_found")
+          unsettled.push(`${who} ${STATE_LABEL[r.state]}`);
+      }
+      const okCount = results.filter(
+        (r) => r.state === "delivered" || r.state === "sent",
+      ).length;
+      console.log(
+        `📬 배달 확인: 정상 ${okCount} · 전송 안 됨 ${failed.length} · 미확정 ${unsettled.length}`,
+      );
+      if (failed.length) {
+        console.log("❌ 전송 안 됨 — 재발송 필요:");
+        for (const f of failed) console.log(`  - ${f}`);
+      }
+      if (unsettled.length) {
+        console.log(
+          `⏳ 아직 확정 안 됨 — 잠시 후 재확인:  npm run sms:verify -- --csv ${csvPath}`,
+        );
+        for (const u of unsettled) console.log(`  - ${u}`);
+      }
+    } else {
+      console.warn(
+        "⚠️ iMessage 배달 결과를 자동 확인하지 못했습니다 — 터미널에 '전체 디스크 접근' 권한이 없습니다.\n" +
+          "   시스템 설정 > 개인정보 보호 및 보안 > 전체 디스크 접근 > 터미널 켜기 → 터미널 재시작 후\n" +
+          `   npm run sms:verify -- --csv ${csvPath}  로 누가 실패했는지 확인하세요.\n` +
+          "   지금은 메시지 앱에서 빨간 ! (전송 안 됨) 표시를 직접 확인해주세요.\n" +
+          "   참고: 중계 중인 아이폰 '본인 번호'로는 배달되지 않습니다.",
+      );
+    }
   }
   if (limit !== null) {
     const nowUsed = getCount(provider);

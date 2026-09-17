@@ -15,6 +15,7 @@
     "widget:upsert": "node --env-file=.env scripts/upsert-widget.ts",
     "sms:usage": "node --env-file=.env scripts/sms-usage.ts",
     "sms:devices": "node --env-file=.env scripts/sms-devices.ts",
+    "sms:verify": "node --env-file=.env scripts/sms-verify.ts",
     "introspection": "npx supabase gen types typescript --schema public --project-id pddzchdkbwhhbtpmagsx > lib/supabase/database.types.ts"
   },
   "dependencies": {
