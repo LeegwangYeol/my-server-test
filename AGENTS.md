@@ -176,7 +176,8 @@ curl -s https://my-server-test.vercel.app/v1/heartbeat        # → {"status":"a
 |---|---|---|
 | `SUPABASE_URL`, `SUPABASE_SERVICE_KEY` | 채팅/위젯 영속화 | lazy Proxy라 cold start는 살아있고, DB 닿는 핸들러에서 throw |
 | `LLM_API_KEY` | `/v2/ask` 실제 LLM | 비어 있으면 canned 데모 응답으로 fallback |
-| `LLM_PROVIDER` | openrouter(기본)/openai/groq/together/deepseek/mistral/fireworks/custom | openrouter |
+| `LLM_PROVIDER` | openrouter(기본)/openai/**gemini**/groq/together/deepseek/mistral/fireworks/custom | openrouter |
+| `LLM_PROVIDER=gemini` | ★무료★ Google Gemini(OpenAI 호환). 모델 기본 `gemini-3.5-flash-lite`. **flash/pro 계열은 추론 토큰이 `LLM_MAX_TOKENS`를 먼저 소모해 답변이 잘리므로** lite 를 쓰거나 토큰을 2000+로. 무료 티어는 입력이 구글 학습에 쓰일 수 있음 | — |
 | `LLM_MODEL`, `LLM_MAX_TOKENS`(기본512), `LLM_SYSTEM_PROMPT` | 선택 튜닝 | 기본값 |
 | `ADMIN_TOKEN` | `/v2/admin/*` 인증 시크릿 | **미설정 시 모든 admin 요청 거부(fail-closed)** |
 | `MAIL_SEND_TOKEN`, `NAVER_MAIL_USER`, `NAVER_MAIL_PASSWORD`, `NAVER_MAIL_FROM_NAME` | `/v2/admin/mail/send` 네이버 SMTP | 메일 발송 거부 |
