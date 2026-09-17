@@ -6,17 +6,17 @@ import { isSmsConfigured, sendSms, activeProvider } from "../../../lib/sms";
  *
  *   POST /v2/admin/sms/send  → send one SMS
  *
- * The backend is chosen by the SMS_PROVIDER env var (see lib/sms):
- *   phone  → 안드로이드 폰 게이트웨이 (진짜 0원, 기본값)
- *   solapi → SOLAPI(구 CoolSMS), 건당 과금
+ * 백엔드는 Pushbullet 하나다 (lib/sms) — 서버리스에서 실행 가능한 유일한 경로.
+ * iMessage·SMS Gate 같은 맥 로컬 전용 경로는 서버에서 못 돌아가므로
+ * test/sms-local/ 로 분리돼 있다. 여기로 끌어오지 말 것.
  *
  * Auth: shared secret in the `X-Admin-Token` header matching the ADMIN_TOKEN
  * env var, the same scheme as /v2/admin/mail/send. Sending SMS is abusable
  * (spam / cost / personal number), so the endpoint is fail-closed: when
  * ADMIN_TOKEN is unset it refuses to run.
  *
- * For bulk 명절 인사 to a contact list, use scripts/send-greetings.ts instead —
- * it adds personalization + throttling + a dry-run preview.
+ * For bulk 명절 인사 to a contact list, use test/sms-local/send-greetings.ts
+ * instead — it adds personalization + throttling + a dry-run preview.
  */
 export const v2SmsEndpoints = async (app: any) => {
   app.group("/v2", (app: any) => {
@@ -51,7 +51,7 @@ export const v2SmsEndpoints = async (app: any) => {
         if (!isSmsConfigured()) {
           return {
             success: false,
-            error: `SMS provider(${activeProvider()}) 환경변수 미설정 — phone: SMS_GATEWAY_* / solapi: SOLAPI_* 를 확인하세요.`,
+            error: `SMS provider(${activeProvider()}) 환경변수 미설정 — PUSHBULLET_ACCESS_TOKEN 과 (PUSHBULLET_DEVICE_NICKNAME 또는 PUSHBULLET_DEVICE_IDEN) 을 확인하세요.`,
           };
         }
 

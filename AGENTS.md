@@ -82,12 +82,18 @@ lib/
   chat-store.ts         ← chat_thread / chat_message CRUD (Supabase)
   widget-store.ts       ← widget_master CRUD (per-widget 페르소나)
   sms/
-    index.ts            ← SMS_PROVIDER 스위치로 3개 백엔드 통합 (phone/solapi/pushbullet)
-    solapi.ts           ← SOLAPI SMS/카카오알림톡 (유료, 건당 과금). lazy-init 리팩터 완료(module-load throw 금지 패턴 적용)
-    phone-gateway.ts    ← SMS Gate 안드로이드 게이트웨이 앱 API (APK 사이드로드 설치, 0원, 발송량 한도 없음)
-    pushbullet.ts       ← Pushbullet API (안드로이드폰, 0원, 무료 계정 월 ~100건 한도). 별명→iden 자동 해석 지원
-    imessage.ts         ← 맥 Messages + 아이폰 문자전달 (osascript, 0원, 한도없음, 맥 로컬 전용)
+    index.ts            ← SMS 진입점. SMS_PROVIDER 로 pushbullet/imessage/phone 선택.
+                           맥 전용 두 경로는 구현체가 test/sms-local/ 에 있어 서버에선 안내 에러를 던진다.
+    pushbullet.ts       ← Pushbullet API (안드로이드폰, 0원, 무료 월 ~100건). 별명→iden 자동 해석.
+                           ★서버에서 실행 가능한 유일한 경로★
   ⚠️ 자격증명 전부 env화 완료. 과거 SOLAPI 키 평문 노출 이력 있음 (7번 보안 주의 참고)
+test/sms-local/         ← ★맥 로컬 전용 문자 도구. 서버 번들에 넣지 말 것★ (README.md 참고)
+  imessage.ts             맥 Messages + 아이폰 문자전달 (osascript, 0원, 한도없음)
+  imessage-verify.ts      발송 후 chat.db 로 실제 배달 대조 (전체 디스크 접근 권한 필요)
+  phone-gateway.ts        SMS Gate 안드로이드 게이트웨이 (집 LAN 접근)
+  usage.ts                월별 발송량 카운터 (.sms-usage.json 로컬 파일)
+  send-greetings.ts       명절 인사 일괄발송 (3개 경로 전부 지원, dry-run 기본)
+  sms-devices.ts / sms-usage.ts / sms-verify.ts   기기목록 / 사용량 / 배달확인
 supabase/migrations/    ← SQL 마이그레이션 (chat_history, widget_master, thread_title)
 vercel.json             ← 배포 설정 (2번 절 참고)
 .env.example            ← 전체 env 변수 레퍼런스
@@ -152,11 +158,11 @@ curl -s https://my-server-test.vercel.app/v1/heartbeat        # → {"status":"a
 | `/v2/admin/threads` · `/threads/rename` · `/threads/update` · `/messages` | POST | 세션/메시지 조회·관리 (per-session prompt·reference text 포함) 🔒 |
 | `/v2/admin/db/migrate` | POST | SQL 마이그레이션 실행 (self-serve runner) 🔒⚠️ |
 | `/v2/admin/mail/send` | POST | 네이버 SMTP 메일 발송 🔒 (`X-Admin-Token`: `MAIL_SEND_TOKEN` 또는 `ADMIN_TOKEN`) |
-| `/v2/admin/sms/send` | POST | SMS 발송 🔒 — `SMS_PROVIDER` env로 백엔드 선택(9번 절 참고). ⚠️ **소스엔 등록됐으나 `api/index.js` 미재번들 — 프로덕션 미배포 상태**(4번 절 표준 절차로 배포 전까지는 로컬(`bun run dev`)에서만 동작) |
+| `/v2/admin/sms/send` | POST | SMS 발송 🔒 — 백엔드는 **Pushbullet 단일**(서버리스에서 도는 유일한 경로). 맥 전용 경로는 `test/sms-local/` 로 분리됨 |
 
 🔒 = `x-admin-token` 헤더 필수 (7번 절 참고). 토큰 없거나 불일치 → `{success:false, error:"unauthorized"}`.
 
-> 명절 인사 등 **일괄 SMS 발송은 이 HTTP 엔드포인트가 아니라 `scripts/send-greetings.ts`를 로컬에서 직접 실행**하는 게 정석 경로다(9번 절). Vercel 배포와 무관하게 동작한다.
+> 명절 인사 등 **일괄 SMS 발송은 이 HTTP 엔드포인트가 아니라 `test/sms-local/send-greetings.ts`를 로컬에서 직접 실행**하는 게 정석 경로다(9번 절). Vercel 배포와 무관하게 동작한다.
 
 **검증 시 기대 응답:** valid 입력 → 200, 입력 누락 → 422(Elysia validation), 미존재 경로 → 404, admin 토큰 누락 → `success:false`. `/v1/youtube/auth/confirm`은 에러 시 **400 + `{success:false, message}`** (200 schema와 분리하려고 `set.status=400` 명시함 — 빼면 422 validation wrapper로 깨짐).
 
@@ -174,11 +180,9 @@ curl -s https://my-server-test.vercel.app/v1/heartbeat        # → {"status":"a
 | `LLM_MODEL`, `LLM_MAX_TOKENS`(기본512), `LLM_SYSTEM_PROMPT` | 선택 튜닝 | 기본값 |
 | `ADMIN_TOKEN` | `/v2/admin/*` 인증 시크릿 | **미설정 시 모든 admin 요청 거부(fail-closed)** |
 | `MAIL_SEND_TOKEN`, `NAVER_MAIL_USER`, `NAVER_MAIL_PASSWORD`, `NAVER_MAIL_FROM_NAME` | `/v2/admin/mail/send` 네이버 SMTP | 메일 발송 거부 |
-| `SMS_PROVIDER` | SMS 백엔드 선택(`pushbullet`/`imessage`/`phone`) | 미설정 시 `phone` 기본값 |
-| `PUSHBULLET_ACCESS_TOKEN` + (`PUSHBULLET_DEVICE_NICKNAME` 또는 `PUSHBULLET_DEVICE_IDEN`) | `SMS_PROVIDER=pushbullet` | 발송 거부(`isSmsConfigured()`가 false) |
-| `IMESSAGE_SERVICE_ID`(선택), `IMESSAGE_SEND_TIMEOUT_MS`(선택) | `SMS_PROVIDER=imessage` | 자동 선택/기본 30초 |
-| `SMS_GATEWAY_URL/USERNAME/PASSWORD/SIM` | `SMS_PROVIDER=phone` (SMS Gate 앱) | 발송 거부 |
-| `SOLAPI_API_KEY/SECRET/ADMIN_PHONE_NUMBER`, `KAKAO_BUSINESS_CHANNEL_ID` | `SMS_PROVIDER=solapi` (건당 과금) | 발송 거부 — 카카오 알림톡 전용 함수 호출 시에만 채널ID 필요 |
+| `PUSHBULLET_ACCESS_TOKEN` + (`PUSHBULLET_DEVICE_NICKNAME` 또는 `PUSHBULLET_DEVICE_IDEN`) | `/v2/admin/sms/send` | 발송 거부(`isSmsConfigured()`가 false) |
+
+> 맥 로컬 전용 env(`SMS_PROVIDER`, `IMESSAGE_*`, `SMS_GATEWAY_*`)는 서버와 무관하다 — `test/sms-local/README.md` 참고.
 
 > Vercel 환경변수는 **대시보드 → Settings → Environment Variables**에서 설정. 추가 후 재배포 필요.
 
@@ -209,6 +213,9 @@ curl -s https://my-server-test.vercel.app/v1/heartbeat        # → {"status":"a
 
 ## 9. SMS 발송 (명절 인사 등 일괄 문자)
 
+> ⚠️ **경계**: 이 절의 iMessage·SMS Gate·발송량 카운터는 맥 로컬 전용이라 **`test/sms-local/` 로 분리**돼 있다.
+> 서버(`api/index.js` 번들)에는 Pushbullet 만 들어간다. 로컬 코드를 `lib/`·`src/` 로 옮기지 말 것.
+
 **배경:** 유료 SMS(SOLAPI 등)를 쓰지 않고 **0원으로** 문자를 보내고 싶다는 요구에서 시작. "공짜 + 쉬움 + APK 사이드로드 없음"을 동시에 만족하는 방법을 찾아 3가지 백엔드를 `lib/sms/index.ts`의 `SMS_PROVIDER` 스위치로 통합했다.
 
 ### 백엔드 3종 비교
@@ -226,9 +233,9 @@ curl -s https://my-server-test.vercel.app/v1/heartbeat        # → {"status":"a
 > **`imessage` 제약**: `osascript` 가 필요해 **맥 로컬에서만** 동작한다(Vercel 불가). 아이폰이
 > 켜져 있고 "문자 메시지 전달"이 켜져 있어야 하며, 첫 실행 시 macOS 자동화 권한 허용이 필요하다.
 > 전화번호·본문은 AppleScript 문자열에 보간하지 않고 **argv 로 전달**해 인젝션을 차단한다
-> (`lib/sms/imessage.ts` — 이 방식을 바꾸지 말 것).
+> (`test/sms-local/imessage.ts` — 이 방식을 바꾸지 말 것).
 >
-> **`imessage` 배달 확인**: AppleScript 는 "접수"까지만 알려주므로, 발송 후 `lib/sms/imessage-verify.ts`
+> **`imessage` 배달 확인**: AppleScript 는 "접수"까지만 알려주므로, 발송 후 `test/sms-local/imessage-verify.ts`
 > 가 메시지 앱 DB(`~/Library/Messages/chat.db`)의 `is_sent`/`error` 를 읽어 수신자별 실제 결과를
 > 대조한다 — **터미널에 macOS '전체 디스크 접근' 권한이 있어야** 동작하며, 없으면 권한 안내만 하고
 > 발송은 막지 않는다. 나중에 재확인: `npm run sms:verify -- --csv contacts.csv --since 2h`.
@@ -239,20 +246,20 @@ curl -s https://my-server-test.vercel.app/v1/heartbeat        # → {"status":"a
 
 세 백엔드 모두 **import 시점에 절대 throw하지 않는다**(4번 항목의 lazy 패턴 준수) — `isSmsConfigured()`로 설정 여부만 확인하고, 실제 미설정 시 에러는 발송 함수 호출 시점에만 던진다.
 
-### 실사용 경로: `scripts/send-greetings.ts` (로컬 실행, HTTP 엔드포인트 아님)
+### 실사용 경로: `test/sms-local/send-greetings.ts` (로컬 실행, HTTP 엔드포인트 아님)
 
 ```bash
 cp scripts/contacts.example.csv contacts.csv   # name,phone — git에 안 잡힘(PII, .gitignore 처리됨)
 cp scripts/greeting.example.txt greeting.txt   # {name}/{이름} 치환됨
 
-node --env-file=.env scripts/send-greetings.ts --csv contacts.csv --template greeting.txt          # 미리보기(기본, 발송 안 함)
-node --env-file=.env scripts/send-greetings.ts --csv contacts.csv --template greeting.txt --send   # 실제 발송
+node --env-file=.env test/sms-local/send-greetings.ts --csv contacts.csv --template greeting.txt          # 미리보기(기본, 발송 안 함)
+node --env-file=.env test/sms-local/send-greetings.ts --csv contacts.csv --template greeting.txt --send   # 실제 발송
 ```
 
 - **`--send` 없으면 무조건 미리보기만** — 실수로 100명에게 오발송하는 사고 방지용 안전장치. 절대 이 기본값을 바꾸지 말 것.
 - `SMS_SEND_DELAY_MS`(기본 2000ms)로 발송 간 딜레이 — 통신사 스팸필터 회피용. 낮추지 말 것.
-- **발송량 카운터**: `lib/sms/usage.ts`가 월별·provider별 성공 건수를 `.sms-usage.json`(로컬, gitignore, 전화번호 미저장)에 누적. send-greetings.ts가 발송 전 `사용/한도 → 예상`을 출력하고 성공마다 기록한다. pushbullet은 `PUSHBULLET_FREE_LIMIT`(기본 100) 초과 예상 시 **경고만**(차단 안 함). `npm run sms:usage`로 이번 달 사용량 조회. ⚠️ 이 맥에서 보낸 것만 집계(로컬 추정), 월 경계는 달력월 근사 → 90건쯤 여유 권장.
-- 이 스크립트는 `lib/sms/phone-gateway.ts`·`lib/sms/pushbullet.ts`·`lib/sms/imessage.ts`를 **`.ts` 확장자 포함 직접 import**한다(barrel `lib/sms/index.ts`를 쓰지 않음) — `node --env-file`의 네이티브 ESM 리졸버가 확장자 생략·barrel의 extensionless 서브 import를 못 풀기 때문. 이 스크립트를 고칠 때 barrel import로 "정리"하지 말 것 — 조용히 깨진다.
+- **발송량 카운터**: `test/sms-local/usage.ts`가 월별·provider별 성공 건수를 `.sms-usage.json`(로컬, gitignore, 전화번호 미저장)에 누적. send-greetings.ts가 발송 전 `사용/한도 → 예상`을 출력하고 성공마다 기록한다. pushbullet은 `PUSHBULLET_FREE_LIMIT`(기본 100) 초과 예상 시 **경고만**(차단 안 함). `npm run sms:usage`로 이번 달 사용량 조회. ⚠️ 이 맥에서 보낸 것만 집계(로컬 추정), 월 경계는 달력월 근사 → 90건쯤 여유 권장.
+- 이 스크립트는 같은 폴더의 `phone-gateway.ts`·`imessage.ts` 와 `lib/sms/pushbullet.ts` 를 **`.ts` 확장자 포함 직접 import**한다(barrel `lib/sms/index.ts`를 쓰지 않음) — `node --env-file`의 네이티브 ESM 리졸버가 확장자 생략·barrel의 extensionless 서브 import를 못 풀기 때문. 이 스크립트를 고칠 때 barrel import로 "정리"하지 말 것 — 조용히 깨진다.
 
 ### `/v2/admin/sms/send` (HTTP 엔드포인트)
 
