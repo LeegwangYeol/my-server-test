@@ -179,6 +179,7 @@ curl -s https://my-server-test.vercel.app/v1/heartbeat        # → {"status":"a
 | `LLM_PROVIDER` | openrouter(기본)/openai/**gemini**/groq/together/deepseek/mistral/fireworks/custom | openrouter |
 | `LLM_PROVIDER=gemini` | ★무료★ Google Gemini(OpenAI 호환). 모델 기본 `gemini-3.5-flash-lite`. **flash/pro 계열은 추론 토큰이 `LLM_MAX_TOKENS`를 먼저 소모해 답변이 잘리므로** lite 를 쓰거나 토큰을 2000+로. 무료 티어는 입력이 구글 학습에 쓰일 수 있음 | — |
 | `LLM_MODEL`, `LLM_MAX_TOKENS`(기본512), `LLM_SYSTEM_PROMPT` | 선택 튜닝 | 기본값 |
+| `LLM_RETRY_MAX`(기본3), `LLM_RETRY_MAX_WAIT_MS`(기본5000) | LLM 429/5xx 자동 재시도(스트리밍 시작 전에만, Retry-After 존중). `lib/llm/openai-compatible.ts` | 기본값 |
 | `ADMIN_TOKEN` | `/v2/admin/*` 인증 시크릿 | **미설정 시 모든 admin 요청 거부(fail-closed)** |
 | `MAIL_SEND_TOKEN`, `NAVER_MAIL_USER`, `NAVER_MAIL_PASSWORD`, `NAVER_MAIL_FROM_NAME` | `/v2/admin/mail/send` 네이버 SMTP | 메일 발송 거부 |
 | `PUSHBULLET_ACCESS_TOKEN` + (`PUSHBULLET_DEVICE_NICKNAME` 또는 `PUSHBULLET_DEVICE_IDEN`) | `/v2/admin/sms/send` | 발송 거부(`isSmsConfigured()`가 false) |
@@ -209,6 +210,7 @@ curl -s https://my-server-test.vercel.app/v1/heartbeat        # → {"status":"a
 - [ ] module-load 시점에 throw하는 코드를 넣지 않았나? (lazy 패턴 유지)
 - [ ] 검증은 `my-server-test.vercel.app` 도메인으로 했나?
 - [ ] `vercel.json`의 4개 키(framework/buildCommand/outputDirectory/rewrites)를 이유 없이 바꾸지 않았나?
+- [ ] `bun test` 통과했나? (`test/healthz.test.ts` — 부팅·라우팅·**admin fail-closed 가드** 회귀 방지. 외부 API/DB 안 씀)
 
 ---
 
