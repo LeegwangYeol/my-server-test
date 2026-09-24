@@ -5,25 +5,25 @@
  *
  * 출력:
  *   1) Pushbullet 에 연결된 안드로이드 기기들 (별명 / iden / 활성상태)
- *      → .env 의 PUSHBULLET_DEVICE_NICKNAME 또는 PUSHBULLET_DEVICE_IDEN 에 넣을 값
+ *      → .env 의 PUSHBULLET_TEST_DEVICE_NICKNAME 또는 PUSHBULLET_PROD_DEVICE_NICKNAME 에 넣을 값
  *   2) 맥 Messages 의 SMS 서비스 (아이폰 문자 메시지 전달)
  *      → .env 의 IMESSAGE_SERVICE_ID 에 넣을 값 (보통 생략해도 됨)
  */
 import { spawn } from "node:child_process";
-
-const token = process.env.PUSHBULLET_ACCESS_TOKEN?.trim();
-const currentIden = process.env.PUSHBULLET_DEVICE_IDEN?.trim();
-const currentNick = process.env.PUSHBULLET_DEVICE_NICKNAME?.trim();
+import { getPushbulletConfig } from "../../lib/sms/pushbullet.ts";
 
 async function showPushbullet() {
-  console.log("📱 Pushbullet 기기 (안드로이드)");
-  if (!token) {
-    console.log("   PUSHBULLET_ACCESS_TOKEN 미설정 — 건너뜀\n");
+  const conf = getPushbulletConfig();
+  console.log(`📱 Pushbullet 기기 (안드로이드) - 현재 환경: [${conf.mode}]`);
+  
+  if (!conf.token) {
+    console.log(`   PUSHBULLET_${conf.mode}_ACCESS_TOKEN 미설정 — 건너뜀`);
+    console.log("   (또는 하위 호환성 PUSHBULLET_ACCESS_TOKEN 미설정)\n");
     return;
   }
   try {
     const res = await fetch("https://api.pushbullet.com/v2/devices", {
-      headers: { "access-token": token },
+      headers: { "access-token": conf.token },
     });
     const data = (await res.json()) as {
       devices?: {
@@ -45,16 +45,16 @@ async function showPushbullet() {
     }
     for (const d of devices) {
       const selected =
-        d.iden === currentIden ||
-        (!!currentNick &&
-          d.nickname?.toLowerCase() === currentNick.toLowerCase());
+        d.iden === conf.iden ||
+        (!!conf.nickname &&
+          d.nickname?.toLowerCase() === conf.nickname.toLowerCase());
       console.log(
         `   ${selected ? "▶" : " "} ${d.nickname ?? "(이름없음)"}` +
           `  iden=${d.iden}  pushable=${d.pushable}${selected ? "   ← 현재 설정" : ""}`,
       );
     }
     console.log(
-      "   → 교체하려면 .env 에  PUSHBULLET_DEVICE_NICKNAME=<별명>  (또는 _IDEN=<iden>)\n",
+      `   → 교체하려면 .env 에  PUSHBULLET_${conf.mode}_DEVICE_NICKNAME=<별명>  (또는 _IDEN=<iden>)\n`,
     );
   } catch (e) {
     console.log(`   ❌ 조회 실패: ${e instanceof Error ? e.message : e}\n`);
