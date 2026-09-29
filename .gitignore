@@ -148,3 +148,8 @@ greeting.txt
 
 # SMS 월별 발송량 카운터 (로컬 런타임 상태)
 .sms-usage.json
+
+# PII and Data Files
+*.csv
+*.xlsx
+최종_발송명단.csv

@@ -7,10 +7,56 @@ import { v2SmsEndpoints } from "./endpoints/v2/sms-endpoints";
 import { healthzEndpoint } from "./endpoints/healthz";
 import { cors } from "@elysiajs/cors";
 
+const MAX_REQUEST_BODY_SIZE = 1024 * 1024; // 1MB
+
 export const createApp = async (serverless = false) => {
-  const app = new Elysia();
+  const app = new Elysia({
+    serve: {
+      maxRequestBodySize: MAX_REQUEST_BODY_SIZE,
+    },
+  });
 
   app
+    .onRequest(({ request, set }) => {
+      const contentLength = request.headers.get("content-length");
+      if (contentLength) {
+        const size = parseInt(contentLength, 10);
+        const isUpload = request.headers
+          .get("content-type")
+          ?.includes("multipart/form-data");
+        const limit = isUpload ? 2 * 1024 * 1024 : MAX_REQUEST_BODY_SIZE;
+        if (!isNaN(size) && size > limit) {
+          set.status = 413;
+          return {
+            success: false,
+            error: `Payload Too Large: request body exceeds ${isUpload ? "2MB" : "1MB"} limit`,
+          };
+        }
+      }
+    })
+    .onError(({ error, code, set }: any) => {
+      if (
+        code === "PARSE" &&
+        (error?.message?.includes("PAYLOAD_TOO_LARGE") ||
+          (error as any)?.cause?.message?.includes("PAYLOAD_TOO_LARGE") ||
+          String(error).includes("PAYLOAD_TOO_LARGE"))
+      ) {
+        set.status = 413;
+        return {
+          success: false,
+          error: "Payload Too Large: request body exceeds 1MB limit",
+        };
+      }
+    })
+    .onParse(async ({ request, contentType }) => {
+      if (contentType === "application/json") {
+        const text = await request.text();
+        if (text.length > MAX_REQUEST_BODY_SIZE) {
+          throw new Error("PAYLOAD_TOO_LARGE");
+        }
+        return JSON.parse(text);
+      }
+    })
     .onAfterHandle(({ request, set }) => {
       // * Only process CORS requests
       if (request.method !== "OPTIONS") return;

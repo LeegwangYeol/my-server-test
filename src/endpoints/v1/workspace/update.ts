@@ -40,8 +40,26 @@ export const v1WorkspaceUpdate = async (app: Elysia<"/v1/workspace">) => {
             };
           }
 
+          // * 멤버십(소속) 검증 추가
+          const { data: memberData } = await supabaseClient
+            .from("llami_workspace_member")
+            .select("*")
+            .eq("workspace_id", workspace.id)
+            .eq("user_id", user.id)
+            .eq("is_deleted", false)
+            .limit(1)
+            .maybeSingle();
+
+          if (!memberData && alreadyExistWorkspaceData.owner !== user.id) {
+            return {
+              success: false,
+              message: "해당 워크스페이스에 접근 권한이 없습니다.",
+            };
+          }
+
+          // * DB에 저장된 값을 기준으로 소유자 전용 수정 여부 검증
           if (
-            workspace.only_owner_can_edit_info &&
+            alreadyExistWorkspaceData.only_owner_can_edit_info &&
             alreadyExistWorkspaceData.owner !== user.id
           ) {
             return {

@@ -126,13 +126,32 @@ export const v2WidgetEndpoints = async (app: any) => {
     // ──────────────────────────────────────────────────────────────────
     app.post(
       "/widget/create-thread",
-      async ({ body }: { body: { widgetId?: string } }) => {
-        const widgetId = body?.widgetId ?? "";
+      async ({
+        body,
+        set,
+      }: {
+        body?: { widgetId?: any };
+        set: { status?: number | string };
+      }) => {
+        const rawWidgetId = body?.widgetId;
+        const widgetId = (typeof rawWidgetId === "string" ? rawWidgetId : "").trim();
+        let widgetMaster = null;
+        try {
+          widgetMaster = widgetId ? await getWidget(widgetId) : null;
+        } catch {
+          widgetMaster = null;
+        }
+        if (!widgetMaster) {
+          set.status = 403;
+          return { success: false, error: "unregistered widget_id" };
+        }
         const threadId = (await createThread(widgetId)) ?? "";
         return { success: true, threadId, thread_id: threadId };
       },
       {
-        body: t.Optional(t.Object({ widgetId: t.Optional(t.String()) })),
+        body: t.Optional(
+          t.Object({ widgetId: t.Optional(t.Any()) }),
+        ),
         detail: {
           tags: ["API"],
           description: "Allocate a new persisted thread id",
@@ -145,8 +164,9 @@ export const v2WidgetEndpoints = async (app: any) => {
     // ──────────────────────────────────────────────────────────────────
     app.post(
       "/ask",
-      async ({ body, set }: any) => {
-        const widgetId: string = body?.widgetId ?? "";
+      async ({ body, set, request }: any) => {
+        const rawWidgetId = body?.widgetId;
+        const widgetId: string = (typeof rawWidgetId === "string" ? rawWidgetId : "").trim();
         const userMessage: string = body?.message ?? "";
         let threadId: string = body?.threadId ?? "";
 
@@ -160,12 +180,58 @@ export const v2WidgetEndpoints = async (app: any) => {
           };
         }
 
+        // ── Guard 1b: 보조 필드(browserInfo, search) 페이로드 스머글링 방어 ──
+        const MAX_AUX_CHARS = 2000;
+        if (body?.browserInfo) {
+          let raw = "";
+          try {
+            raw =
+              typeof body.browserInfo === "string"
+                ? body.browserInfo
+                : JSON.stringify(body.browserInfo);
+          } catch {
+            set.status = 400;
+            return { success: false, error: "malformed browserInfo payload" };
+          }
+          if (raw.length > MAX_AUX_CHARS) {
+            set.status = 413;
+            return {
+              success: false,
+              error: `browserInfo too large (${raw.length} > ${MAX_AUX_CHARS} chars)`,
+            };
+          }
+        }
+        if (body?.search) {
+          let raw = "";
+          try {
+            raw =
+              typeof body.search === "string"
+                ? body.search
+                : JSON.stringify(body.search);
+          } catch {
+            set.status = 400;
+            return { success: false, error: "malformed search payload" };
+          }
+          if (raw.length > MAX_AUX_CHARS) {
+            set.status = 413;
+            return {
+              success: false,
+              error: `search options too large (${raw.length} > ${MAX_AUX_CHARS} chars)`,
+            };
+          }
+        }
+
         // ── Guard 2: 등록 위젯 화이트리스트 ──
         // widget master 테이블에 등록된 widget_id 만 /ask 를 호출할 수 있다.
         // 빈/미등록 id 는 거부 — 인증 없는 공개 엔드포인트가 무제한 LLM
         // 비용에 노출되는 것을 막는다. 운영자는 /v2/admin/widgets/upsert 로
         // 위젯을 먼저 등록해야 한다.
-        const widgetMaster = widgetId ? await getWidget(widgetId) : null;
+        let widgetMaster = null;
+        try {
+          widgetMaster = widgetId ? await getWidget(widgetId) : null;
+        } catch {
+          widgetMaster = null;
+        }
         if (!widgetMaster) {
           set.status = 403;
           return {
@@ -192,123 +258,292 @@ export const v2WidgetEndpoints = async (app: any) => {
         }
         const history = threadId ? await listMessages(threadId) : [];
 
+        // ── Guard 3: 대화 기록 상한 — 다회차(multi-turn) 토큰 폭탄 방어 ──
+        const MAX_HISTORY_MESSAGES = 10;
+        const MAX_HISTORY_CHARS = 16000;
+
+        const candidateHistory = history.slice(-MAX_HISTORY_MESSAGES);
+        const boundedHistory: typeof history = [];
+        let totalChars = 0;
+
+        for (let i = candidateHistory.length - 1; i >= 0; i--) {
+          const msg = candidateHistory[i];
+          const len = (msg.content || "").length;
+          if (
+            boundedHistory.length === 0 ||
+            totalChars + len <= MAX_HISTORY_CHARS
+          ) {
+            boundedHistory.unshift(msg);
+            totalChars += len;
+          } else {
+            break;
+          }
+        }
+
+        // Instantiate provider
+        let provider;
+        try {
+          if (process.env.OPENROUTER_API_KEYS) {
+            const { RotatingLLMProvider } = await import(
+              "../../../lib/llm/rotating-provider"
+            );
+            const { getKeyStore, parseKeyConfigsFromEnv } = await import(
+              "../../../lib/llm/factory"
+            );
+            const configs = parseKeyConfigsFromEnv();
+            const store = getKeyStore();
+            const configMap = new Map(configs.map((c) => [c.id, c]));
+            provider = new RotatingLLMProvider(store, configMap, {
+              defaultModel: process.env.LLM_MODEL?.trim() || "openai/gpt-4o-mini",
+            });
+          } else {
+            provider = createLLMProvider();
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          set.status = 500;
+          return {
+            success: false,
+            error: `[LLM configuration error] ${msg}`,
+          };
+        }
+
+        // Prepare context & messages
+        const threadRow = threadId
+          ? await getThread(threadId, widgetId)
+          : null;
+        const systemContent =
+          threadRow?.system_prompt?.trim() ||
+          widgetMaster?.system_prompt?.trim() ||
+          process.env.LLM_SYSTEM_PROMPT ||
+          [
+            "You are a helpful assistant embedded in a website.",
+            "Reply in the user's language.",
+            "Keep every answer to 1–2 short sentences. Never use bullet lists, headings, or long explanations unless the user explicitly asks for detail.",
+            "If you don't know, say so in one sentence — do not guess.",
+          ].join(" ");
+
+        const refText = threadRow?.context_text?.trim();
+
+        const messages: ChatMessage[] = [
+          { role: "system", content: systemContent },
+          ...(refText
+            ? [
+                {
+                  role: "system" as const,
+                  content:
+                    "다음은 이 세션 전용 참고 자료입니다. " +
+                    "사용자 질문에 답할 때 이 자료를 최우선 근거로 활용하고, " +
+                    "자료에 없는 내용은 추측하지 말고 모른다고 답하세요.\n\n" +
+                    "─── 참고 자료 ───\n" +
+                    refText.slice(0, 10000) +
+                    "\n─── 참고 자료 끝 ───",
+                },
+              ]
+            : []),
+          ...boundedHistory.map((m) => ({
+            role: m.role as any,
+            content: m.content,
+          })),
+        ];
+
+        const maxTokensRaw = Number.parseInt(
+          process.env.LLM_MAX_TOKENS ?? "512",
+          10,
+        );
+        const maxTokens = Number.isFinite(maxTokensRaw) ? maxTokensRaw : 512;
+
+        // Canned reply fallback when no LLM API key is configured
+        if (!provider) {
+          set.headers["Content-Type"] = "text/event-stream";
+          set.headers["Cache-Control"] = "no-cache, no-transform";
+          set.headers["Connection"] = "keep-alive";
+
+          const enc = new TextEncoder();
+          const fallback = pickReply(userMessage);
+          const stream = new ReadableStream({
+            async start(controller) {
+              for (const tk of chunkText(fallback)) {
+                const safe = tk
+                  .replace(/%/g, "%25")
+                  .replace(/ /g, "%20")
+                  .replace(/\n/g, "%0a")
+                  .replace(/\r/g, "%0d");
+                controller.enqueue(enc.encode(`data: ${safe}\n\n`));
+                await sleep(40);
+              }
+              controller.enqueue(enc.encode(`data: [DONE]\n\n`));
+              controller.close();
+            },
+          });
+          return new Response(stream);
+        }
+
+        // Setup double-wired abort controller
+        const abortController = new AbortController();
+        if (request?.signal) {
+          if (request.signal.aborted) {
+            abortController.abort();
+          } else {
+            request.signal.addEventListener("abort", () => abortController.abort(), {
+              once: true,
+            });
+          }
+        }
+
+        // ── PRE-STREAM ERROR BOUNDARY ────────────────────────────────────
+        // Execute handshake & key reservation BEFORE committing 200 SSE headers!
+        let handshakeResult: any = null;
+        if (typeof (provider as any).preStreamHandshake === "function") {
+          try {
+            handshakeResult = await (provider as any).preStreamHandshake(
+              { messages, maxTokens },
+              abortController.signal,
+            );
+          } catch (err: any) {
+            console.warn("[v2/ask] Pre-stream handshake failed:", err?.message);
+
+            // 1. Upstream Provider / Model Outage
+            // Check FIRST so it is not shadowed by generic 503 checks
+            if (
+              err?.code === "UPSTREAM_MODEL_OUTAGE" ||
+              err?.name === "UpstreamProviderOutageError"
+            ) {
+              set.status = 503;
+              return {
+                success: false,
+                error: err?.message || "Upstream AI model is currently unavailable.",
+                code: "UPSTREAM_MODEL_OUTAGE",
+              };
+            }
+
+            // 2. All Keys Rate Limited
+            // Returns HTTP 429 with explicit Retry-After header
+            if (
+              err?.code === "ALL_KEYS_RATE_LIMITED" ||
+              err?.statusCode === 429 ||
+              err?.status === 429 ||
+              err?.name === "AllKeysRateLimitedError"
+            ) {
+              set.status = 429;
+              const retryAfter = err?.retryAfterSeconds ?? 5;
+              set.headers["Retry-After"] = String(retryAfter);
+              return {
+                success: false,
+                error: "All AI channels are currently busy. Please wait a moment.",
+                code: "ALL_KEYS_RATE_LIMITED",
+              };
+            }
+
+            // 3. All Accounts Exhausted (credit balance exhaustion)
+            // Strictly check error code/name - DO NOT catch generic 503s!
+            if (
+              err?.code === "ALL_ACCOUNTS_EXHAUSTED" ||
+              err?.name === "AllAccountsExhaustedError"
+            ) {
+              set.status = 503;
+              return {
+                success: false,
+                error:
+                  "Service temporarily unavailable due to upstream provider credit exhaustion.",
+                code: "ALL_ACCOUNTS_EXHAUSTED",
+              };
+            }
+
+            // 4. Failover Exhausted
+            // Clean 503 response when retry loop exhausted across candidate keys
+            if (
+              err?.code === "FAILOVER_EXHAUSTED" ||
+              err?.name === "FailoverExhaustedError"
+            ) {
+              set.status = 503;
+              return {
+                success: false,
+                error:
+                  "Service temporarily unavailable. Handshake failed across all available keys.",
+                code: "FAILOVER_EXHAUSTED",
+              };
+            }
+
+            // 5. Client Abort / Disconnect
+            if (
+              err?.name === "AbortError" ||
+              abortController.signal.aborted ||
+              err?.statusCode === 499 ||
+              err?.code === "CLIENT_ABORTED"
+            ) {
+              set.status = 499;
+              return { success: false, error: "Client aborted request." };
+            }
+
+            // 6. Generic Internal Fallback
+            set.status = 500;
+            return {
+              success: false,
+              error: err?.message || "Failed to establish AI upstream connection.",
+              code: "HANDSHAKE_FAILED",
+            };
+          }
+        }
+
+        // ── COMMIT HTTP 200 SSE STREAM ──────────────────────────────────
         set.headers["Content-Type"] = "text/event-stream";
         set.headers["Cache-Control"] = "no-cache, no-transform";
         set.headers["Connection"] = "keep-alive";
 
+        const enc = new TextEncoder();
+        const sendChunk = (controller: any, text: string) => {
+          const safe = text
+            .replace(/%/g, "%25")
+            .replace(/ /g, "%20")
+            .replace(/\n/g, "%0a")
+            .replace(/\r/g, "%0d");
+          controller.enqueue(enc.encode(`data: ${safe}\n\n`));
+        };
+
+        let assistantBuffer = "";
         const stream = new ReadableStream({
           async start(controller) {
-            const enc = new TextEncoder();
-            const sendChunk = (text: string) => {
-              // Percent-encode the chunk so it can't contain a raw newline
-              // (SSE event boundary) or a leading space (trimmed by the
-              // "data: " parser). '%' MUST be escaped first — otherwise a
-              // literal '%' in the model output (e.g. "50%", "C++ 100%")
-              // becomes a dangling percent that throws URIError in the
-              // client's decodeURIComponent and truncates the stream.
-              const safe = text
-                .replace(/%/g, "%25")
-                .replace(/ /g, "%20")
-                .replace(/\n/g, "%0a")
-                .replace(/\r/g, "%0d");
-              controller.enqueue(enc.encode(`data: ${safe}\n\n`));
-            };
-
-            let provider;
             try {
-              provider = createLLMProvider();
-            } catch (err) {
-              const msg = err instanceof Error ? err.message : String(err);
-              sendChunk(`[LLM 설정 오류] ${msg}`);
-              controller.enqueue(enc.encode(`data: [DONE]\n\n`));
-              controller.close();
-              return;
-            }
+              const tokenStream: AsyncIterable<string> = handshakeResult
+                ? (provider as any).streamFromHandshake(
+                    handshakeResult,
+                    abortController.signal,
+                  )
+                : provider.stream(
+                    { messages, maxTokens },
+                    abortController.signal,
+                  );
 
-            let assistantBuffer = "";
-            try {
-              if (provider) {
-                // Resolution order for the system prompt:
-                //   thread.system_prompt (per-session override) >
-                //   widget.system_prompt                         >
-                //   LLM_SYSTEM_PROMPT env                        >
-                //   built-in default
-                // widgetMaster 는 위 화이트리스트 가드에서 이미 조회했으므로
-                // 재사용한다 (중복 DB 조회 제거). threadRow 만 여기서 가져온다.
-                const threadRow = threadId
-                  ? await getThread(threadId, widgetId)
-                  : null;
-                const systemContent =
-                  threadRow?.system_prompt?.trim() ||
-                  widgetMaster?.system_prompt?.trim() ||
-                  process.env.LLM_SYSTEM_PROMPT ||
-                  [
-                    "You are a helpful assistant embedded in a website.",
-                    "Reply in the user's language.",
-                    "Keep every answer to 1–2 short sentences. Never use bullet lists, headings, or long explanations unless the user explicitly asks for detail.",
-                    "If you don't know, say so in one sentence — do not guess.",
-                  ].join(" ");
-
-                // RAG-style: if the operator pasted reference material on
-                // this thread, inject it as a 2nd system message so the
-                // model treats it as ground truth for this session.
-                const refText = threadRow?.context_text?.trim();
-
-                const messages: ChatMessage[] = [
-                  { role: "system", content: systemContent },
-                  ...(refText
-                    ? [
-                        {
-                          role: "system" as const,
-                          content:
-                            "다음은 이 세션 전용 참고 자료입니다. " +
-                            "사용자 질문에 답할 때 이 자료를 최우선 근거로 활용하고, " +
-                            "자료에 없는 내용은 추측하지 말고 모른다고 답하세요.\n\n" +
-                            "─── 참고 자료 ───\n" +
-                            refText +
-                            "\n─── 참고 자료 끝 ───",
-                        },
-                      ]
-                    : []),
-                  ...history.map((m) => ({
-                    role: m.role,
-                    content: m.content,
-                  })),
-                ];
-
-                const maxTokens = Number.parseInt(
-                  process.env.LLM_MAX_TOKENS ?? "512",
-                  10,
-                );
-                for await (const token of provider.stream({
-                  messages,
-                  maxTokens: Number.isFinite(maxTokens) ? maxTokens : 512,
-                })) {
-                  assistantBuffer += token;
-                  sendChunk(token);
-                }
-              } else {
-                const fallback = pickReply(userMessage);
-                for (const tk of chunkText(fallback)) {
-                  assistantBuffer += tk;
-                  sendChunk(tk);
-                  await sleep(40);
-                }
+              for await (const token of tokenStream) {
+                if (abortController.signal.aborted) break;
+                assistantBuffer += token;
+                sendChunk(controller, token);
               }
-            } catch (err) {
-              const msg = err instanceof Error ? err.message : String(err);
-              sendChunk(`\n[LLM error] ${msg}`);
+            } catch (err: any) {
+              if (!abortController.signal.aborted) {
+                const msg = err instanceof Error ? err.message : String(err);
+                sendChunk(controller, `\n[LLM error] ${msg}`);
+              }
             } finally {
-              // Persist the assistant turn no matter how the stream ended,
-              // as long as we actually produced text.
               if (threadId && assistantBuffer.trim()) {
                 appendMessage(threadId, "assistant", assistantBuffer).catch(
                   (e) => console.error("[v2/ask] persist assistant failed:", e),
                 );
               }
-              controller.enqueue(enc.encode(`data: [DONE]\n\n`));
-              controller.close();
+              if (!abortController.signal.aborted) {
+                controller.enqueue(enc.encode(`data: [DONE]\n\n`));
+                try {
+                  controller.close();
+                } catch {
+                  /* already closed */
+                }
+              }
             }
+          },
+          cancel(reason) {
+            console.log("[v2/ask] Client disconnected, cancelling stream:", reason);
+            abortController.abort(reason);
           },
         });
 
@@ -316,7 +551,7 @@ export const v2WidgetEndpoints = async (app: any) => {
       },
       {
         body: t.Object({
-          widgetId: t.Optional(t.String()),
+          widgetId: t.Optional(t.Any()),
           threadId: t.Optional(t.String()),
           message: t.String(),
           browserInfo: t.Optional(t.Any()),

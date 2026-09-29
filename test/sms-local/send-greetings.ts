@@ -123,8 +123,13 @@ function parseCsv(text: string): Contact[] {
     const comma = trimmed.indexOf(",");
     if (comma < 0) continue;
     const name = trimmed.slice(0, comma).trim();
-    const phone = trimmed.slice(comma + 1).replace(/[\s-]/g, "").trim();
+    let phone = trimmed.slice(comma + 1).replace(/[\s-]/g, "").trim();
     if (!phone) continue;
+    // Auto-format for Cloud API which strictly requires E.164 (+82...)
+    // Supports 01x regardless of slight length typos (9~12 digits)
+    if (phone.startsWith("01") && phone.length >= 9 && phone.length <= 12) {
+      phone = "+82" + phone.slice(1);
+    }
     out.push({ name, phone });
   }
   return out;

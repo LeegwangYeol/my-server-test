@@ -42,6 +42,23 @@ export const v1WidgetUpdate = async (app: Elysia<"/v1/widget">) => {
             message: "이미 삭제된 조직입니다.",
           };
         }
+
+        // * 소유자 또는 멤버십 확인 추가
+        const { data: memberData } = await supabaseClient
+          .from("llami_workspace_member")
+          .select("*")
+          .eq("workspace_id", workspaceId)
+          .eq("user_id", user.id)
+          .eq("is_deleted", false)
+          .limit(1)
+          .maybeSingle();
+
+        if (!memberData && workspace.owner !== user.id) {
+          return {
+            success: false,
+            message: "이 워크스페이스에 대한 위젯 편집 권한이 없습니다.",
+          };
+        }
       }
 
       if (widget.id) {
