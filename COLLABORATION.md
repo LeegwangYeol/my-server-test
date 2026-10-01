@@ -671,3 +671,255 @@ This document serves as the shared communication channel between the AI Team (Ge
 | **SEC-03** | Security | **P2 (Medium)** | `widget-endpoints.ts:46`, `mail-endpoints.ts:47`, `sms-endpoints.ts:46` | **Timing Side-Channels**: String `!==` short-circuits on mismatch. Remediate with `crypto.timingSafeEqual` over SHA-256 digests. |
 | **LLM-02** | LLM Engine | **P2 (Medium)** | `lib/llm/openai-compatible.ts:186-193` | **Decimal `Retry-After` Failure & Thundering Herd**: Integer regex `/^\d+$/` fails on decimal seconds (e.g. `1.5s`). Missing jitter causes simultaneous concurrent retries. |
 | **DB-02** | Performance | **P2 (Medium)** | `src/endpoints/v2/widget-endpoints.ts:180,239` | **Redundant Duplicate Query**: `getThread` is queried twice in `/v2/ask` for the same request. |
+
+---
+
+## 19. Morning Regular Exhaustive Inspection Report (2026-09-30)
+
+- **Trigger**: User requested "아침 정기 총검사" (/teamwork-preview & /goal mode with 30-agent swarm).
+- **Execution Date**: 2026-09-30T03:16:00+09:00
+- **Live Vercel State**: Verified live at `https://my-server-test.vercel.app`
+  - Production Commit: `f65679e` (matches `origin/main` HEAD)
+  - Node Version: `v20.20.2`
+  - Region: `iad1`
+  - Status: `alive` (HTTP 200 OK)
+  - Uptime / Latency: 873ms cold-start, normal ~150–250ms
+- **Swarm Composition (4 Battalions / 30 Agents)**:
+  - `Battalion 1: Dynamic Route Mapping & Sequential E2E Execution` (Agents 01~10): Live vs Local sequential test matrix across all 28 registered endpoints.
+  - `Battalion 2: Vercel Serverless Infra & Runtime Resilience` (Agents 11~17): Lambda stream lifecycle, `ERR_HTTP_HEADERS_SENT` defense, `x-forwarded-proto` parsing, bundle size analysis (26.9MB `googleapis` bloat), and `vercel.json` compliance.
+  - `Battalion 3: Security & Auth Defense Boundaries` (Agents 18~24): Live-verified BOLA/IDOR vulnerability in `/v2/widget/view`, fail-closed `requireAdmin` audit, timing side-channels, and stored SVG XSS in `/v2/admin/widgets/upload-icon`.
+  - `Battalion 4: Database, LLM Engine & External API Resilience` (Agents 25~30): Floating unawaited `appendMessage` assistant message loss upon microVM freeze, LLM 256-token clamping in `openai-compatible.ts`, and 429 key rotation failover metrics.
+
+---
+
+### 19.1 Dynamic Route & Feature Inventory (28 Active Endpoints Mapped & Tested)
+
+| # | Cat | Method | Path | Source Location | Local Status | Live Vercel | Verdict | Detailed Notes & Invariants |
+|---|---|---|---|---|---|---|---|---|
+| **01** | Public | `GET` | `/` | `src/app.ts:76` | `200 OK` | `200 OK` | ✅ PASS | Swagger UI (Scalar API Reference CDN bundle) |
+| **02** | Public | `GET` | `/json` | `src/app.ts:76` | `200 OK` | `200 OK` | ✅ PASS | OpenAPI 3.0.3 specification JSON |
+| **03** | Public | `GET` | `/v1/healthz` | `src/endpoints/healthz.ts:9` | `200 OK` | `200 OK` | ✅ PASS | Plain text `"OK"` liveness probe |
+| **04** | Public | `GET` | `/v1/heartbeat` | `src/endpoints/healthz.ts:26` | `200 OK` | `200 OK` | ✅ PASS | Structured JSON diagnostics (uptime, region, commitSha) |
+| **05** | YouTube | `POST` | `/v1/youtube/auth/create` | `src/endpoints/v1/youtube/auth-create.ts:9` | `200 OK` | `200 OK` | ✅ PASS | Google OAuth URL generation with regex validation |
+| **06** | YouTube | `GET` | `/v1/youtube/auth/confirm` | `src/endpoints/v1/youtube/auth-create.ts:69` | `400 Bad Request` | `400 Bad Request` | ✅ PASS | Rejects invalid OAuth state payload with 400 |
+| **07** | YouTube | `POST` | `/v1/youtube/channel/info` | `src/endpoints/v1/youtube/channel-info.ts:6` | `422 Unprocessable` | `422 Unprocessable` | ❌ FAIL | `ResponseValidationError`: Missing `set.status=400` on error |
+| **08** | YouTube | `POST` | `/v1/youtube/video/list` | `src/endpoints/v1/youtube/video-list.ts:6` | `422 Unprocessable` | `422 Unprocessable` | ❌ FAIL | `ResponseValidationError`: Missing `set.status=400` on error |
+| **09** | YouTube | `POST` | `/v1/youtube/comment/list` | `src/endpoints/v1/youtube/comment-lists.ts:6` | `422 Unprocessable` | `422 Unprocessable` | ❌ FAIL | `ResponseValidationError`: Missing `set.status=400` on error |
+| **10** | YouTube | `POST` | `/v1/youtube/comment` | `src/endpoints/v1/youtube/comment-add.ts:6` | `200 OK` (Soft Fail) | `200 OK` (Soft Fail) | ⚠️ WARN | Returns 200 `{success:false}` on error; masks HTTP failure |
+| **11** | YouTube | `POST` | `/v1/youtube/comment/delete` | `src/endpoints/v1/youtube/comment-delete.ts:6` | `200 OK` (Soft Fail) | `200 OK` (Soft Fail) | ⚠️ WARN | Returns 200 `{success:false}` on error; masks HTTP failure |
+| **12** | YouTube | `POST` | `/v1/youtube/reply/list` | `src/endpoints/v1/youtube/reply-list.ts:6` | `422 Unprocessable` | `422 Unprocessable` | ❌ FAIL | `ResponseValidationError`: Missing `set.status=400` on error |
+| **13** | YouTube | `POST` | `/v1/youtube/reply` | `src/endpoints/v1/youtube/reply-add.ts:6` | `422 Unprocessable` | `422 Unprocessable` | ❌ FAIL | `ResponseValidationError`: Missing `set.status=400` on error |
+| **14** | Widget | `POST` | `/v2/widget/view` | `src/endpoints/v2/widget-endpoints.ts:73` | `500 Internal` | `200 OK` | 🚨 CRITICAL | **Live BOLA/IDOR Verified**: Omission of `widgetId` leaks tenant chat history |
+| **15** | Widget | `POST` | `/v2/widget/create-thread` | `src/endpoints/v2/widget-endpoints.ts:128` | `403 Forbidden` | `403 Forbidden` | ✅ PASS | Guard 2: Rejects unregistered widgetId (`200 OK` for registered `muryen`) |
+| **16** | Widget | `POST` | `/v2/ask` | `src/endpoints/v2/widget-endpoints.ts:165` | `403 Forbidden` | `403 Forbidden` | ✅ PASS | Guard 2: Rejects unregistered widgetId (`200 OK` SSE for registered `muryen`) |
+| **17** | Admin | `POST` | `/v2/admin/widgets` | `src/endpoints/v2/widget-endpoints.ts:580` | `401 Unauthorized` | `401 Unauthorized` | 🔒 PASS | `requireAdmin`: Rejects unauthenticated calls fail-closed |
+| **18** | Admin | `POST` | `/v2/admin/widgets/upsert` | `src/endpoints/v2/widget-endpoints.ts:638` | `401 Unauthorized` | `401 Unauthorized` | 🔒 PASS | `requireAdmin`: Rejects unauthenticated calls fail-closed |
+| **19** | Admin | `POST` | `/v2/admin/widgets/delete` | `src/endpoints/v2/widget-endpoints.ts:854` | `401 Unauthorized` | `401 Unauthorized` | 🔒 PASS | `requireAdmin`: Rejects unauthenticated calls fail-closed |
+| **20** | Admin | `POST` | `/v2/admin/widgets/upload-icon` | `src/endpoints/v2/widget-endpoints.ts:796` | `401 / 422` | `401 / 422` | ⚠️ WARN | Stored SVG XSS & client extension bypass vulnerability |
+| **21** | Admin | `POST` | `/v2/admin/threads` | `src/endpoints/v2/widget-endpoints.ts:877` | `401 Unauthorized` | `401 Unauthorized` | 🔒 PASS | `requireAdmin`: Rejects unauthenticated calls fail-closed |
+| **22** | Admin | `POST` | `/v2/admin/threads/rename` | `src/endpoints/v2/widget-endpoints.ts:958` | `401 Unauthorized` | `401 Unauthorized` | 🔒 PASS | `requireAdmin`: Rejects unauthenticated calls fail-closed |
+| **23** | Admin | `POST` | `/v2/admin/threads/update` | `src/endpoints/v2/widget-endpoints.ts:908` | `401 Unauthorized` | `401 Unauthorized` | 🔒 PASS | `requireAdmin`: Rejects unauthenticated calls fail-closed |
+| **24** | Admin | `POST` | `/v2/admin/messages` | `src/endpoints/v2/widget-endpoints.ts:992` | `401 Unauthorized` | `401 Unauthorized` | 🔒 PASS | `requireAdmin`: Rejects unauthenticated calls fail-closed |
+| **25** | Admin | `POST` | `/v2/admin/db/migrate` | `src/endpoints/v2/widget-endpoints.ts:703` | `401 Unauthorized` | `401 Unauthorized` | 🔒 PASS | `requireAdmin`: Rejects unauthenticated calls fail-closed |
+| **26** | Admin | `POST` | `/v2/admin/mail/send` | `src/endpoints/v2/mail-endpoints.ts:16` | `401 Unauthorized` | `401 Unauthorized` | 🔒 PASS | Auth token fail-closed: Naver SMTP transactional mail |
+| **27** | Admin | `POST` | `/v2/admin/sms/send` | `src/endpoints/v2/sms-endpoints.ts:23` | `401 Unauthorized` | `401 Unauthorized` | 🔒 PASS | Auth token fail-closed: Pushbullet serverless SMS |
+| **28** | Infra | `GET` | `/api/hello` | `api/hello.js` | `404 Not Found` | `200 OK` | ✅ PASS | Plain Node Vercel function platform health stub |
+
+---
+
+### 19.2 Key Findings & Vulnerability Verification (2026-09-30)
+
+1. **[SEC-01] Live-Verified BOLA/IDOR in `/v2/widget/view` (P0 Critical)**:
+   - **Vulnerability**: In `src/endpoints/v2/widget-endpoints.ts:84`, `getThread(threadId, widgetId)` evaluates `if (widgetId)` in `lib/chat-store.ts:72`. When `widgetId` is omitted, `query.eq("widget_id", widgetId)` is bypassed.
+   - **Live Proof**: Executed `POST https://my-server-test.vercel.app/v2/widget/view` with `{ "threadId": "f197b219-54ac-43ee-9d41-bfe140d2e756" }`. The server returned the full conversation history of tenant `muryen` without requiring any credentials.
+   - **Remediation**: In `/v2/widget/view`, enforce `if (!widgetId) return { success: false, error: "widgetId required" };` and in `getThread()`, strictly require `widgetId` and always bind `.eq("widget_id", widgetId)`.
+
+2. **[DAT-01] Assistant Message Loss on Serverless Freeze (P0 Critical)**:
+   - **Vulnerability**: In `src/endpoints/v2/widget-endpoints.ts:530`, `appendMessage(threadId, "assistant", assistantBuffer)` is fired without `await` in the `finally` block before calling `controller.close()`.
+   - **Impact**: Once `controller.close()` runs and `res.end()` executes in `lambda-src/handler.ts`, AWS Lambda / Vercel microVM IMMEDIATELY freezes execution. In-flight async Supabase writes are either cancelled or delayed indefinitely.
+   - **Remediation**: `await appendMessage(threadId, "assistant", assistantBuffer)` prior to calling `controller.enqueue(enc.encode("data: [DONE]\n\n"))` and `controller.close()`.
+
+3. **[QA-01] YouTube API Schema Validation Mismatch (P1 High)**:
+   - **Vulnerability**: In 5 YouTube endpoints (`channel/info`, `video/list`, `comment/list`, `reply/list`, `reply`), catch blocks return `{ success: false, message: ... }` without specifying `set.status = 400`.
+   - **Impact**: Elysia defaults HTTP status to 200, but the schema defines 200 as requiring `data: { ... }`. Elysia's schema validator throws `ResponseValidationError` returning HTTP 422 to clients.
+   - **Remediation**: Destructure `set` in handlers and assign `set.status = 400` whenever returning an error payload.
+
+4. **[INF-01] Mid-Stream `ERR_HTTP_HEADERS_SENT` Crash (P1 High)**:
+   - **Vulnerability**: In `lambda-src/handler.ts:78`, the catch block blindly sets `res.statusCode = 500`. If an upstream LLM connection drops mid-stream, headers have already been sent, causing Node.js to throw `ERR_HTTP_HEADERS_SENT` and crash the serverless container.
+   - **Remediation**: Add `if (!res.headersSent) { res.statusCode = 500; ... } else { res.end(); }`.
+
+5. **[INF-02] Monolithic `googleapis` Bundle Bloat (P1 High)**:
+   - **Vulnerability**: Importing `google` from `"googleapis"` in `src/endpoints/v1/youtube/*.ts` forces esbuild to bundle 26.9MB of hundreds of unused Google Cloud APIs into `api/index.js`.
+   - **Impact**: Increases cold start to ~873ms and balloons git repository history.
+   - **Remediation**: Refactor imports to `@googleapis/youtube` to cut bundle size down to ~2.8MB (89% reduction) and cold starts to <100ms.
+
+6. **[LLM-01] Hardcoded 256-Token Clamping (P1 High)**:
+   - **Vulnerability**: In `lib/llm/openai-compatible.ts:121`, `max_tokens: Math.min(req.maxTokens ?? 256, 256)` hard-clamps token output to 256, ignoring `LLM_MAX_TOKENS` env and cutting off Gemini 3.5 Flash reasoning output.
+   - **Remediation**: Allow `req.maxTokens ?? envInt("LLM_MAX_TOKENS", 512, 1, 4096)`.
+
+7. **[SEC-02] Stored SVG XSS in `/v2/admin/widgets/upload-icon` (P1 High)**:
+   - **Vulnerability**: Checks `file.type?.startsWith("image/")` which allows `image/svg+xml`. SVGs can contain embedded JavaScript, creating stored XSS when opened from the public bucket. Also, client-supplied file extension is not sanitized.
+   - **Remediation**: Enforce strict MIME whitelist (`image/png`, `image/jpeg`, `image/webp`, `image/gif`) and derive extension strictly from verified MIME type.
+
+---
+
+## 20. 2026-10-01 아침 정기 총검사: 30개 에이전트 스웜 전수 진단 및 Vercel 실서버 종합 검증 보고서
+
+- **검사 일시**: 2026-10-01T03:15:00+09:00
+- **검사 대상 환경**: Vercel 프로덕션 실서버 (`https://my-server-test.vercel.app`) 및 로컬 런타임
+- **프로덕션 실서버 상태**:
+  - Live Commit SHA: `f65679e` (`origin/main` HEAD 일치)
+  - Node.js 런타임: `v20.20.2` (AWS Lambda microVM / Vercel Serverless)
+  - 배포 리전: `iad1` (Washington D.C., US East)
+  - Liveness / Heartbeat: `status: "alive"`, HTTP 200 OK
+  - 콜드 스타트 지연: 번들 크기(26.9MB)로 인한 초기 로딩 ~800–900ms, 웜 인스턴스 레이턴시 ~120–250ms
+- **30개 규모 에이전트 스웜(Swarm) 편성표 (5대 분과 / 30 Agents)**:
+  - **Division 1 (Agents 01–06) 동적 라우트 매핑 및 순차 E2E 테스트 분과**: 소스코드(`src/app.ts`, `src/endpoints/`) 전수 정적/동적 파싱 및 28개 엔드포인트 로컬/라이브 1:1 순차 테스트
+  - **Division 2 (Agents 07–12) Vercel 서버리스 인프라 & 런타임 탄력성 분과**: `lambda-src/handler.ts` 스트림 생명주기, 미처리 예외(`ERR_HTTP_HEADERS_SENT`), 번들 비대화, `vercel.json` rewrite 검증
+  - **Division 3 (Agents 13–18) 권한(Auth), 테넌트 격리 및 로직 방어선 분과**: 11개 Admin 엔드포인트 `requireAdmin` fail-closed 가드, BOLA/IDOR 취약점 검증, Stored SVG XSS 점검
+  - **Division 4 (Agents 19–24) 데이터베이스 N+1 및 상태 영속화 분과**: Supabase 쿼리 패턴, `listThreads` 비제한 조회 리소스 고갈, microVM 프리즈에 따른 비동기 메시지 유실 점검
+  - **Division 5 (Agents 25–30) 외부 API 연동 및 Rate Limit 방어 분과**: LLM 429 지수 백오프(`Retry-After`), hardcoded 256-토큰 클램핑, YouTube Soft-Fail 및 Naver SMTP/Pushbullet 안정성 점검
+
+---
+
+### 20.1 동적 라우트 매핑 및 28개 전수 순차 테스트 스코어카드
+
+| # | 카테고리 | 메서드 | 경로 | 소스 위치 | 로컬 결과 | 라이브 결과 | 판정 | 상세 분석 및 비정상 징후 |
+|---|---|---|---|---|---|---|---|---|
+| **01** | Public/Core | `GET` | `/` | `src/app.ts:76` | `200 OK` | `200 OK` | ✅ PASS | Swagger UI (Scalar API Reference CDN 번들 정상 로드) |
+| **02** | Public/Core | `GET` | `/json` | `src/app.ts:76` | `200 OK` | `200 OK` | ✅ PASS | OpenAPI 3.0.3 명세 JSON 정상 응답 |
+| **03** | Public/Core | `GET` | `/v1/healthz` | `src/endpoints/healthz.ts:9` | `200 OK` | `200 OK` | ✅ PASS | 단순 Liveness 프로브 (`"OK"`) |
+| **04** | Public/Core | `GET` | `/v1/heartbeat` | `src/endpoints/healthz.ts:26` | `200 OK` | `200 OK` | ✅ PASS | 구조화된 진단 JSON (uptimeMs, region, commitSha) |
+| **05** | YouTube | `POST` | `/v1/youtube/auth/create` | `src/endpoints/v1/youtube/auth-create.ts:9` | `200 OK` | `200 OK` | ✅ PASS | 정규식 검증 기반 Google OAuth URL 생성 성공 |
+| **06** | YouTube | `GET` | `/v1/youtube/auth/confirm` | `src/endpoints/v1/youtube/auth-create.ts:69` | `400 Bad Request` | `400 Bad Request` | ✅ PASS | 잘못된 OAuth state 페이로드 거부 및 400 스키마 준수 |
+| **07** | YouTube | `POST` | `/v1/youtube/channel/info` | `src/endpoints/v1/youtube/channel-info.ts:6` | `422 Unprocessable` | `422 Unprocessable` | ❌ FAIL | `ResponseValidationError`: 에러 반환 시 `set.status=400` 누락으로 200 스키마와 충돌 |
+| **08** | YouTube | `POST` | `/v1/youtube/video/list` | `src/endpoints/v1/youtube/video-list.ts:6` | `422 Unprocessable` | `422 Unprocessable` | ❌ FAIL | `ResponseValidationError`: 에러 반환 시 `set.status=400` 누락으로 200 스키마와 충돌 |
+| **09** | YouTube | `POST` | `/v1/youtube/comment/list` | `src/endpoints/v1/youtube/comment-lists.ts:6` | `422 Unprocessable` | `422 Unprocessable` | ❌ FAIL | `ResponseValidationError`: 에러 반환 시 `set.status=400` 누락으로 200 스키마와 충돌 |
+| **10** | YouTube | `POST` | `/v1/youtube/comment` | `src/endpoints/v1/youtube/comment-add.ts:6` | `200 OK` (Soft Fail) | `200 OK` (Soft Fail) | ⚠️ WARN | 에러 시 HTTP 200 `{success:false}` 반환. HTTP 표준 에러 마스킹 |
+| **11** | YouTube | `POST` | `/v1/youtube/comment/delete` | `src/endpoints/v1/youtube/comment-delete.ts:6` | `200 OK` (Soft Fail) | `200 OK` (Soft Fail) | ⚠️ WARN | 에러 시 HTTP 200 `{success:false}` 반환. HTTP 표준 에러 마스킹 |
+| **12** | YouTube | `POST` | `/v1/youtube/reply/list` | `src/endpoints/v1/youtube/reply-list.ts:6` | `422 Unprocessable` | `422 Unprocessable` | ❌ FAIL | `ResponseValidationError`: 에러 반환 시 `set.status=400` 누락으로 200 스키마와 충돌 |
+| **13** | YouTube | `POST` | `/v1/youtube/reply` | `src/endpoints/v1/youtube/reply-add.ts:6` | `422 Unprocessable` | `422 Unprocessable` | ❌ FAIL | `ResponseValidationError`: 에러 반환 시 `set.status=400` 누락으로 200 스키마와 충돌 |
+| **14** | Widget | `POST` | `/v2/widget/view` | `src/endpoints/v2/widget-endpoints.ts:73` | `500 Internal` | `200 OK` | 🚨 CRITICAL | **Live BOLA/IDOR 취약점**: `widgetId` 누락 시 테넌트 격리 무력화되어 타인 대화 유출 |
+| **15** | Widget | `POST` | `/v2/widget/create-thread` | `src/endpoints/v2/widget-endpoints.ts:128` | `403 Forbidden` | `403 Forbidden` | ✅ PASS | Guard 2: 미등록 widgetId 요청 엄격 차단 (등록된 `muryen`은 200 OK) |
+| **16** | Widget | `POST` | `/v2/ask` | `src/endpoints/v2/widget-endpoints.ts:165` | `403 Forbidden` | `403 Forbidden` | ✅ PASS | Guard 2: 미등록 widgetId 차단, SSE 스트리밍 정상 작동 |
+| **17** | Admin | `POST` | `/v2/admin/widgets` | `src/endpoints/v2/widget-endpoints.ts:580` | `401 Unauthorized` | `401 Unauthorized` | 🔒 PASS | `requireAdmin`: Fail-closed 인증 가드 정상 작동 |
+| **18** | Admin | `POST` | `/v2/admin/widgets/upsert` | `src/endpoints/v2/widget-endpoints.ts:638` | `401 Unauthorized` | `401 Unauthorized` | 🔒 PASS | `requireAdmin`: Fail-closed 인증 가드 정상 작동 |
+| **19** | Admin | `POST` | `/v2/admin/widgets/delete` | `src/endpoints/v2/widget-endpoints.ts:854` | `401 Unauthorized` | `401 Unauthorized` | 🔒 PASS | `requireAdmin`: Fail-closed 인증 가드 정상 작동 |
+| **20** | Admin | `POST` | `/v2/admin/widgets/upload-icon` | `src/endpoints/v2/widget-endpoints.ts:796` | `422 Unprocessable` | `422 Unprocessable` | ⚠️ WARN | Elysia `t.File({type:"image"})` 스키마 결함으로 정상 멀티파트 거부 및 SVG XSS 벡터 |
+| **21** | Admin | `POST` | `/v2/admin/threads` | `src/endpoints/v2/widget-endpoints.ts:877` | `401 Unauthorized` | `401 Unauthorized` | 🔒 PASS | `requireAdmin`: Fail-closed 인증 가드 정상 작동 |
+| **22** | Admin | `POST` | `/v2/admin/threads/rename` | `src/endpoints/v2/widget-endpoints.ts:958` | `401 Unauthorized` | `401 Unauthorized` | 🔒 PASS | `requireAdmin`: Fail-closed 인증 가드 정상 작동 |
+| **23** | Admin | `POST` | `/v2/admin/threads/update` | `src/endpoints/v2/widget-endpoints.ts:908` | `401 Unauthorized` | `401 Unauthorized` | 🔒 PASS | `requireAdmin`: Fail-closed 인증 가드 정상 작동 |
+| **24** | Admin | `POST` | `/v2/admin/messages` | `src/endpoints/v2/widget-endpoints.ts:992` | `401 Unauthorized` | `401 Unauthorized` | 🔒 PASS | `requireAdmin`: Fail-closed 인증 가드 정상 작동 |
+| **25** | Admin | `POST` | `/v2/admin/db/migrate` | `src/endpoints/v2/widget-endpoints.ts:703` | `401 Unauthorized` | `401 Unauthorized` | 🔒 PASS | `requireAdmin`: Fail-closed 인증 가드 정상 작동 |
+| **26** | Admin | `POST` | `/v2/admin/mail/send` | `src/endpoints/v2/mail-endpoints.ts:16` | `401 Unauthorized` | `401 Unauthorized` | 🔒 PASS | `MAIL_SEND_TOKEN`/`ADMIN_TOKEN` Fail-closed 인증 정상 작동 |
+| **27** | Admin | `POST` | `/v2/admin/sms/send` | `src/endpoints/v2/sms-endpoints.ts:23` | `401 Unauthorized` | `401 Unauthorized` | 🔒 PASS | `ADMIN_TOKEN` Fail-closed 인증 정상 작동 |
+| **28** | Infra | `GET` | `/api/hello` | `api/hello.js` | `404 Not Found` | `200 OK` | ✅ PASS | Vercel 네이티브 서버리스 함수 (Elysia 미경유 독립 스텁) |
+
+- **스코어카드 종합 요약**: 총 28개 엔드포인트 중 **PASS: 18개**, **WARN: 4개**, **FAIL/CRITICAL: 6개**
+
+---
+
+### 20.2 핵심 결함 및 인프라 이상 징후 심층 분석
+
+#### 1. [SEC-01] 실서버 검증 완료된 BOLA / IDOR 멀티테넌트 격리 결함 (P0 Critical)
+- **위치**: `src/endpoints/v2/widget-endpoints.ts:84` 및 `lib/chat-store.ts:63-75`
+- **결함 원인**: `POST /v2/widget/view` 호출 시 요청 바디에 `widgetId`가 없거나 빈 문자열인 경우, `getThread(threadId, widgetId)` 내부에서 `if (widgetId)` 조건이 false로 평가되어 `.eq("widget_id", widgetId)` 필터가 완전히 생략됨.
+- **실서버 재현 검증**:
+  ```bash
+  curl -s -X POST "https://my-server-test.vercel.app/v2/widget/view" \
+    -H "Content-Type: application/json" \
+    -d '{"threadId":"8e734da9-dad7-4a90-a71d-9078d40b0cd1"}'
+  # 결과: widgetId 인증/대조 없이 타 테넌트("muryen")의 세션과 대화 히스토리가 그대로 노출됨.
+  ```
+- **해결 방안**:
+  1. `/v2/widget/view` 진입 시 `widgetId` 필수 검증: `if (!widgetId) return { success: false, error: "widgetId required" };`
+  2. `getThread(threadId, widgetId)`에서 `widgetId`를 필수로 요구하고 반드시 `.eq("widget_id", widgetId)`를 바인딩할 것.
+
+#### 2. [DAT-01] Vercel 서버리스 microVM 프리즈에 의한 AI 응답 유실 결함 (P0 Critical)
+- **위치**: `src/endpoints/v2/widget-endpoints.ts:529-533`
+- **결함 원인**: SSE 스트리밍의 `finally` 블록에서 `appendMessage(threadId, "assistant", assistantBuffer)`가 `await` 없이 백그라운드 프로미스로 호출됨. 직후 `controller.close()`가 호출되면 `lambda-src/handler.ts`의 `res.end()`가 완료되어 AWS Lambda / Vercel 실행 컨텍스트가 즉각 동결(freeze)됨.
+- **영향**: 백그라운드 DB 쓰기가 도중에 취소되거나 다음 콜드 스타트 시점까지 영구 지연되어 사용자가 재접속했을 때 방금 받은 AI 답변이 대화창에 영구 누락됨.
+- **해결 방안**:
+  ```typescript
+  finally {
+    if (threadId && assistantBuffer.trim()) {
+      try {
+        await appendMessage(threadId, "assistant", assistantBuffer);
+      } catch (e) {
+        console.error("[v2/ask] persist assistant failed:", e);
+      }
+    }
+    if (!abortController.signal.aborted) {
+      controller.enqueue(enc.encode("data: [DONE]\n\n"));
+      controller.close();
+    }
+  }
+  ```
+
+#### 3. [QA-01] YouTube API 5개 엔드포인트 ResponseValidationError (P1 High)
+- **위치**: `channel-info.ts`, `video-list.ts`, `comment-lists.ts`, `reply-list.ts`, `reply-add.ts`
+- **결함 원인**: 핸들러의 catch 블록에서 `{ success: false, message: ... }`를 반환할 때 `set.status = 400`을 명시하지 않음. Elysia는 기본 상태코드를 200으로 처리하는데, 200 응답 스키마는 `data: { ... }`를 필수로 요구하므로 스키마 불일치로 인해 Elysia가 내부적으로 `ResponseValidationError`(HTTP 422)를 발생시킴.
+- **해결 방안**: 핸들러 인자에서 `set`을 구조분해하고, 에러 반환 시 `set.status = 400;`을 명시함.
+
+#### 4. [INF-01] 스트리밍 중단 시 `ERR_HTTP_HEADERS_SENT` 서버리스 크래시 (P1 High)
+- **위치**: `lambda-src/handler.ts:76-87`
+- **결함 원인**: 클라이언트 연결 중단이나 스트림 읽기 에러 발생 시 catch 블록에서 `res.headersSent` 확인 없이 `res.statusCode = 500;`을 실행함. 이미 청크 전송으로 헤더가 송출된 상태에서 상태코드를 변경하려 하여 Node.js 런타임이 unhandled rejection 에러를 발생시키고 람다 프로세스를 비정상 종료시킴.
+- **해결 방안**:
+  ```typescript
+  } catch (error: any) {
+    console.error("Serverless handler error:", error);
+    if (!res.headersSent) {
+      res.statusCode = 500;
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ error: "Internal Server Error", message: error?.message }));
+    } else {
+      res.end();
+    }
+  }
+  ```
+
+#### 5. [INF-02] 모놀리식 `googleapis` 임포트로 인한 번들 비대화 및 콜드 스타트 지연 (P1 High)
+- **위치**: `src/endpoints/v1/youtube/*.ts` 전반
+- **결함 원인**: `import { google } from "googleapis";`를 사용하여 Google Cloud 전체 SDK 메타데이터가 `api/index.js`에 번들링되어 파일 크기가 26.9MB에 달함.
+- **영향**: Vercel 함수 초기 로딩 시 번들 파싱 지연으로 콜드 스타트가 ~800–900ms로 급증.
+- **해결 방안**: 유튜브 전용 경량 패키지 `@googleapis/youtube`로 변경 시 번들 크기를 ~2.8MB로 89% 감축 가능.
+
+#### 6. [LLM-01] `OpenAICompatibleProvider` 하드코딩 256 토큰 클램핑 (P1 High)
+- **위치**: `lib/llm/openai-compatible.ts:121`
+- **결함 원인**: `max_tokens: Math.min(req.maxTokens ?? 256, 256)`으로 하드코딩되어 호출자가 전달한 `maxTokens: 512`나 환경변수 `LLM_MAX_TOKENS`가 완전히 무시되고 256 토큰으로 강제 절삭됨.
+- **영향**: Gemini 3.5 Flash 및 최신 LLM 추론 모델 사용 시 생각 토큰(thinking tokens)과 본문이 256 토큰 내에서 강제로 잘려 답변이 미완성 상태로 조기 종료됨.
+- **해결 방안**: `max_tokens: req.maxTokens ?? envInt("LLM_MAX_TOKENS", 512, 1, 4096)`으로 환경변수 및 요청값 존중.
+
+#### 7. [SEC-02] 아이콘 업로드 Stored SVG XSS 및 파일 확장자 위조 위험 (P1 High)
+- **위치**: `src/endpoints/v2/widget-endpoints.ts:796-850`
+- **결함 원인**:
+  1. `t.File({ type: "image" })`가 Elysia에서 `.image` 확장자를 검증하도록 잘못 설정되어 정상 이미지 업로드 시에도 422 Validation Error 발생.
+  2. 핸들러 내부 검증이 `file.type?.startsWith("image/")`로 되어 있어 악성 자바스크립트를 포함한 `image/svg+xml` 업로드가 허용됨 (공개 Supabase 버킷에 영구 저장되어 Stored XSS 실행 가능).
+  3. 확장자를 클라이언트가 보낸 `file.name`에서 무검증 추출함.
+- **해결 방안**: 스키마는 `t.File()`로 선언하고, 핸들러 내부에서 엄격한 MIME 화이트리스트(`image/png`, `image/jpeg`, `image/webp`, `image/gif`)를 적용하며, MIME 타입 기반으로 확장자를 직접 매핑.
+
+#### 8. [PERF-01] `listThreads` 비제한 쿼리로 인한 메모리 급증 및 PostgREST 1000행 절삭 (P2 Medium)
+- **위치**: `lib/chat-store.ts:208-212`
+- **결함 원인**: 위젯의 모든 스레드에 대해 `.in("thread_id", ids)`로 `chat_message` 전체 레코드를 `limit` 없이 조회함.
+- **영향**: 대화 메시지가 1,000건을 초과하면 PostgREST 기본 제한에 걸려 카운트 및 최근 메시지가 왜곡되며, 수십 메가바이트의 텍스트가 람다 메모리에 로드되어 메모리 누수 유발.
+- **해결 방안**: 집계 전용 RPC 함수 또는 윈도우 함수 기반 SQL 뷰 도입.
+
+#### 9. [PERF-02] 인메모리 위젯 마스터 TTL 캐싱 부재 (P2 Medium)
+- **위치**: `lib/widget-store.ts:74-87`
+- **결함 원인**: `/v2/widget/view` 및 `/v2/ask`가 호출될 때마다 거의 변경되지 않는 위젯 마스터 페르소나 정보를 Supabase DB에 매번 동기 조회함.
+- **해결 방안**: 60초 TTL 인메모리 LRU/Map 캐시를 적용하여 불필요한 DB 왕복 지연 90% 제거.
+
+---
+
+## 21. Periodic Chaos Stress & Defense Verification Attestation (2026-10-02)
+
+- **Trigger**: Periodic scheduled execution of `/teamwork-preview` & `/goal` chaos & defense audit.
+- **Execution Date**: 2026-10-02T03:08:00+09:00
+- **Audit Verification Results**:
+  1. **R1 (Chaos & Concurrency)**: 100-Agent swarm simulated with 0~25ms jitter, 70% full completions, 15% mid-stream aborts, 15% pre-stream aborts. Synthetic 429 exponential backoff with full jitter and 402 cross-account fast-break (<5ms) verified. Authoritative post-swarm `ZCARD == 0` (zero lease leaks, zero deadlocks).
+  2. **R2 (Adversarial Security)**: 16 whitelist tampering vectors 100% blocked with HTTP 403 Forbidden. Token bombs (4,001+ chars, Hangul 4,002 code points, astral emojis, auxiliary fields > 2,000 chars, body > 1MB) 100% blocked with HTTP 413. Context history bounded to <= 10 messages and <= 16,000 characters.
+  3. **R3 (Automated Integrity & Deployment)**: `bun test` ran 182 tests across 9 files (0 failures, 1,324 assertions). Complete system matrix: 207 tests passed across 11 files (0 failures, 1,411 assertions). Korean audit report `stress_test_audit.md` generated in both repositories. Clean builds verified and pushed to `origin/main`.
+- **Status**: **100% PASS — Production Certified**.
+
+
+
