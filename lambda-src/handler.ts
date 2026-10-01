@@ -56,12 +56,25 @@ const writeWebResponse = async (
   }
 
   const reader = webRes.body.getReader();
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    res.write(value);
+  const onClose = () => {
+    reader.cancel().catch(() => {});
+  };
+  if (typeof res.on === "function") {
+    res.on("close", onClose);
   }
-  res.end();
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      res.write(value);
+    }
+    res.end();
+  } finally {
+    if (typeof res.off === "function") {
+      res.off("close", onClose);
+    }
+  }
 };
 
 export default async function handler(
@@ -75,14 +88,20 @@ export default async function handler(
     await writeWebResponse(res, webRes);
   } catch (error: any) {
     console.error("Serverless handler error:", error);
-    res.statusCode = 500;
-    res.setHeader("content-type", "application/json");
-    res.end(
-      JSON.stringify({
-        error: "Internal Server Error",
-        message: error?.message ?? String(error),
-        stack: error?.stack,
-      }),
-    );
+    if (!res.headersSent) {
+      res.statusCode = 500;
+      res.setHeader("content-type", "application/json");
+      res.end(
+        JSON.stringify({
+          error: "Internal Server Error",
+          message: error?.message ?? String(error),
+          stack: error?.stack,
+        }),
+      );
+    } else {
+      if (!res.writableEnded) {
+        res.end();
+      }
+    }
   }
 }

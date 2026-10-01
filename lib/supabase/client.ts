@@ -12,6 +12,10 @@ export const createSupabaseClient = <T extends keyof Database>(schema: T) => {
         throw new Error("SUPABASE_SERVICE_KEY is not set");
       })(),
     {
+      auth: {
+        persistSession: false,
+        autoRefreshToken: false,
+      },
       db: { schema },
     },
   );
@@ -30,6 +34,7 @@ const getClient = () => {
 
 export const supabaseClient = new Proxy({} as ReturnType<typeof createSupabaseClient<"public">>, {
   get(_target, prop) {
+    if (prop === "then") return undefined;
     return Reflect.get(getClient() as any, prop);
   },
 });

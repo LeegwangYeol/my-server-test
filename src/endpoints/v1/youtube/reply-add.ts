@@ -5,22 +5,25 @@ import { google } from "googleapis";
 export const v1Reply = (app: any) => {
   app.post(
     "/reply",
-    async ({ body }: { body: any }) => {
+    async ({ body, set }: { body: any; set: any }) => {
       const { parentId, text, accessToken } = body;
 
       if (!parentId) {
+        set.status = 400;
         return {
           success: false,
           message: "parentId 값이 제공되지 않았습니다.",
         };
       }
       if (!text) {
+        set.status = 400;
         return {
           success: false,
           message: "댓글 내용이 제공되지 않았습니다.",
         };
       }
       if (!accessToken) {
+        set.status = 400;
         return {
           success: false,
           message: "accessToken 값이 제공되지 않았습니다.",
@@ -55,6 +58,7 @@ export const v1Reply = (app: any) => {
         };
       } catch (error: any) {
         console.error("YouTube 답글 작성 에러:", error);
+        set.status = 400;
         return {
           success: false,
           message: error?.message || "답글 작성 중 오류가 발생하였습니다.",

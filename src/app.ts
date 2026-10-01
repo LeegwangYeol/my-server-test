@@ -103,6 +103,15 @@ export const createApp = async (serverless = false) => {
   // @ts-ignore
   healthzEndpoint(app);
 
+  // Platform sanity stub for local parity with Vercel api/hello.js
+  app.get("/api/hello", ({ request }) => ({
+    ok: true,
+    message: "hello from vercel",
+    ts: new Date().toISOString(),
+    url: request.url,
+    method: request.method,
+  }));
+
   // 서버리스 모드가 아닌 경우에만 listen 호출
   if (!serverless) {
     app.listen(process.env.PORT ?? 3000);

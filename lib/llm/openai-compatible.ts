@@ -116,9 +116,7 @@ export class OpenAICompatibleProvider implements LLMProvider {
       messages: req.messages,
       stream: true,
       temperature: req.temperature ?? 0.7,
-      // Hard ceiling — free OpenRouter credits reject anything bigger.
-      // Honor callers below it, but never exceed it.
-      max_tokens: Math.min(req.maxTokens ?? 256, 256),
+      max_tokens: req.maxTokens ?? envInt("LLM_MAX_TOKENS", 512, 1, 4096),
     });
 
     for (let attempt = 0; ; attempt++) {

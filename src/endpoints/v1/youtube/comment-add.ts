@@ -5,7 +5,7 @@ import { google } from "googleapis";
 export const v1Comment = (app: any) => {
   app.post(
     "/comment",
-    async ({ body }: { body: any }) => {
+    async ({ body, set }: { body: any; set: any }) => {
       const { accessToken, videoId, commentText } = body;
 
       try {
@@ -32,7 +32,6 @@ export const v1Comment = (app: any) => {
         });
 
         return {
-          code: 200,
           success: true,
           message: "댓글이 성공적으로 작성되었습니다.",
           data: {
@@ -57,8 +56,8 @@ export const v1Comment = (app: any) => {
         };
       } catch (error: any) {
         console.error("YouTube comment error:", error);
+        set.status = 400;
         return {
-          code: 400,
           success: false,
           message: error?.message || "댓글 작성 중 오류가 발생했습니다.",
         };
@@ -98,21 +97,19 @@ export const v1Comment = (app: any) => {
             minLength: 1,
             maxLength: 1000,
           }),
-          data: t.Optional(
-            t.Object({
-              id: t.String(),
-              snippet: t.Object({
-                videoId: t.String(),
-                topLevelComment: t.Object({
-                  snippet: t.Object({
-                    textOriginal: t.String(),
-                    publishedAt: t.String(),
-                    updatedAt: t.String(),
-                  }),
+          data: t.Object({
+            id: t.String(),
+            snippet: t.Object({
+              videoId: t.String(),
+              topLevelComment: t.Object({
+                snippet: t.Object({
+                  textOriginal: t.String(),
+                  publishedAt: t.String(),
+                  updatedAt: t.String(),
                 }),
               }),
             }),
-          ),
+          }),
         }),
         400: t.Object({
           success: t.Boolean(),

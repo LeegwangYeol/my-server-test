@@ -5,7 +5,7 @@ import { google } from "googleapis";
 export const v1VideoList = (app: any) => {
   app.post(
     "/video/list",
-    async ({ body }: { body: any }) => {
+    async ({ body, set }: { body: any; set: any }) => {
       const { handle, accessToken, maxResults, pageToken } = body;
 
       try {
@@ -28,6 +28,7 @@ export const v1VideoList = (app: any) => {
             ?.uploads;
 
         if (!uploadsPlaylistId) {
+          set.status = 400;
           return {
             success: false,
             message: "업로드 플레이리스트 ID를 가져올 수 없습니다.",
@@ -53,6 +54,7 @@ export const v1VideoList = (app: any) => {
         };
       } catch (error: any) {
         console.error("YouTube 채널 동영상 조회 에러:", error);
+        set.status = 400;
         return {
           success: false,
           message:

@@ -80,7 +80,7 @@ export const v2WidgetEndpoints = async (app: any) => {
         let threadId = body?.threadId ?? "";
         let messages: { role: string; content: string }[] = [];
 
-        if (threadId) {
+        if (threadId && widgetId) {
           const existing = await getThread(threadId, widgetId);
           if (existing) {
             const rows = await listMessages(threadId);
@@ -90,6 +90,8 @@ export const v2WidgetEndpoints = async (app: any) => {
             // start over so we don't keep handing out a dangling reference.
             threadId = "";
           }
+        } else if (threadId && !widgetId) {
+          threadId = "";
         }
         if (!threadId) {
           threadId = (await createThread(widgetId)) ?? "";
@@ -809,8 +811,19 @@ export const v2WidgetEndpoints = async (app: any) => {
         const file = body?.file;
         if (!widgetId) return { success: false, error: "widgetId required" };
         if (!file) return { success: false, error: "file required" };
-        if (!file.type?.startsWith("image/")) {
-          return { success: false, error: "image/* required" };
+        const ALLOWED_MIME: Record<string, string> = {
+          "image/png": "png",
+          "image/jpeg": "jpg",
+          "image/webp": "webp",
+          "image/gif": "gif",
+        };
+        const mime = (file.type ?? "").toLowerCase().trim();
+        const ext = ALLOWED_MIME[mime];
+        if (!ext) {
+          return {
+            success: false,
+            error: "Only PNG, JPEG, WEBP, and GIF images are permitted",
+          };
         }
         // Hard cap to avoid abuse — anything past 2 MiB likely needs a
         // CDN-resized variant anyway.
@@ -820,9 +833,6 @@ export const v2WidgetEndpoints = async (app: any) => {
         }
 
         const safeWid = widgetId.replace(/[^a-zA-Z0-9_-]/g, "_");
-        const ext =
-          (file.name.split(".").pop() || "png").toLowerCase().slice(0, 4) ||
-          "png";
         const rand = Math.random().toString(36).slice(2, 8);
         const path = `${safeWid}/${Date.now()}-${rand}.${ext}`;
 
@@ -845,7 +855,7 @@ export const v2WidgetEndpoints = async (app: any) => {
       {
         body: t.Object({
           widgetId: t.String(),
-          file: t.File({ type: "image" }),
+          file: t.File(),
         }),
         detail: { tags: ["API"], description: "Upload a launcher icon" },
       },

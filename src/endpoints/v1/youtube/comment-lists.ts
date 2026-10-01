@@ -5,17 +5,19 @@ import { google } from "googleapis";
 export const v1CommentList = (app: any) => {
   app.post(
     "/comment/list",
-    async ({ body }: { body: any }) => {
+    async ({ body, set }: { body: any; set: any }) => {
       const { videoId, accessToken, maxResults, pageToken, textFormat, order } =
         body;
 
       if (!videoId) {
+        set.status = 400;
         return {
           success: false,
           message: "videoId 값이 제공되지 않았습니다.",
         };
       }
       if (!accessToken) {
+        set.status = 400;
         return {
           success: false,
           message: "accessToken 값이 제공되지 않았습니다.",
@@ -60,6 +62,7 @@ export const v1CommentList = (app: any) => {
         };
       } catch (error: any) {
         console.error("YouTube 댓글 스레드 목록 조회 에러:", error);
+        set.status = 400;
         return {
           success: false,
           message:

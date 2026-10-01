@@ -70,9 +70,30 @@ function normalizeRow(row: any): WidgetRow {
   };
 }
 
-/** Read one widget row, ignoring soft-deleted entries. */
+interface CacheEntry {
+  row: WidgetRow | null;
+  expiresAt: number;
+}
+const widgetCache = new Map<string, CacheEntry>();
+const CACHE_TTL_MS = 60_000;
+
+export function invalidateWidgetCache(id?: string) {
+  if (id) {
+    widgetCache.delete(id);
+  } else {
+    widgetCache.clear();
+  }
+}
+
+/** Read one widget row, ignoring soft-deleted entries. Cached with 60s TTL. */
 export async function getWidget(id: string): Promise<WidgetRow | null> {
   if (!id) return null;
+  const now = Date.now();
+  const cached = widgetCache.get(id);
+  if (cached && cached.expiresAt > now) {
+    return cached.row;
+  }
+
   const { data, error } = await supabaseUntyped
     .from(TABLE)
     .select("*")
@@ -83,7 +104,9 @@ export async function getWidget(id: string): Promise<WidgetRow | null> {
     console.error("[widget-store] getWidget failed:", error.message);
     return null;
   }
-  return data ? normalizeRow(data) : null;
+  const result = data ? normalizeRow(data) : null;
+  widgetCache.set(id, { row: result, expiresAt: now + CACHE_TTL_MS });
+  return result;
 }
 
 /** List all live widgets, newest activity first. */
@@ -143,6 +166,7 @@ export async function upsertWidget(
     console.error("[widget-store] upsertWidget failed:", error.message);
     return { row: null, error: error.message };
   }
+  invalidateWidgetCache(input.id);
   return { row: normalizeRow(data) };
 }
 
@@ -157,5 +181,6 @@ export async function deleteWidget(id: string): Promise<boolean> {
     console.error("[widget-store] deleteWidget failed:", error.message);
     return false;
   }
+  invalidateWidgetCache(id);
   return true;
 }

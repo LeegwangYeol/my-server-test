@@ -5,16 +5,18 @@ import { google } from "googleapis";
 export const v1CommentDelete = (app: any) => {
   app.post(
     "/comment/delete",
-    async ({ body }: { body: any }) => {
+    async ({ body, set }: { body: any; set: any }) => {
       const { commentId, accessToken } = body;
 
       if (!commentId) {
+        set.status = 400;
         return {
           success: false,
           message: "댓글 ID가 제공되지 않았습니다.",
         };
       }
       if (!accessToken) {
+        set.status = 400;
         return {
           success: false,
           message: "accessToken 값이 제공되지 않았습니다.",
@@ -43,6 +45,7 @@ export const v1CommentDelete = (app: any) => {
         };
       } catch (error: any) {
         console.error("YouTube 댓글 삭제 에러:", error);
+        set.status = 400;
         return {
           success: false,
           message: error?.message || "댓글 삭제 중 오류가 발생했습니다.",

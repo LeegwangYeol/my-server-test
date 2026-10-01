@@ -5,16 +5,18 @@ import { google } from "googleapis";
 export const v1ReplyList = (app: any) => {
   app.post(
     "/reply/list",
-    async ({ body }: { body: any }) => {
+    async ({ body, set }: { body: any; set: any }) => {
       const { parentId, accessToken, maxResults } = body;
 
       if (!parentId) {
+        set.status = 400;
         return {
           success: false,
           message: "댓글의 Id 값이 제공되지 않았습니다.",
         };
       }
       if (!accessToken) {
+        set.status = 400;
         return {
           success: false,
           message: "accessToken 값이 제공되지 않았습니다.",
@@ -83,6 +85,7 @@ export const v1ReplyList = (app: any) => {
         };
       } catch (error: any) {
         console.error("YouTube 댓글 목록 조회 에러:", error);
+        set.status = 400;
         return {
           success: false,
           message: error?.message || "댓글 목록 조회 중 오류가 발생하였습니다.",
