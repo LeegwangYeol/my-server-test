@@ -50,9 +50,30 @@ describe("app smoke", () => {
     const r = await app.handle(req("/v2/definitely-not-a-route"));
     expect(r.status).toBe(404);
   });
+
+  it("GET / → 200 Swagger/Scalar documentation", async () => {
+    const r = await app.handle(req("/"));
+    expect(r.status).toBe(200);
+    const html = await r.text();
+    expect(html).toContain("API Reference");
+  });
+
+  it("GET /json → 200 OpenAPI 3.0 spec", async () => {
+    const r = await app.handle(req("/json"));
+    expect(r.status).toBe(200);
+    const spec = (await r.json()) as { openapi?: string; paths?: Record<string, unknown> };
+    expect(spec.openapi).toBeDefined();
+  });
+
+  it("GET /api/hello → 200 platform sanity parity", async () => {
+    const r = await app.handle(req("/api/hello"));
+    expect(r.status).toBe(200);
+    const d = (await r.json()) as { message?: string };
+    expect(d.message).toBe("hello from vercel");
+  });
 });
 
-describe("admin guard is fail-closed", () => {
+describe("admin guard is fail-closed & timing safe", () => {
   const saved = process.env.ADMIN_TOKEN;
   afterEach(() => {
     if (saved === undefined) delete process.env.ADMIN_TOKEN;
@@ -88,5 +109,29 @@ describe("admin guard is fail-closed", () => {
     const d = (await r.json()) as { success?: boolean; error?: string };
     expect(d.success).toBe(false);
     expect(d.error).toContain("ADMIN_TOKEN");
+  });
+});
+
+describe("YouTube error status schema validation (no 422 ResponseValidationError)", () => {
+  it("POST /v1/youtube/channel/info with invalid token returns 400 (not 422)", async () => {
+    const app = await createApp(true);
+    const r = await app.handle(
+      json("/v1/youtube/channel/info", { accessToken: "invalid-dummy-token" }),
+    );
+    // Should be 400 Bad Request, NOT 422 ResponseValidationError
+    expect(r.status).toBe(400);
+    const d = (await r.json()) as { success?: boolean; message?: string };
+    expect(d.success).toBe(false);
+    expect(d.message).toBeDefined();
+  });
+
+  it("POST /v1/youtube/video/list with invalid token returns 400 (not 422)", async () => {
+    const app = await createApp(true);
+    const r = await app.handle(
+      json("/v1/youtube/video/list", { handle: "invalid_handle", accessToken: "invalid-token" }),
+    );
+    expect(r.status).toBe(400);
+    const d = (await r.json()) as { success?: boolean };
+    expect(d.success).toBe(false);
   });
 });

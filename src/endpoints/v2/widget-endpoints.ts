@@ -21,6 +21,19 @@ import {
   type WidgetRow,
 } from "../../../lib/widget-store";
 
+import crypto from "crypto";
+
+/**
+ * Constant-time string matching using crypto.timingSafeEqual on SHA-256 digests.
+ * Avoids timing side-channel vulnerabilities across token comparison.
+ */
+export function timingSafeMatch(a?: string, b?: string): boolean {
+  if (!a || !b) return false;
+  const hashA = crypto.createHash("sha256").update(a).digest();
+  const hashB = crypto.createHash("sha256").update(b).digest();
+  return crypto.timingSafeEqual(hashA, hashB);
+}
+
 /** Headers bag as Elysia hands it to a POST handler. */
 type AdminHeaders = Record<string, string | undefined>;
 
@@ -43,7 +56,7 @@ function requireAdmin(
     return { success: false, error: "ADMIN_TOKEN env var not set on server" };
   }
   const token = (headers?.["x-admin-token"] || "").trim();
-  if (token !== expected) {
+  if (!timingSafeMatch(token, expected)) {
     if (set) set.status = 401;
     return { success: false, error: "unauthorized" };
   }

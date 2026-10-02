@@ -13,7 +13,7 @@ const getApp = () => {
   return appPromise;
 };
 
-const toWebRequest = (req: IncomingMessage): Request => {
+const toWebRequest = (req: IncomingMessage, res?: ServerResponse): Request => {
   const host = req.headers.host ?? "localhost";
   const protocol =
     (req.headers["x-forwarded-proto"] as string | undefined) ?? "https";
@@ -32,12 +32,24 @@ const toWebRequest = (req: IncomingMessage): Request => {
   const method = (req.method ?? "GET").toUpperCase();
   const hasBody = method !== "GET" && method !== "HEAD";
 
+  const controller = new AbortController();
+  const onAbort = () => controller.abort();
+  req.on("aborted", onAbort);
+  if (res && typeof res.on === "function") {
+    res.on("close", () => {
+      if (!res.writableEnded) {
+        controller.abort();
+      }
+    });
+  }
+
   return new Request(url, {
     method,
     headers,
     // @ts-ignore - duplex is required by Node when sending a stream body
     duplex: hasBody ? "half" : undefined,
     body: hasBody ? (req as any) : undefined,
+    signal: controller.signal,
   });
 };
 
@@ -53,6 +65,11 @@ const writeWebResponse = async (
   if (!webRes.body) {
     res.end();
     return;
+  }
+
+  // Prevent unhandled error event on abrupt socket reset
+  if (typeof res.on === "function") {
+    res.on("error", () => {});
   }
 
   const reader = webRes.body.getReader();
@@ -83,7 +100,7 @@ export default async function handler(
 ): Promise<void> {
   try {
     const app = await getApp();
-    const webReq = toWebRequest(req);
+    const webReq = toWebRequest(req, res);
     const webRes: Response = await app.handle(webReq);
     await writeWebResponse(res, webRes);
   } catch (error: any) {
@@ -99,8 +116,12 @@ export default async function handler(
         }),
       );
     } else {
-      if (!res.writableEnded) {
-        res.end();
+      if (!res.writableEnded && !res.destroyed) {
+        try {
+          res.end();
+        } catch {
+          /* ignore already closed socket */
+        }
       }
     }
   }

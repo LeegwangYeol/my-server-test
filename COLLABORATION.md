@@ -963,6 +963,33 @@ This document serves as the shared communication channel between the AI Team (Ge
   3. **R3 (Automated Integrity & Deployment)**: `bun test` ran 182 tests across 9 backend files (0 failures, 1,324 assertions) and 25 tests across 2 frontend files (0 failures, 87 assertions). Complete system matrix: 207 tests passed across 11 files (0 failures, 1,411 assertions). Korean audit report `stress_test_audit.md` generated in both repositories. Clean pre-flight builds verified (`bundle:api`, `type-check`, `build`, `build:embed`) and pushed to `origin/main`.
 - **Status**: **100% PASS — Production Certified**.
 
+---
+
+## 24. Morning Regular Full Inspection & Node 24 Upgrade Attestation (2026-10-03)
+
+- **Trigger**: Morning Regular Full Inspection ("아침 정기 총검사") via `/teamwork-preview` & `/goal` with specialized 30-agent swarm (QA Lead, Security Lead, Principal Cloud Architect).
+- **Execution Date**: 2026-10-03T03:25:00+09:00
+- **Audited Components & Critical Remediations**:
+  1. **Vercel Deployment Block Discovery & Engine Upgrade (Critical Infra Fix)**:
+     - **Discovered Failure**: Vercel production deployment was frozen on commit `f65679e` because Vercel officially deprecated Node.js 20.x on October 1, 2026, rejecting subsequent commits with `Node.js Version "20.x" is discontinued and must be upgraded. Please set "engines": { "node": "24.x" } in your package.json file to use Node.js 24.`
+     - **Remediation**: Upgraded `engines.node` in `package.json` to `24.x`, updated esbuild bundling target in `package.json` and `scripts` to `--target=node24`, and updated `AGENTS.md` guidelines.
+  2. **Serverless Handler Lifecycle & Stream Socket Hardening**:
+     - `lambda-src/handler.ts`: Injected `AbortController` linked to incoming request `aborted` event and response `close` event (when `!res.writableEnded`), ensuring client-side disconnects cancel downstream LLM and database fetches immediately.
+     - Hardened stream error teardown against `ERR_STREAM_DESTROYED` double-faults and added broken-pipe error handler `res.on("error", () => {})`.
+     - `lib/supabase/client.ts`: Added `detectSessionInUrl: false` to serverless client options.
+  3. **Security Barrier Hardening (Constant-Time Token Verification)**:
+     - Implemented `timingSafeMatch(a, b)` using `crypto.createHash("sha256")` and `crypto.timingSafeEqual` in `src/endpoints/v2/widget-endpoints.ts`, and propagated to `mail-endpoints.ts` and `sms-endpoints.ts`.
+     - Completely eliminates timing side-channel attacks on `x-admin-token` verification while preserving fail-closed semantics.
+  4. **Dynamic Route Inventory & Sequential Verification**:
+     - Dynamically mapped and verified all 28 mounted endpoints across Public/Core, YouTube API, Widget Core, Admin Core, and Serverless Infra.
+     - Expanded `test/healthz.test.ts` into a complete smoke & schema regression suite covering Swagger UI (`/`), OpenAPI Spec (`/json`), platform sanity parity (`/api/hello`), fail-closed timing-safe admin guards, and YouTube 400 Bad Request error schemas (preventing 422 `ResponseValidationError`).
+- **Verification Scorecard**:
+  - `bun test`: **187 PASS / 0 FAIL (1,335 assertions)** across 9 test files.
+  - Sequential Endpoint Matrix: **28 / 28 Endpoints 100% PASS** locally.
+  - Direct Node 24 CJS Bundle Smoke Test: **HTTP 200 OK / HTTP 400 Bad Request PASS**.
+- **Artifacts & Logs**: Swarm logs, architecture audit artifact `vercel_serverless_resilience_audit.md`, and test outputs fully recorded.
+
+
 
 
 

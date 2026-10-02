@@ -11,6 +11,8 @@ import { isNaverMailConfigured, sendNaverMail } from "../../../lib/mail/naver";
  * abusable capability (open-relay / spam), so the endpoint is fail-closed:
  * when ADMIN_TOKEN is unset it refuses to run.
  */
+import { timingSafeMatch } from "./widget-endpoints";
+
 export const v2MailEndpoints = async (app: any) => {
   app.group("/v2", (app: any) => {
     app.post(
@@ -44,8 +46,8 @@ export const v2MailEndpoints = async (app: any) => {
         }
         const token = (headers["x-admin-token"] || "").trim();
         const authorized =
-          (!!mailToken && token === mailToken) ||
-          (!!adminToken && token === adminToken);
+          (!!mailToken && timingSafeMatch(token, mailToken)) ||
+          (!!adminToken && timingSafeMatch(token, adminToken));
         if (!authorized) {
           set.status = 401;
           return { success: false, error: "unauthorized" };

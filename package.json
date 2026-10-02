@@ -2,12 +2,12 @@
   "name": "my-api",
   "version": "1.0.50",
   "engines": {
-    "node": "20.x"
+    "node": "24.x"
   },
   "scripts": {
     "dev": "bun run --watch src/index.ts",
     "build": "tsc",
-    "bundle:api": "node scripts/build-migrations.mjs && npx esbuild lambda-src/handler.ts --bundle --platform=node --target=node20 --format=cjs --outfile=api/index.js --legal-comments=none",
+    "bundle:api": "node scripts/build-migrations.mjs && npx esbuild lambda-src/handler.ts --bundle --platform=node --target=node24 --format=cjs --outfile=api/index.js --legal-comments=none",
     "start": "NODE_ENV=production node dist/index.js",
     "test": "bun test",
     "mail:test": "node --env-file=.env scripts/send-test-mail.ts",

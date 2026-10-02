@@ -18,6 +18,8 @@ import { isSmsConfigured, sendSms, activeProvider } from "../../../lib/sms";
  * For bulk 명절 인사 to a contact list, use test/sms-local/send-greetings.ts
  * instead — it adds personalization + throttling + a dry-run preview.
  */
+import { timingSafeMatch } from "./widget-endpoints";
+
 export const v2SmsEndpoints = async (app: any) => {
   app.group("/v2", (app: any) => {
     app.post(
@@ -43,7 +45,7 @@ export const v2SmsEndpoints = async (app: any) => {
           };
         }
         const token = (headers["x-admin-token"] || "").trim();
-        if (token !== expected) {
+        if (!timingSafeMatch(token, expected)) {
           set.status = 401;
           return { success: false, error: "unauthorized" };
         }

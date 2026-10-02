@@ -9,7 +9,7 @@
 **Elysia(TypeScript) 기반 REST API 서버**를, Bun이 아니라 **Vercel Node serverless function** 위에서 돌리는 프로젝트다.
 
 - 프레임워크: [Elysia](https://elysiajs.com) — 원래 Bun-first지만, 여기서는 `app.handle(Request)` (Web Standards) 어댑터를 통해 Vercel Node 런타임에서 구동한다.
-- 런타임: Vercel Serverless Function, **Node.js 20.x**.
+- 런타임: Vercel Serverless Function, **Node.js 24.x** (2026-10-01 부로 Node 20.x 폐기됨).
 - 데이터: Supabase(Postgres). 채팅 이력·위젯 마스터 저장.
 - 용도: 두 가지 기능군이 한 서버에 있다.
   1. **YouTube OAuth + 댓글/답글/영상 관리 API** (`/v1/youtube/*`)
@@ -49,7 +49,7 @@ api/index.js            ← 단일 CJS 번들 (~27MB). git에 직접 커밋됨. 
 ```
 
 ### 과거에 실제로 겪은 함정 (반복하지 말 것)
-1. `package.json`의 `engines.node`는 **20.x 유지**. 18.x는 Vercel이 거부.
+1. `package.json`의 `engines.node`는 **24.x 유지**. 20.x 이하는 Vercel이 거부(2026-10-01 폐기).
 2. git commit author email이 GitHub 계정과 매칭 안 되면 **Vercel이 deploy 자체를 거부**한다(500/404가 안 바뀜). author 꼬이면 의심.
 3. **`.ts` 파일은 Vercel 런타임이 직접 로드 못 한다.** dynamic import도 트레이서가 의존성을 못 끌어온다. → 반드시 esbuild 단일 번들.
 4. **module-load 시점에 throw하는 코드 금지.** 예: `lib/supabase/client.ts`의 `supabaseClient`는 env 누락 시 cold start에서 함수 전체를 크래시(`FUNCTION_INVOCATION_FAILED`)시켰다. 지금은 **lazy Proxy**로 첫 사용 시점까지 생성을 미룬다. 새 전역 클라이언트를 만들 때 같은 패턴을 따를 것.

@@ -15,6 +15,7 @@ export const createSupabaseClient = <T extends keyof Database>(schema: T) => {
       auth: {
         persistSession: false,
         autoRefreshToken: false,
+        detectSessionInUrl: false,
       },
       db: { schema },
     },
