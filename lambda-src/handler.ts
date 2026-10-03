@@ -82,12 +82,21 @@ const writeWebResponse = async (
 
   try {
     while (true) {
+      if (res.destroyed || res.writableEnded) break;
       const { done, value } = await reader.read();
       if (done) break;
+      if (res.destroyed || res.writableEnded) break;
       res.write(value);
     }
-    res.end();
+    if (!res.writableEnded && !res.destroyed) {
+      res.end();
+    }
+  } catch (err: any) {
+    if (err?.code !== "ERR_STREAM_DESTROYED" && !res.destroyed) {
+      throw err;
+    }
   } finally {
+    void reader.cancel().catch(() => {});
     if (typeof res.off === "function") {
       res.off("close", onClose);
     }

@@ -16,7 +16,7 @@ await build({
   entryPoints: [join(root, "lambda-src/handler.ts")],
   bundle: true,
   platform: "node",
-  target: "node20",
+  target: "node24",
   format: "cjs",
   outfile: join(fnDir, "index.js"),
   logLevel: "info",
@@ -28,7 +28,7 @@ await writeFile(
   join(fnDir, ".vc-config.json"),
   JSON.stringify(
     {
-      runtime: "nodejs20.x",
+      runtime: "nodejs24.x",
       handler: "index.js",
       launcherType: "Nodejs",
       shouldAddHelpers: true,
