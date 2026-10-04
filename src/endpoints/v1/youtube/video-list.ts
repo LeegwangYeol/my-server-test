@@ -17,11 +17,20 @@ export const v1VideoList = (app: any) => {
           auth: oauth2Client,
         });
 
-        // 핸들을 기준으로 채널 ID 가져오기
-        const channelResponse = await youtube.channels.list({
-          part: ["contentDetails"],
-          forUsername: handle,
-        });
+        // 핸들을 기준으로 채널 ID 가져오기 (현대 @핸들 및 레거시 forUsername 지원)
+        const isHandleFormat = handle.startsWith("@");
+        let channelResponse = await youtube.channels.list(
+          isHandleFormat
+            ? { part: ["contentDetails"], forHandle: handle }
+            : { part: ["contentDetails"], forUsername: handle },
+        );
+
+        if (!channelResponse.data.items?.length && !isHandleFormat) {
+          channelResponse = await youtube.channels.list({
+            part: ["contentDetails"],
+            forHandle: `@${handle}`,
+          });
+        }
 
         const uploadsPlaylistId =
           channelResponse.data.items?.[0]?.contentDetails?.relatedPlaylists

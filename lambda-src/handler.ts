@@ -35,6 +35,9 @@ const toWebRequest = (req: IncomingMessage, res?: ServerResponse): Request => {
   const controller = new AbortController();
   const onAbort = () => controller.abort();
   req.on("aborted", onAbort);
+  req.on("close", () => {
+    if (req.destroyed) onAbort();
+  });
   if (res && typeof res.on === "function") {
     res.on("close", () => {
       if (!res.writableEnded) {
@@ -86,7 +89,31 @@ const writeWebResponse = async (
       const { done, value } = await reader.read();
       if (done) break;
       if (res.destroyed || res.writableEnded) break;
-      res.write(value);
+      const canWrite = res.write(value);
+      if (!canWrite && !res.destroyed && !res.writableEnded) {
+        await new Promise<void>((resolve) => {
+          const onDrain = () => {
+            cleanup();
+            resolve();
+          };
+          const onCloseDrain = () => {
+            cleanup();
+            resolve();
+          };
+          const cleanup = () => {
+            if (typeof res.off === "function") {
+              res.off("drain", onDrain);
+              res.off("close", onCloseDrain);
+            }
+          };
+          if (typeof res.on === "function") {
+            res.once("drain", onDrain);
+            res.once("close", onCloseDrain);
+          } else {
+            resolve();
+          }
+        });
+      }
     }
     if (!res.writableEnded && !res.destroyed) {
       res.end();
@@ -117,11 +144,14 @@ export default async function handler(
     if (!res.headersSent) {
       res.statusCode = 500;
       res.setHeader("content-type", "application/json");
+      const isProd =
+        process.env.NODE_ENV === "production" ||
+        process.env.VERCEL_ENV === "production";
       res.end(
         JSON.stringify({
           error: "Internal Server Error",
           message: error?.message ?? String(error),
-          stack: error?.stack,
+          stack: isProd ? undefined : error?.stack,
         }),
       );
     } else {

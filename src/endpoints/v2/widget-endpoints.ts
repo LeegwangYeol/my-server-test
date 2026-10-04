@@ -86,7 +86,7 @@ export const v2WidgetEndpoints = async (app: any) => {
     app.post(
       "/widget/view",
       async ({ body }: { body: { widgetId?: string; threadId?: string } }) => {
-        const widgetId = body?.widgetId ?? "";
+        const widgetId = (body?.widgetId ?? "").trim();
 
         // Resolve thread: use the one the widget sent if it exists and isn't
         // deleted, otherwise mint a fresh one.

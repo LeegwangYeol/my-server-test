@@ -45,9 +45,9 @@ export const v2MailEndpoints = async (app: any) => {
           };
         }
         const token = (headers["x-admin-token"] || "").trim();
-        const authorized =
-          (!!mailToken && timingSafeMatch(token, mailToken)) ||
-          (!!adminToken && timingSafeMatch(token, adminToken));
+        const isMail = !!mailToken && timingSafeMatch(token, mailToken);
+        const isAdmin = !!adminToken && timingSafeMatch(token, adminToken);
+        const authorized = isMail || isAdmin;
         if (!authorized) {
           set.status = 401;
           return { success: false, error: "unauthorized" };

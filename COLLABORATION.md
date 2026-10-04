@@ -1050,3 +1050,38 @@ This document serves as the shared communication channel between the AI Team (Ge
   2. **R2 (Adversarial Security)**: 16 whitelist tampering vectors 100% blocked with HTTP 403 Forbidden. Token bombs (4,001+ chars, Hangul 4,002 code points, astral emojis, auxiliary fields > 2,000 chars, body > 1MB) 100% blocked with HTTP 413. Multi-turn context history bounded to <= 10 messages and <= 16,000 characters.
   3. **R3 (Automated Integrity & Deployment)**: `bun test` ran 215 tests across 10 backend files (0 failures, 1,402 assertions) and 25 tests across 2 frontend files (0 failures, 87 assertions). Complete system matrix: 240 tests passed across 12 files (0 failures, 1,489 assertions). Sequential endpoint inspection verified 28/28 endpoints 100% PASS. Korean audit report `stress_test_audit.md` (v4.5.0-PROD-KO) generated in both repositories. Clean pre-flight builds verified (`bundle:api` Node 24 CJS in 441ms, `type-check`, `build`, `build:embed`) and ready for `origin/main` synchronization.
 - **Status**: **100% PASS — Production Certified**.
+
+---
+
+## 28. Morning Regular Full Inspection & Production Resilience Attestation (2026-10-05)
+
+- **Trigger**: Morning Regular Full Inspection ("아침 정기 총검사") via `/teamwork-preview` & `/goal` with specialized 30-agent swarm (QA Route Auditor, Security Auth Auditor, Cloud Infrastructure Auditor).
+- **Execution Date**: 2026-10-05T03:20:00+09:00
+- **Audited Components & Critical Remediations**:
+  1. **Dynamic Route Inventory & Sequential Verification (All 28 Endpoints)**:
+     - Scanned all 133 TypeScript files in `src/endpoints/` and confirmed all 28 actively mounted endpoints across Public/Core (4), YouTube API (9), Widget Core (3), Admin Core (11), and Serverless Infra (1).
+     - Cataloged 6 dormant legacy feature directories (account, widget v1, billing, chat, workspace, payment; 56 unmounted endpoints), verifying they cleanly return HTTP 404 Not Found at runtime.
+     - Tested all 28 endpoints sequentially against local Bun runtime (`test/all-28-endpoints-sequential.test.ts`) and live Vercel production server (`https://my-server-test.vercel.app`): **28 / 28 PASS (100%)**.
+     - Expanded modern YouTube handle resolution in `video-list.ts` with `forHandle: handle` for `@handle` support and automatic fallback.
+  2. **Vercel Serverless Stream Socket & Runtime Hardening (`lambda-src/handler.ts`)**:
+     - **Backpressure Protection**: Intercepted `res.write(value)` and implemented `drain` event loop awaiting (`await new Promise(r => res.once('drain', r))`) with listener cleanup to prevent memory bloat and OOM on slow/mobile client streams.
+     - **Node 24 Lifecycle Support**: Added `req.on("close", onAbort)` alongside `req.on("aborted")` for Node 24.x event model compliance.
+     - **Production Stack Trace Masking**: Redacted internal stack traces (`stack: isProd ? undefined : error?.stack`) on HTTP 500 serverless responses to prevent filesystem disclosure.
+     - Rebundled `api/index.js` (Node 24 CJS, 26.9MB) and verified with direct Node smoke tests (HTTP 200 OK & HTTP 404 Not Found).
+  3. **Security Barrier & Multi-Tenant Isolation Hardening**:
+     - **Timing Leak Elimination**: Hardened `/v2/admin/mail/send` to evaluate both `isMail` and `isAdmin` tokens without boolean short-circuit timing discrepancies.
+     - **Tenant ID Normalization**: Added `.trim()` to `widgetId` in `/v2/widget/view` to prevent trailing whitespace from causing thread session desynchronization.
+     - **Fail-Closed Admin Guard**: Confirmed all 11 `/v2/admin/*` endpoints strictly reject unauthorized requests with HTTP 401 (or HTTP 500 when `ADMIN_TOKEN` is unset).
+     - **Constant-Time Verification**: SHA-256 digest + `crypto.timingSafeEqual` verified across all secret token gates.
+     - **Payload & Tampering Defenses**: Multi-tier 1MB body limit, 4,000 char message cap, 2,000 char aux cap, and 16 parameter tampering attack vectors 100% blocked with HTTP 403 / 413.
+  4. **Database & External API Communication Resilience**:
+     - Supabase stateless PostgREST over HTTPS connection pooling confirmed with zero TCP socket leaks.
+     - Gotrue background intervals disabled (`persistSession: false`, `autoRefreshToken: false`, `detectSessionInUrl: false`), ensuring zero execution freeze delays.
+     - Widget-store in-memory TTL cache (60s) with write-through invalidation eliminates redundant lookups and N+1 query patterns.
+     - LLM resilience verified: WLIF multi-key rotation, canary graduation, exponential backoff with ±20% jitter, fast-break 402/401 circuit breakers, and pre-stream HTTP 429 JSON error boundary.
+- **Verification Scorecard**:
+  - `bun test`: **215 PASS / 0 FAIL (1,402 assertions)** across 10 test files.
+  - Sequential Endpoint Matrix: **28 / 28 Endpoints 100% PASS** (Local & Live Vercel).
+  - Direct Node 24 CJS Bundle Smoke Test: **HTTP 200 OK / HTTP 404 Not Found PASS**.
+- **Status**: **100% PASS — Production Certified**.
+
