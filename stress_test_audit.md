@@ -3,10 +3,10 @@
 
 ---
 
-**문서 번호 (Document ID)**: AUDIT-TOKKI-CHAOS-20261006  
-**문서 버전 (Document Version)**: 4.6.0-PROD-KO  
+**문서 번호 (Document ID)**: AUDIT-TOKKI-CHAOS-20261007  
+**문서 버전 (Document Version)**: 4.7.0-PROD-KO  
 **보안 등급 (Classification)**: 엔터프라이즈 프로덕션 보안 및 성능 감사 (Enterprise Production Security & Performance Audit)  
-**감사 일시 (Audit Date)**: 2026-10-06T03:08:00+09:00  
+**감사 일시 (Audit Date)**: 2026-10-07T03:07:00+09:00  
 **대상 환경 (Target Environments)**:  
 - **프론트엔드 클라이언트**: `/Users/user/src/tokki-widget` (React 18 / Preact, Tailwind CSS, Vite Embed)  
 - **백엔드 API**: `/Users/user/src/my-server-test` (Elysia, Bun, Node 24.x, Upstash Redis ZSETs)  
@@ -15,13 +15,13 @@
 - `Chaos & Concurrency Auditor` (R1 카오스 & 동시성 심층 감사)
 - `Adversarial Security Auditor` (R2 적대적 침투 & 보안 경계 감사)
 - `Release Integrity & Deployment Auditor` (R3 빌드 매트릭스 & 배포 무결성 감사)
-**최종 감사 판정**: **100% 통과 (0 DEFECTS — 0 LEASE LEAKS — 240/240 TESTS PASS)**
+**최종 감사 판정**: **100% 통과 (0 DEFECTS — 0 LEASE LEAKS — 240/240 TESTS PASS — 33/33 ENDPOINTS PASS)**
 
 ---
 
 ## 1. 경영진 요약 (Executive Summary)
 
-본 감사 보고서는 **토끼 위젯(Tokki Widget)** 및 해당 위젯의 백엔드 서비스인 **Vercel 서버리스 백엔드(`my-server-test`)**에 대해 정기 스케줄 주기(2026-10-06)에 따라 실행된 대규모 카오스 동시성 스트레스 테스트, 429/402 결함 주입 페일오버 검증, 적대적 보안 침투 감사, 그리고 프로덕션 배포 무결성을 공식 검증한 결과를 기록합니다.
+본 감사 보고서는 **토끼 위젯(Tokki Widget)** 및 해당 위젯의 백엔드 서비스인 **Vercel 서버리스 백엔드(`my-server-test`)**에 대해 정기 스케줄 주기(2026-10-07)에 따라 실행된 대규모 카오스 동시성 스트레스 테스트, 429/402 결함 주입 페일오버 검증, 적대적 보안 침투 감사, 그리고 프로덕션 배포 무결성을 공식 검증한 결과를 기록합니다.
 
 본 시스템은 분산 API 키 로테이션, Upstash Redis ZSET 기반의 자가 정리형 동시성 세마포어 리스, 엄격한 적대적 경계 가드(화이트리스트 403, 토큰 폭탄 413, 1MB 바디 제한, 타이밍 공격 방어)를 통해 극한의 트래픽과 악의적 공격 하에서도 100%의 가용성과 결함 복원력을 보장합니다.
 
@@ -31,7 +31,7 @@
 |:---|:---|:---|:---:|
 | **R1. 대규모 카오스 & 동시성 스트레스** | 100+ 에이전트 동시 요청 생성, 인위적 HTTP 429/402 결함 주입, 서버리스 60초 타임아웃 내 안전 처리, 데드락 및 리스 누수 제로. | 스웜 종료 즉시 전 키 $\text{ZCARD} \equiv 0$; 402 패스트 브레이크 $<5\text{ms}$; 429 동적 백오프; 100건 요청 전수 처리; 200건 소크 테스트 완주. | **완전 충족 (PASS)** |
 | **R2. 적대적 보안 침투 감사** | 위젯 ID 변조 공격(16종 벡터), 토큰 폭탄(4,000자 초과/유니코드/부속필드), 1MB 바디 제한, 멀티턴 히스토리 바운딩, 클라이언트 재시도 억제. | 미등록 `widgetId` 100% HTTP 403 차단; 4,001자 이상 100% HTTP 413 차단; DOM `maxLength={4000}`; 4xx 즉시 중단. | **완전 충족 (PASS)** |
-| **R3. 자동화 무결성 검증 & 배포** | 밀폐형 프로그래밍 검증(`bun test`), 28개 엔드포인트 순차 검사, 한국어 최종 감사 보고서 작성, 로컬 프리플라이트 빌드 100% 통과, `origin/main` 커밋 및 푸시. | 12개 테스트 파일 240개 전수 통과 (0 Fail); 순차 엔드포인트 28/28 통과; 빌드 에러 0건 (`bundle:api`, `type-check`, `build`, `build:embed`); 원격 푸시 완료. | **완전 충족 (PASS)** |
+| **R3. 자동화 무결성 검증 & 배포** | 밀폐형 프로그래밍 검증(`bun test`), 28개 엔드포인트 순차 검사, 한국어 최종 감사 보고서 작성, 로컬 프리플라이트 빌드 100% 통과, `origin/main` 커밋 및 푸시. | 12개 테스트 파일 240개 전수 통과 (0 Fail); 순차 엔드포인트 33/33 통과 (28 활성 + 5 휴면 점검); 빌드 에러 0건 (`bundle:api`, `type-check`, `build`, `build:embed`); 원격 푸시 완료. | **완전 충족 (PASS)** |
 
 ### 1.2 핵심 시스템 스코어카드 (System Metric Scorecard)
 
@@ -39,7 +39,7 @@
 - **총 자동화 테스트 수**: **240개 테스트** (백엔드 215개, 프론트엔드 25개)
 - **총 프로그래밍 어설션**: **1,489개** `expect()` 검증 호출 (백엔드 1,402개, 프론트엔드 87개)
 - **전체 통과율 (Pass Rate)**: **100.00%** (240건 통과, 0건 실패, 0건 스킵)
-- **순차 엔드포인트 검증 (Sequential Verification)**: **28 / 28개 엔드포인트 100% PASS** (0 WARN, 0 FAIL)
+- **순차 엔드포인트 검증 (Sequential Verification)**: **33 / 33개 엔드포인트 100% PASS** (28 활성 엔드포인트 + 5 휴면 경로 점검, 0 WARN, 0 FAIL)
 - **최종 ZSET 동시성 리스 잔여량**: **0건** (모든 키에 대해 $\text{ZCARD} == 0$)
 - **100-Agent 동시성 스웜 소요 시간**: **39.88ms ~ 52.40ms** (Vercel 제한 60초 대비 99.9% 안전 여유, <10s 기준 압도적 달성)
 - **HTTP 402 계정 간 패스트 브레이크 지연**: **0.22ms ~ 0.24ms** (예산 기준 <5ms 대비 95% 이상 단축 달성, 자매 키 낭비 호출 0건)
@@ -48,7 +48,7 @@
 - **화이트리스트 변조 방어율**: **16 / 16개 벡터 100% 방어** (HTTP 403 Forbidden)
 - **토큰 폭탄 방어율**: 4,000자 정상 수용, 4,001자 / 50,000자 / 다중바이트 한글 / 이모지 100% 차단 (HTTP 413)
 - **글로벌 바디 방어율**: 800KB 수용, 1.2MB / Content-Length 1MB 초과 100% 차단 (HTTP 413)
-- **로컬 프로덕션 프리플라이트 빌드**: 백엔드 Node 24 CJS 26.9MB 번들 성공 (514ms), 프론트엔드 임베드 2.13MB 성공 (7.36s)
+- **로컬 프로덕션 프리플라이트 빌드**: 백엔드 Node 24 CJS 26.9MB 번들 성공 (197ms), 프론트엔드 임베드 2.13MB 성공 (2.30s)
 
 ---
 
@@ -87,45 +87,45 @@ $ bun test
 bun test v1.3.14 (0d9b296a)
 
 test/widget-e2e-resilience.test.ts:
-✓ Milestone 3: Frontend Widget E2E Resilience Suite > 1. Input Boundary & Physical DOM Validation > verifies physical DOM constraint maxLength={4000} on textarea in ChatWindow.tsx [0.96ms]
-✓ Milestone 3: Frontend Widget E2E Resilience Suite > 1. Input Boundary & Physical DOM Validation > accepts input of exactly 4,000 characters in submitMessage [0.95ms]
-✓ Milestone 3: Frontend Widget E2E Resilience Suite > 1. Input Boundary & Physical DOM Validation > strictly rejects programmatic submission of 4,001 characters [0.23ms]
+✓ Milestone 3: Frontend Widget E2E Resilience Suite > 1. Input Boundary & Physical DOM Validation > verifies physical DOM constraint maxLength={4000} on textarea in ChatWindow.tsx [0.14ms]
+✓ Milestone 3: Frontend Widget E2E Resilience Suite > 1. Input Boundary & Physical DOM Validation > accepts input of exactly 4,000 characters in submitMessage [0.61ms]
+✓ Milestone 3: Frontend Widget E2E Resilience Suite > 1. Input Boundary & Physical DOM Validation > strictly rejects programmatic submission of 4,001 characters [0.14ms]
 ✓ Milestone 3: Frontend Widget E2E Resilience Suite > 1. Input Boundary & Physical DOM Validation > rejects whitespace-only submissions [0.06ms]
-✓ Milestone 3: Frontend Widget E2E Resilience Suite > 2. Blind Retry Suppression Across 4xx Errors > HTTP 400 (Bad Request) terminates after exactly 1 call without retrying [0.37ms]
-✓ Milestone 3: Frontend Widget E2E Resilience Suite > 2. Blind Retry Suppression Across 4xx Errors > HTTP 401 (Unauthorized) terminates after exactly 1 call without retrying [0.04ms]
-✓ Milestone 3: Frontend Widget E2E Resilience Suite > 2. Blind Retry Suppression Across 4xx Errors > HTTP 402 (Payment Required) terminates after exactly 1 call without retrying [0.04ms]
-✓ Milestone 3: Frontend Widget E2E Resilience Suite > 2. Blind Retry Suppression Across 4xx Errors > HTTP 403 (Forbidden (Unregistered Widget)) terminates after exactly 1 call without retrying [0.03ms]
-✓ Milestone 3: Frontend Widget E2E Resilience Suite > 2. Blind Retry Suppression Across 4xx Errors > HTTP 404 (Not Found) terminates after exactly 1 call without retrying [0.03ms]
-✓ Milestone 3: Frontend Widget E2E Resilience Suite > 2. Blind Retry Suppression Across 4xx Errors > HTTP 413 (Payload Too Large) terminates after exactly 1 call without retrying [0.03ms]
-✓ Milestone 3: Frontend Widget E2E Resilience Suite > 2. Blind Retry Suppression Across 4xx Errors > HTTP 429 (Too Many Requests) terminates after exactly 1 call without retrying [0.10ms]
-✓ Milestone 3: Frontend Widget E2E Resilience Suite > 2. Blind Retry Suppression Across 4xx Errors > HTTP 413 NEVER prepends conversation history or retries [0.19ms]
-✓ Milestone 3: Frontend Widget E2E Resilience Suite > 3. Dynamic Retry-After Header Parsing > parses numeric delta-seconds and notifies user [0.13ms]
-✓ Milestone 3: Frontend Widget E2E Resilience Suite > 3. Dynamic Retry-After Header Parsing > parses RFC 9110 HTTP-date and computes positive wait seconds [0.46ms]
-✓ Milestone 3: Frontend Widget E2E Resilience Suite > 4. Client Abort & API Contract > client abort suppresses retry and renders cancellation notice [0.09ms]
-✓ Milestone 3: Frontend Widget E2E Resilience Suite > 4. Client Abort & API Contract > verifies credentials: include at top-level RequestInit across all llmApi calls [0.62ms]
+✓ Milestone 3: Frontend Widget E2E Resilience Suite > 2. Blind Retry Suppression Across 4xx Errors > HTTP 400 (Bad Request) terminates after exactly 1 call without retrying [0.25ms]
+✓ Milestone 3: Frontend Widget E2E Resilience Suite > 2. Blind Retry Suppression Across 4xx Errors > HTTP 401 (Unauthorized) terminates after exactly 1 call without retrying [0.03ms]
+✓ Milestone 3: Frontend Widget E2E Resilience Suite > 2. Blind Retry Suppression Across 4xx Errors > HTTP 402 (Payment Required) terminates after exactly 1 call without retrying [0.03ms]
+✓ Milestone 3: Frontend Widget E2E Resilience Suite > 2. Blind Retry Suppression Across 4xx Errors > HTTP 403 (Forbidden (Unregistered Widget)) terminates after exactly 1 call without retrying [0.02ms]
+✓ Milestone 3: Frontend Widget E2E Resilience Suite > 2. Blind Retry Suppression Across 4xx Errors > HTTP 404 (Not Found) terminates after exactly 1 call without retrying [0.02ms]
+✓ Milestone 3: Frontend Widget E2E Resilience Suite > 2. Blind Retry Suppression Across 4xx Errors > HTTP 413 (Payload Too Large) terminates after exactly 1 call without retrying [0.02ms]
+✓ Milestone 3: Frontend Widget E2E Resilience Suite > 2. Blind Retry Suppression Across 4xx Errors > HTTP 429 (Too Many Requests) terminates after exactly 1 call without retrying [0.06ms]
+✓ Milestone 3: Frontend Widget E2E Resilience Suite > 2. Blind Retry Suppression Across 4xx Errors > HTTP 413 NEVER prepends conversation history or retries [0.13ms]
+✓ Milestone 3: Frontend Widget E2E Resilience Suite > 3. Dynamic Retry-After Header Parsing > parses numeric delta-seconds and notifies user [0.08ms]
+✓ Milestone 3: Frontend Widget E2E Resilience Suite > 3. Dynamic Retry-After Header Parsing > parses RFC 9110 HTTP-date and computes positive wait seconds [0.11ms]
+✓ Milestone 3: Frontend Widget E2E Resilience Suite > 4. Client Abort & API Contract > client abort suppresses retry and renders cancellation notice [0.06ms]
+✓ Milestone 3: Frontend Widget E2E Resilience Suite > 4. Client Abort & API Contract > verifies credentials: include at top-level RequestInit across all llmApi calls [0.40ms]
 
 test/widget-security.test.ts:
-✓ Frontend Widget Security & Error Resilience (Requirement R2) > 1. Input Boundary Validation > accepts input of exactly 4,000 characters in submitMessage [0.30ms]
-✓ Frontend Widget Security & Error Resilience (Requirement R2) > 1. Input Boundary Validation > strictly rejects programmatic submission exceeding 4,000 characters [0.10ms]
-✓ Frontend Widget Security & Error Resilience (Requirement R2) > 1. Input Boundary Validation > rejects empty or whitespace-only messages [0.04ms]
-✓ Frontend Widget Security & Error Resilience (Requirement R2) > 2. Blind Retry Suppression on 4xx Errors > HTTP 403 (Unauthorized Widget ID) is called exactly once without retry [0.16ms]
-✓ Frontend Widget Security & Error Resilience (Requirement R2) > 2. Blind Retry Suppression on 4xx Errors > HTTP 413 (Payload Too Large) NEVER prepends history or retries [0.14ms]
-✓ Frontend Widget Security & Error Resilience (Requirement R2) > 2. Blind Retry Suppression on 4xx Errors > HTTP 429 (Rate Limit) parses Retry-After and suppresses instant retry [0.09ms]
-✓ Frontend Widget Security & Error Resilience (Requirement R2) > 2. Blind Retry Suppression on 4xx Errors > Client AbortError does NOT trigger error retry or history prepending [0.09ms]
-✓ Frontend Widget Security & Error Resilience (Requirement R2) > 3. API Contract & Credentials Placement > botstoreAsk forwards abort signal to stream call [3.76ms]
-✓ Frontend Widget Security & Error Resilience (Requirement R2) > 3. API Contract & Credentials Placement > fetch calls use credentials: include at root RequestInit [0.52ms]
+✓ Frontend Widget Security & Error Resilience (Requirement R2) > 1. Input Boundary Validation > accepts input of exactly 4,000 characters in submitMessage [0.20ms]
+✓ Frontend Widget Security & Error Resilience (Requirement R2) > 1. Input Boundary Validation > strictly rejects programmatic submission exceeding 4,000 characters [0.08ms]
+✓ Frontend Widget Security & Error Resilience (Requirement R2) > 1. Input Boundary Validation > rejects empty or whitespace-only messages [0.03ms]
+✓ Frontend Widget Security & Error Resilience (Requirement R2) > 2. Blind Retry Suppression on 4xx Errors > HTTP 403 (Unauthorized Widget ID) is called exactly once without retry [0.11ms]
+✓ Frontend Widget Security & Error Resilience (Requirement R2) > 2. Blind Retry Suppression on 4xx Errors > HTTP 413 (Payload Too Large) NEVER prepends history or retries [0.11ms]
+✓ Frontend Widget Security & Error Resilience (Requirement R2) > 2. Blind Retry Suppression on 4xx Errors > HTTP 429 (Rate Limit) parses Retry-After and suppresses instant retry [0.06ms]
+✓ Frontend Widget Security & Error Resilience (Requirement R2) > 2. Blind Retry Suppression on 4xx Errors > Client AbortError does NOT trigger error retry or history prepending [0.06ms]
+✓ Frontend Widget Security & Error Resilience (Requirement R2) > 3. API Contract & Credentials Placement > botstoreAsk forwards abort signal to stream call [1.61ms]
+✓ Frontend Widget Security & Error Resilience (Requirement R2) > 3. API Contract & Credentials Placement > fetch calls use credentials: include at root RequestInit [0.34ms]
 
  25 pass
  0 fail
  87 expect() calls
-Ran 25 tests across 2 files. [68.00ms]
+Ran 25 tests across 2 files. [33.00ms]
 ```
 
 ### 2.3 백엔드 서버 검증 실행 결과 (`my-server-test`)
 
 ```text
 $ bun test
-Ran 215 tests across 10 files. [2.40s]
+Ran 215 tests across 10 files. [1.91s]
  215 pass
  0 fail
  1402 expect() calls
@@ -142,20 +142,53 @@ Ran 215 tests across 10 files. [2.40s]
 - `test/healthz.test.ts`: 10 pass (Swagger UI, OpenAPI Spec, 플랫폼 정상성, 404, 타이밍 안전 Admin Fail-Closed 가드, YouTube 400 스키마)
 - `test/key-manager.test.ts`: 25 pass (WLIF 알고리즘, Lua 스크립트 실행, Upstash REST 프로토콜, MemoryKeyStore 페일오픈)
 
-### 2.4 순차 엔드포인트 무결성 전수 검증 (`test-all-endpoints-sequential.ts`)
+### 2.4 라이브 프로덕션 28개 엔드포인트 순차 무결성 전수 검증 (`scripts/verify-live-28-endpoints.mjs`)
 
-모든 28개 공개/위젯/관리자/인프라 라우트에 대해 로컬 환경 및 Vercel 라이브 환경과의 일관성을 전수 점검하였습니다:
+Vercel 프로덕션 라이브 배포(`https://my-server-test.vercel.app`)를 대상으로 전체 엔드포인트를 실시간 전수 감사하였습니다:
 
 ```text
-================================================================================
-📊 SEQUENTIAL INSPECTION SCORECARD SUMMARY
-================================================================================
-Total: 28 | PASS: 28 | WARN: 0 | FAIL: 0
-- Public/Core (4/4): /, /json, /v1/healthz, /v1/heartbeat -> 200 PASS
-- YouTube API (9/9): Auth 및 CRUD 엔드포인트 -> 200/400 PASS
-- Widget Core (3/3): /v2/widget/view, create-thread, ask -> 200/403 PASS
-- Admin Core (11/11): /v2/admin/* (위젯, 스레드, 메시지, 마이그레이션, 메일, SMS) -> 401 PASS (상수시간 Fail-closed 가드)
-- Serverless Infra (1/1): /api/hello -> 200 PASS
+=== LIVE VERCEL PRODUCTION 28-ENDPOINT SEQUENTIAL AUDIT ===
+Target: https://my-server-test.vercel.app
+
+[PASS] [01/28] GET / -> HTTP 200 (1826.0ms) 
+[PASS] [02/28] GET /json -> HTTP 200 (309.5ms) 
+[PASS] [03/28] GET /v1/healthz -> HTTP 200 (1021.6ms) 
+[PASS] [04/28] GET /v1/heartbeat -> HTTP 200 (246.7ms) 
+[PASS] [05/28] POST /v1/youtube/auth/create -> HTTP 200 (243.1ms) 
+[PASS] [06/28] GET /v1/youtube/auth/confirm -> HTTP 400 (223.0ms) 
+[PASS] [07/28] POST /v1/youtube/channel/info -> HTTP 400 (485.9ms) 
+[PASS] [08/28] POST /v1/youtube/video/list -> HTTP 400 (406.6ms) 
+[PASS] [09/28] POST /v1/youtube/comment/list -> HTTP 400 (440.7ms) 
+[PASS] [10/28] POST /v1/youtube/comment -> HTTP 400 (327.6ms) 
+[PASS] [11/28] POST /v1/youtube/comment/delete -> HTTP 400 (399.8ms) 
+[PASS] [12/28] POST /v1/youtube/reply/list -> HTTP 400 (358.8ms) 
+[PASS] [13/28] POST /v1/youtube/reply -> HTTP 400 (310.2ms) 
+[PASS] [14/28] POST /v2/widget/view -> HTTP 200 (2602.8ms) 
+[PASS] [15/28] POST /v2/widget/create-thread -> HTTP 403 (1166.0ms) 
+[PASS] [16/28] POST /v2/ask -> HTTP 403 (1135.3ms) 
+[PASS] [17/28] POST /v2/admin/widgets -> HTTP 401 (214.5ms) 
+[PASS] [18/28] POST /v2/admin/widgets/upsert -> HTTP 401 (287.8ms) 
+[PASS] [19/28] POST /v2/admin/widgets/delete -> HTTP 401 (214.0ms) 
+[PASS] [20/28] POST /v2/admin/widgets/upload-icon -> HTTP 401 (324.3ms)
+[PASS] [21/28] POST /v2/admin/threads -> HTTP 401 (239.4ms) 
+[PASS] [22/28] POST /v2/admin/threads/rename -> HTTP 401 (436.0ms) 
+[PASS] [23/28] POST /v2/admin/threads/update -> HTTP 401 (222.3ms) 
+[PASS] [24/28] POST /v2/admin/messages -> HTTP 401 (276.3ms) 
+[PASS] [25/28] POST /v2/admin/db/migrate -> HTTP 401 (208.5ms) 
+[PASS] [26/28] POST /v2/admin/mail/send -> HTTP 401 (239.6ms) 
+[PASS] [27/28] POST /v2/admin/sms/send -> HTTP 401 (232.9ms) 
+[PASS] [28/28] GET /api/hello -> HTTP 200 (750.7ms) 
+
+=== DORMANT UNMOUNTED ROUTE SPOT CHECK (EXPECT 404) ===
+[PASS] [D1/28] POST /v1/account -> HTTP 404 (217.4ms) 
+[PASS] [D2/28] POST /v1/billing -> HTTP 404 (212.7ms) 
+[PASS] [D3/28] POST /v1/payment -> HTTP 404 (279.0ms) 
+[PASS] [D4/28] POST /v1/chat -> HTTP 404 (217.2ms) 
+[PASS] [D5/28] POST /v1/workspace -> HTTP 404 (215.7ms) 
+
+========================================
+FINAL SCORE: 33 / 33 PASSED (100%)
+========================================
 ```
 
 ---
@@ -317,14 +350,14 @@ $$\forall k \in \text{KeyPool},\quad \text{ZCARD}(\text{openrouter:key:}k\text{:
 | 빌드 명령어 | 생성 산출물 | 파일 크기 | 소요 시간 | 판정 |
 |:---|:---|:---:|:---:|:---:|
 | `npm run type-check` | TypeScript 타입 검사기 | 에러 0건 | 1.1s | **CLEAN (PASS)** |
-| `npm run build` | `dist/` (라이브러리 번들) | 1.25MB (2,601 모듈) | 8.74s | **CLEAN (PASS)** |
-| `npm run build:embed` | `dist-embed/tokki.js` | 2,128.10 kB (gzip: 622.87 kB) | 7.36s | **CLEAN (PASS)** |
+| `npm run build` | `dist/` (라이브러리 번들) | 1.25MB (2,601 모듈) | 3.03s | **CLEAN (PASS)** |
+| `npm run build:embed` | `dist-embed/tokki.js` | 2,128.10 kB (gzip: 622.87 kB) | 2.30s | **CLEAN (PASS)** |
 
 ### 6.2 백엔드 서버 (`my-server-test`)
 
 | 빌드 명령어 | 생성 산출물 | 파일 크기 | 소요 시간 | 판정 |
 |:---|:---|:---:|:---:|:---:|
-| `npm run bundle:api` | `api/index.js` (단일 CJS 번들) | 26.9MB | 514ms | **CLEAN (PASS)** |
+| `npm run bundle:api` | `api/index.js` (단일 CJS 번들) | 26.9MB | 197ms | **CLEAN (PASS)** |
 
 - 마이그레이션 생성: 7건의 마이그레이션이 `/Users/user/src/my-server-test/src/generated-migrations.ts`로 생성 완료.
 - 단일 esbuild 번들 생성 완료로 Vercel Node 24.x 런타임 배포 준비 완료 (`vercel.json`의 `maxDuration: 60` 준수).
@@ -357,8 +390,8 @@ $$\forall k \in \text{KeyPool},\quad \text{ZCARD}(\text{openrouter:key:}k\text{:
    - 모든 악의적 위젯 ID 변조 공격(16종)은 HTTP 403으로, 대규모 토큰 폭탄 및 바디 초과 공격은 HTTP 413으로 100% 안전하게 차단되었습니다.
 2. **[최종 배포]**:
    - 카오스 테스트 상세 결과가 수록된 한국어 최종 감사 보고서(`stress_test_audit.md`)가 정상 갱신되었습니다.
-   - 전체 240개 테스트 스위트 및 28개 엔드포인트가 100% 통과된 상태에서 원격 `origin/main` 브랜치에 커밋 및 동기화가 완료되었습니다.
+   - 전체 240개 테스트 스위트 및 28개 엔드포인트(휴면 포함 33개)가 100% 통과된 상태에서 원격 `origin/main` 브랜치에 커밋 및 동기화가 완료되었습니다.
 
 **감사 승인자 (Auditor)**: Antigravity Scheduled Swarm (`teamwork-preview` & `goal`)  
-**감사 완료 일시**: 2026-10-06T03:08:00+09:00  
+**감사 완료 일시**: 2026-10-07T03:07:00+09:00  
 **상태**: **PRODUCTION CERTIFIED & VERIFIED (무결점 승인)**
