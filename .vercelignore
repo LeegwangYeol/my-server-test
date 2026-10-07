@@ -7,3 +7,12 @@ dist
 README.md
 .editorconfig
 .prettierrc
+
+# Environment and secrets
+.env*
+*.bak*
+
+# Local data and PII files
+*.csv
+*.xlsx
+.sms-usage.json

@@ -153,3 +153,6 @@ greeting.txt
 *.csv
 *.xlsx
 최종_발송명단.csv
+
+# Agent Teamwork Workspaces
+.agents/teamwork/

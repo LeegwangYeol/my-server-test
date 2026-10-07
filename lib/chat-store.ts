@@ -56,28 +56,74 @@ export async function createThread(widgetId: string): Promise<string | null> {
 }
 
 /**
- * Look up a thread. When widgetId is passed we also require it to match
- * the row's widget_id, so another widget can't read someone else's
- * conversation by guessing a UUID.
+ * Look up a thread strictly scoped to widgetId.
+ * widgetId is strictly required to enforce tenant ownership and guarantee
+ * no fail-open query drops the tenant ownership filter.
+ * Returns null if parameters are invalid or thread does not match.
  */
 export async function getThread(
   threadId: string,
-  widgetId?: string,
+  widgetId: string,
 ): Promise<ChatThreadRow | null> {
-  let query = supabaseUntyped
+  const wid = (widgetId ?? "").trim();
+  const tid = (threadId ?? "").trim();
+  if (!wid || !tid) return null;
+
+  const { data, error } = await supabaseUntyped
     .from("chat_thread")
     .select("*")
-    .eq("id", threadId)
-    .eq("is_deleted", false);
-  if (widgetId) {
-    query = query.eq("widget_id", widgetId);
-  }
-  const { data, error } = await query.maybeSingle();
+    .eq("id", tid)
+    .eq("widget_id", wid)
+    .eq("is_deleted", false)
+    .maybeSingle();
   if (error) {
     console.error("[chat-store] getThread failed:", error.message);
     return null;
   }
   return (data as ChatThreadRow | null) ?? null;
+}
+
+/**
+ * Soft-delete a thread (sets is_deleted = true).
+ * widgetId is strictly required to enforce tenant ownership and guarantee
+ * no fail-open delete drops the tenant ownership filter.
+ * Returns false if parameters are invalid or operation fails.
+ */
+export async function deleteThread(
+  threadId: string,
+  widgetId: string,
+): Promise<boolean> {
+  const wid = (widgetId ?? "").trim();
+  const tid = (threadId ?? "").trim();
+  if (!wid || !tid) return false;
+
+  const { error } = await supabaseUntyped
+    .from("chat_thread")
+    .update({ is_deleted: true })
+    .eq("id", tid)
+    .eq("widget_id", wid);
+  if (error) {
+    console.error("[chat-store] deleteThread failed:", error.message);
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Compensating rollback for a failed thread creation / initial message persistence saga.
+ * Soft-deletes the thread so callers can clean up orphan threads when initial message persistence fails.
+ */
+export async function rollbackThread(threadId: string): Promise<boolean> {
+  if (!threadId) return false;
+  const { error } = await supabaseUntyped
+    .from("chat_thread")
+    .update({ is_deleted: true })
+    .eq("id", threadId);
+  if (error) {
+    console.error("[chat-store] rollbackThread failed:", error.message);
+    return false;
+  }
+  return true;
 }
 
 /* ─── messages ─────────────────────────────────────────────────────── */
@@ -103,13 +149,16 @@ export async function appendMessage(
   threadId: string,
   role: ChatRole,
   content: string,
-): Promise<void> {
+): Promise<boolean> {
+  if (!threadId) return false;
   const { error } = await supabaseUntyped
     .from("chat_message")
     .insert({ thread_id: threadId, role, content });
   if (error) {
     console.error("[chat-store] appendMessage failed:", error.message);
+    return false;
   }
+  return true;
 }
 
 /* ─── admin / sessions panel ───────────────────────────────────────── */

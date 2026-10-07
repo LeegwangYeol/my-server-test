@@ -53,20 +53,38 @@ export const v2MailEndpoints = async (app: any) => {
           return { success: false, error: "unauthorized" };
         }
 
+        const to = (body?.to ?? "").trim();
+        const subject = (body?.subject ?? "").trim();
+        if (!to) {
+          set.status = 400;
+          return { success: false, error: "to required" };
+        }
+        const recipients = to.split(",").map((s) => s.trim()).filter(Boolean);
+        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+        if (recipients.length === 0 || recipients.some((addr) => !emailRegex.test(addr))) {
+          set.status = 400;
+          return { success: false, error: "invalid email format" };
+        }
+        if (!subject) {
+          set.status = 400;
+          return { success: false, error: "subject required" };
+        }
+        if (subject.length > 1000) {
+          set.status = 400;
+          return { success: false, error: "subject exceeds maximum length of 1000 characters" };
+        }
+        if (!body?.text?.trim() && !body?.html?.trim()) {
+          set.status = 400;
+          return { success: false, error: "text or html required" };
+        }
+
         if (!isNaverMailConfigured()) {
+          set.status = 500;
           return {
             success: false,
             error:
               "네이버 SMTP 미설정 — NAVER_ID+NAVER_APP_PASSWORD 또는 NAVER_MAIL_USER+NAVER_MAIL_PASSWORD 환경변수 필요.",
           };
-        }
-
-        const to = (body?.to ?? "").trim();
-        const subject = (body?.subject ?? "").trim();
-        if (!to) return { success: false, error: "to required" };
-        if (!subject) return { success: false, error: "subject required" };
-        if (!body?.text && !body?.html) {
-          return { success: false, error: "text or html required" };
         }
 
         try {
@@ -77,10 +95,13 @@ export const v2MailEndpoints = async (app: any) => {
             html: body.html,
             from: body.from,
           });
-          return { success: result.rejected.length === 0, ...result };
+          const success = result.rejected.length === 0;
+          if (!success) set.status = 502;
+          return { success, ...result };
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
           console.error("[v2/admin/mail/send] failed:", message);
+          set.status = 502;
           return { success: false, error: message };
         }
       },

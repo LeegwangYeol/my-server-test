@@ -24,7 +24,7 @@ import type { LLMProvider, LLMStreamRequest } from "./types";
  * 429/500/502/503/504 이면 스트리밍을 **시작하기 전에** 백오프 후 다시 요청한다.
  *   - 재시도는 오직 "첫 응답 헤더" 단계에서만 한다. 스트림이 시작된 뒤에는 절대
  *     재시도하지 않는다 — 이미 내보낸 토큰이 중복될 수 있기 때문.
- *   - 대기: 0.5s → 1s → 2s (±20% 지터). 서버가 Retry-After 를 주면 그 값을 따른다.
+ *   - 대기: 0.5s → 1s → 2s (±20% 지터). 서버가 Retry-After 를 주면 그 값을 따른다 (소수점 초 지원 및 ±20% 지터).
  *   - 한 번의 대기가 LLM_RETRY_MAX_WAIT_MS(기본 5s) 를 넘으면 기다리지 않고 바로
  *     실패시킨다 — Vercel Hobby 함수 제한(10s) 안에 답을 내야 하기 때문.
  *   - AbortSignal 이 오면 대기 중이라도 즉시 중단한다.
@@ -150,8 +150,10 @@ export class OpenAICompatibleProvider implements LLMProvider {
       const retryable = RETRYABLE_STATUS.has(resp.status);
       if (retryable && attempt < maxRetries) {
         const wait =
-          parseRetryAfterMs(resp.headers.get("retry-after")) ??
-          backoffMs(attempt);
+          parseRetryAfterMs(
+            resp.headers.get("retry-after"),
+            resp.headers.get("date"),
+          ) ?? backoffMs(attempt);
         if (wait <= maxWaitMs) {
           // 본문은 안 읽고 커넥션만 정리한 뒤 다시 시도.
           void resp.body?.cancel().catch(() => {});
@@ -175,19 +177,60 @@ export class OpenAICompatibleProvider implements LLMProvider {
 const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
 
 /** 0.5s → 1s → 2s … (2s 에서 정지), ±20% 지터. */
-function backoffMs(attempt: number): number {
+export function backoffMs(attempt: number): number {
   const base = Math.min(500 * 2 ** attempt, 2000);
   return Math.round(base * (0.8 + Math.random() * 0.4));
 }
 
-/** `Retry-After: 3` (초) 또는 HTTP-date 를 ms 로. 해석 불가면 undefined. */
-function parseRetryAfterMs(header: string | null): number | undefined {
+/**
+ * `Retry-After: 3` (초), 소수점 초 (예: `1.5`), 또는 HTTP-date 를 ms 로 파싱.
+ * RFC 9110 준수 및 동시 요청 몰림(thundering herd) 방지를 위해 ±20% 지터를 가산한다.
+ * 해석 불가면 undefined 반환.
+ */
+export function parseRetryAfterMs(
+  header: string | null,
+  dateHeader?: string | null,
+): number | undefined {
   if (!header) return undefined;
   const v = header.trim();
-  if (/^\d+$/.test(v)) return Number(v) * 1000;
+  if (!v) return undefined;
+
+  // 1. Delta-seconds: 정수("3") 또는 소수점("1.5", "0.8"), 선택적 's' 접미사
+  if (/^(?:\d+(?:\.\d*)?|\.\d+)s?$/i.test(v)) {
+    const sec = parseFloat(v);
+    if (!Number.isNaN(sec) && Number.isFinite(sec) && sec >= 0) {
+      const baseMs = sec * 1000;
+      if (baseMs === 0) return 0;
+      // ±20% 랜덤 지터 (0.8 ~ 1.2 배)
+      const jitter = 0.8 + Math.random() * 0.4;
+      return Math.max(0, Math.round(baseMs * jitter));
+    }
+    return undefined;
+  }
+
+  // 음수 또는 순수 숫자형식(예: "-1", "123.456.789")은 HTTP-date 로 취급하지 않음
+  if (!Number.isNaN(Number(v))) {
+    return undefined;
+  }
+
+  // 2. RFC 9110 HTTP-date (예: "Wed, 21 Oct 2026 07:28:00 GMT")
   const at = Date.parse(v);
-  if (Number.isNaN(at)) return undefined;
-  return Math.max(0, at - Date.now());
+  if (!Number.isNaN(at)) {
+    let skew = 0;
+    if (dateHeader) {
+      const serverTime = Date.parse(dateHeader);
+      if (!Number.isNaN(serverTime)) {
+        skew = serverTime - Date.now();
+      }
+    }
+    const diff = at - (Date.now() + skew);
+    if (diff <= 0) return 0;
+    // ±20% 랜덤 지터 (0.8 ~ 1.2 배)
+    const jitter = 0.8 + Math.random() * 0.4;
+    return Math.max(0, Math.round(diff * jitter));
+  }
+
+  return undefined;
 }
 
 function envInt(name: string, fallback: number, min: number, max: number) {

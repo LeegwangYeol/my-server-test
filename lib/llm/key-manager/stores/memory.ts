@@ -191,7 +191,8 @@ export class MemoryKeyStore implements IKeyStore {
       this.leases.set(bestKey, keyLeases);
     }
 
-    const nonce = Math.floor(10000 + Math.random() * 90000);
+    // High-entropy 10-digit nonce eliminates same-millisecond birthday collisions
+    const nonce = Math.floor(1000000000 + Math.random() * 9000000000);
     const leaseToken = `${bestKey}:${now}:${nonce}`;
     const leaseExpireAt = now + this.leaseTimeoutMs;
 

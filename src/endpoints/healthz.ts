@@ -34,10 +34,12 @@ export const healthzEndpoint = async (app: any) => {
           uptimeSec: Math.floor((now - processStartedAt) / 1000),
           processUptimeSec: Math.floor(process.uptime()),
           node: process.version,
-          region: process.env.VERCEL_REGION ?? null,
+          region: process.env.VERCEL_REGION || null,
           env: process.env.VERCEL_ENV ?? process.env.NODE_ENV ?? "unknown",
-          deploymentUrl: process.env.VERCEL_URL ?? null,
-          commitSha: process.env.VERCEL_GIT_COMMIT_SHA?.slice(0, 7) ?? null,
+          deploymentUrl: process.env.VERCEL_URL || null,
+          commitSha: process.env.VERCEL_GIT_COMMIT_SHA
+            ? process.env.VERCEL_GIT_COMMIT_SHA.slice(0, 7)
+            : null,
         };
       },
       {
@@ -64,4 +66,5 @@ export const healthzEndpoint = async (app: any) => {
 
     return app;
   });
+  return app;
 };

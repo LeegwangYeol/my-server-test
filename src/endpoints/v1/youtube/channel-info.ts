@@ -27,8 +27,11 @@ export const v1ChannelInfo = (app: any) => {
 
         // maxResults 처리 (기본값: 5, 허용 범위: 0~50)
         let max = 5;
-        if (maxResults) {
-          const parsed = parseInt(maxResults, 10);
+        if (maxResults !== undefined && maxResults !== null && maxResults !== "") {
+          const parsed =
+            typeof maxResults === "number"
+              ? maxResults
+              : parseInt(String(maxResults), 10);
           if (!isNaN(parsed) && parsed >= 0 && parsed <= 50) {
             max = parsed;
           }
@@ -45,9 +48,12 @@ export const v1ChannelInfo = (app: any) => {
           success: true,
           message: "채널 정보를 성공적으로 가져왔습니다.",
           data: {
-            items: response.data.items,
+            items: response.data.items || [],
             nextPageToken: response.data.nextPageToken,
-            pageInfo: response.data.pageInfo,
+            pageInfo: response.data.pageInfo || {
+              totalResults: 0,
+              resultsPerPage: max,
+            },
           },
         };
       } catch (error: any) {
@@ -70,7 +76,7 @@ export const v1ChannelInfo = (app: any) => {
           error: "Access Token is required",
         }),
         maxResults: t.Optional(
-          t.String({
+          t.Union([t.String(), t.Number()], {
             description: "Maximum results per page (0-50)",
             error: "maxResults must be between 0 and 50",
           }),
@@ -88,10 +94,12 @@ export const v1ChannelInfo = (app: any) => {
           data: t.Object({
             items: t.Array(t.Any()),
             nextPageToken: t.Optional(t.String()),
-            pageInfo: t.Object({
-              totalResults: t.Number(),
-              resultsPerPage: t.Number(),
-            }),
+            pageInfo: t.Optional(
+              t.Object({
+                totalResults: t.Number(),
+                resultsPerPage: t.Number(),
+              }),
+            ),
           }),
         }),
         400: t.Object({

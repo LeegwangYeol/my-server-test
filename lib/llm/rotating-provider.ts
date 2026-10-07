@@ -241,3 +241,5 @@ export class RotatingLLMProvider implements LLMProvider {
 // Aliases for drop-in flexibility
 export { RotatingLLMProvider as RotatingProvider };
 export type ILlmProvider = LLMProvider;
+export { MemoryKeyStore } from "./key-manager/stores/memory";
+

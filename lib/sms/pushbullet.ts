@@ -21,6 +21,7 @@
  */
 
 const DEFAULT_API_URL = "https://api.pushbullet.com";
+const DEFAULT_TIMEOUT_MS = 5000;
 
 export function getPushbulletConfig() {
   const envMode = process.env.PUSHBULLET_ENV?.trim().toLowerCase();
@@ -45,8 +46,14 @@ export function isPushbulletConfigured(): boolean {
   return Boolean(conf.token && (conf.iden || conf.nickname));
 }
 
-/** 별명 → iden 해석 결과 캐시 (한 번 실행 중 재조회 방지). */
-let cachedIden: string | null = null;
+/** 별명 → iden 해석 결과 캐시 (환경/토큰/별명별 격리하여 교차 오염 방지). */
+const idenCache = new Map<string, string>();
+
+/** 캐시 초기화 (테스트 또는 환경 변수 동적 전환 시 사용). */
+export function clearDeviceIdenCache(): void {
+  idenCache.clear();
+}
+export const clearPushbulletIdenCache = clearDeviceIdenCache;
 
 /**
  * 보낼 기기의 iden 을 정한다.
@@ -58,7 +65,11 @@ async function resolveDeviceIden(
   conf: ReturnType<typeof getPushbulletConfig>
 ): Promise<string> {
   if (conf.iden) return conf.iden;
-  if (cachedIden) return cachedIden;
+
+  // 캐시 키: mode + token + nickname + base 조합으로 환경 간 캐시 오염 방지
+  const cacheKey = `${conf.mode}:${token}:${conf.nickname?.toLowerCase() ?? ""}:${base}`;
+  const cached = idenCache.get(cacheKey);
+  if (cached) return cached;
 
   if (!conf.nickname) {
     throw new Error(
@@ -67,9 +78,37 @@ async function resolveDeviceIden(
     );
   }
 
-  const res = await fetch(`${base}/v2/devices`, {
-    headers: { "access-token": token },
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${base}/v2/devices`, {
+      headers: { "access-token": token },
+      signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
+    });
+  } catch (err: unknown) {
+    const errorObj = err as { name?: string; message?: string } | undefined;
+    const isTimeout =
+      errorObj?.name === "TimeoutError" ||
+      errorObj?.name === "AbortError" ||
+      errorObj?.message?.toLowerCase().includes("timeout") ||
+      errorObj?.message?.toLowerCase().includes("aborted") ||
+      errorObj?.message?.includes("시간 초과");
+    const wrappedError = new Error(
+      `[${conf.mode}] Pushbullet 기기 목록 조회 실패 (${
+        isTimeout ? `요청 시간 초과 (${DEFAULT_TIMEOUT_MS}ms)` : err instanceof Error ? err.message : String(err)
+      })`
+    );
+    if (isTimeout) {
+      wrappedError.name = "TimeoutError";
+    }
+    throw wrappedError;
+  }
+
+  if (!res.ok) {
+    const errorData = (await res.json().catch(() => ({}))) as { error?: { message?: string } };
+    const msg = errorData?.error?.message || `HTTP ${res.status}`;
+    throw new Error(`[${conf.mode}] Pushbullet 기기 목록 조회 실패 (${msg})`);
+  }
+
   const data = (await res.json().catch(() => ({}))) as {
     devices?: { iden?: string; nickname?: string; active?: boolean }[];
   };
@@ -89,7 +128,7 @@ async function resolveDeviceIden(
       } ` + "(목록 확인: npm run sms:devices)"
     );
   }
-  cachedIden = match.iden;
+  idenCache.set(cacheKey, match.iden);
   return match.iden;
 }
 
@@ -99,6 +138,8 @@ export interface PushbulletResult {
   /** iden of the queued text (phone must be online; sends within ~1h or cancels) */
   iden?: string;
   raw?: unknown;
+  success?: boolean;
+  error?: string;
 }
 
 export async function sendViaPushbullet({
@@ -108,37 +149,101 @@ export async function sendViaPushbullet({
   phoneNumber: string;
   text: string;
 }): Promise<PushbulletResult> {
-  const conf = getPushbulletConfig();
-  if (!conf.token) {
-    throw new Error(
-      `[${conf.mode}] PUSHBULLET_${conf.mode}_ACCESS_TOKEN 환경변수가 설정되어야 합니다. ` +
-        "(pushbullet.com > Settings > Access Token)"
-    );
-  }
-
-  const base = process.env.PUSHBULLET_API_URL?.trim() || DEFAULT_API_URL;
-  const device = await resolveDeviceIden(base, conf.token, conf);
-  const res = await fetch(`${base}/v2/texts`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "access-token": conf.token,
-    },
-    body: JSON.stringify({
-      data: {
-        target_device_iden: device,
-        addresses: [phoneNumber],
-        message: text,
-      },
-    }),
-  });
-
-  let raw: unknown;
   try {
-    raw = await res.json();
-  } catch {
-    /* non-JSON body — leave raw undefined */
+    const conf = getPushbulletConfig();
+    if (!conf.token) {
+      return {
+        ok: false,
+        success: false,
+        status: 400,
+        error:
+          `[${conf.mode}] PUSHBULLET_${conf.mode}_ACCESS_TOKEN 환경변수가 설정되어야 합니다. ` +
+          "(pushbullet.com > Settings > Access Token)",
+      };
+    }
+
+    const base = process.env.PUSHBULLET_API_URL?.trim() || DEFAULT_API_URL;
+    let device: string;
+    try {
+      device = await resolveDeviceIden(base, conf.token, conf);
+    } catch (err: unknown) {
+      const errorObj = err as { name?: string; message?: string } | undefined;
+      const isTimeout =
+        errorObj?.name === "TimeoutError" ||
+        errorObj?.name === "AbortError" ||
+        errorObj?.message?.toLowerCase().includes("timeout") ||
+        errorObj?.message?.toLowerCase().includes("aborted") ||
+        errorObj?.message?.includes("시간 초과");
+      return {
+        ok: false,
+        success: false,
+        status: isTimeout ? 504 : 400,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+
+    const res = await fetch(`${base}/v2/texts`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "access-token": conf.token,
+      },
+      body: JSON.stringify({
+        data: {
+          target_device_iden: device,
+          addresses: [phoneNumber],
+          message: text,
+        },
+      }),
+      signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
+    });
+
+    let raw: unknown;
+    try {
+      raw = await res.json();
+    } catch {
+      /* non-JSON body — leave raw undefined */
+    }
+    const parsed = raw as { iden?: string; error?: { message?: string } } | undefined;
+
+    let errorMessage: string | undefined;
+    if (!res.ok) {
+      if (parsed?.error?.message) {
+        errorMessage = parsed.error.message;
+      } else {
+        errorMessage = `Pushbullet API returned HTTP ${res.status}`;
+      }
+    }
+
+    return {
+      ok: res.ok,
+      success: res.ok,
+      status: res.status,
+      iden: parsed?.iden,
+      raw,
+      ...(errorMessage ? { error: errorMessage } : {}),
+    };
+  } catch (err: unknown) {
+    const errorObj = err as { name?: string; message?: string } | undefined;
+    const isTimeout =
+      errorObj?.name === "TimeoutError" ||
+      errorObj?.name === "AbortError" ||
+      errorObj?.message?.toLowerCase().includes("timeout") ||
+      errorObj?.message?.toLowerCase().includes("aborted") ||
+      errorObj?.message?.includes("시간 초과");
+
+    const status = isTimeout ? 504 : 500;
+    const message = isTimeout
+      ? "Pushbullet request timed out (5000ms)"
+      : err instanceof Error
+        ? err.message
+        : String(err);
+
+    return {
+      ok: false,
+      success: false,
+      status,
+      error: message,
+    };
   }
-  const parsed = raw as { iden?: string } | undefined;
-  return { ok: res.ok, status: res.status, iden: parsed?.iden, raw };
 }

@@ -35,8 +35,11 @@ export const v1CommentList = (app: any) => {
 
         // maxResults 처리 (기본값: 20, 허용 범위: 1~100)
         let max = 20;
-        if (maxResults) {
-          const parsed = parseInt(maxResults, 10);
+        if (maxResults !== undefined && maxResults !== null && maxResults !== "") {
+          const parsed =
+            typeof maxResults === "number"
+              ? maxResults
+              : parseInt(String(maxResults), 10);
           if (!isNaN(parsed) && parsed >= 1 && parsed <= 100) {
             max = parsed;
           }
@@ -55,9 +58,12 @@ export const v1CommentList = (app: any) => {
           success: true,
           message: "댓글 스레드 목록을 성공적으로 가져왔습니다.",
           data: {
-            items: response.data.items,
+            items: response.data.items || [],
             nextPageToken: response.data.nextPageToken,
-            pageInfo: response.data.pageInfo,
+            pageInfo: response.data.pageInfo || {
+              totalResults: 0,
+              resultsPerPage: max,
+            },
           },
         };
       } catch (error: any) {
@@ -86,7 +92,7 @@ export const v1CommentList = (app: any) => {
           error: "Access Token is required",
         }),
         maxResults: t.Optional(
-          t.String({
+          t.Union([t.String(), t.Number()], {
             description: "Maximum results per page (0-100)",
             error: "maxResults must be between 0 and 100",
           }),
@@ -116,10 +122,12 @@ export const v1CommentList = (app: any) => {
           data: t.Object({
             items: t.Array(t.Any()),
             nextPageToken: t.Optional(t.String()),
-            pageInfo: t.Object({
-              totalResults: t.Number(),
-              resultsPerPage: t.Number(),
-            }),
+            pageInfo: t.Optional(
+              t.Object({
+                totalResults: t.Number(),
+                resultsPerPage: t.Number(),
+              }),
+            ),
           }),
         }),
         400: t.Object({

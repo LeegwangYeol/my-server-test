@@ -257,13 +257,21 @@ describe("Milestone 3: 100+ Agent Swarm Concurrency Chaos Stress Test Suite", ()
 
       const startTime = performance.now();
       const DEADLOCK_SAFETY_MS = 15_000;
+      let deadlockTimer: ReturnType<typeof setTimeout> | undefined;
 
-      await Promise.race([
-        Promise.all(swarmPromises),
-        new Promise((_, reject) =>
-          setTimeout(() => reject(new Error("SWARM_DEADLOCK_TIMEOUT: Swarm hung!")), DEADLOCK_SAFETY_MS)
-        ),
-      ]);
+      try {
+        await Promise.race([
+          Promise.all(swarmPromises),
+          new Promise((_, reject) => {
+            deadlockTimer = setTimeout(
+              () => reject(new Error("SWARM_DEADLOCK_TIMEOUT: Swarm hung!")),
+              DEADLOCK_SAFETY_MS
+            );
+          }),
+        ]);
+      } finally {
+        if (deadlockTimer) clearTimeout(deadlockTimer);
+      }
 
       const durationMs = performance.now() - startTime;
 

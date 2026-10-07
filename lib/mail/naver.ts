@@ -24,6 +24,15 @@ import nodemailer, { type Transporter } from "nodemailer";
 
 const SMTP_HOST = "smtp.naver.com";
 const SMTP_PORT = 465; // implicit TLS
+const SMTP_CONNECTION_TIMEOUT_MS = 5000;
+const SMTP_GREETING_TIMEOUT_MS = 5000;
+const SMTP_SOCKET_TIMEOUT_MS = 10000;
+
+export const SMTP_TIMEOUTS = {
+  connectionTimeout: SMTP_CONNECTION_TIMEOUT_MS,
+  greetingTimeout: SMTP_GREETING_TIMEOUT_MS,
+  socketTimeout: SMTP_SOCKET_TIMEOUT_MS,
+} as const;
 
 let cached: Transporter | null = null;
 
@@ -44,7 +53,7 @@ function resolveCreds(): { user?: string; pass?: string } {
   return { user, pass };
 }
 
-function getTransporter(): Transporter {
+export function getTransporter(): Transporter {
   if (cached) return cached;
   const { user, pass } = resolveCreds();
   if (!user || !pass) {
@@ -54,13 +63,39 @@ function getTransporter(): Transporter {
         "네이버 메일 > 환경설정 > POP3/IMAP 설정에서 'SMTP 사용'도 켜져 있어야 합니다.",
     );
   }
-  cached = nodemailer.createTransport({
+  const transport = nodemailer.createTransport({
     host: SMTP_HOST,
     port: SMTP_PORT,
     secure: true,
     auth: { user, pass },
+    connectionTimeout: SMTP_CONNECTION_TIMEOUT_MS,
+    greetingTimeout: SMTP_GREETING_TIMEOUT_MS,
+    socketTimeout: SMTP_SOCKET_TIMEOUT_MS,
   });
+
+  // Attach error handler to prevent unhandled 'error' events on the EventEmitter
+  // if the SMTP connection drops, resets, or emits an async error.
+  transport.on("error", (err) => {
+    console.error("[lib/mail/naver] Transporter background error:", err?.message || err);
+    if (cached === transport) {
+      cached = null;
+    }
+  });
+
+  cached = transport;
   return cached;
+}
+
+/** For testing or resetting transporter state */
+export function resetTransporterCache(): void {
+  if (cached) {
+    try {
+      cached.close();
+    } catch {
+      // ignore close errors during cache reset
+    }
+    cached = null;
+  }
 }
 
 export interface SendMailInput {
@@ -98,17 +133,24 @@ export async function sendNaverMail(
   // only ever vary the display name — the address stays NAVER_MAIL_USER.
   const defaultFrom = fromName ? `${fromName} <${user}>` : user;
 
-  const info = await transporter.sendMail({
-    from: input.from?.trim() || defaultFrom,
-    to: Array.isArray(input.to) ? input.to.join(", ") : input.to,
-    subject: input.subject,
-    text: input.text,
-    html: input.html,
-  });
+  try {
+    const info = await transporter.sendMail({
+      from: input.from?.trim() || defaultFrom,
+      to: Array.isArray(input.to) ? input.to.join(", ") : input.to,
+      subject: input.subject,
+      text: input.text,
+      html: input.html,
+    });
 
-  return {
-    messageId: info.messageId,
-    accepted: (info.accepted ?? []).map(String),
-    rejected: (info.rejected ?? []).map(String),
-  };
+    return {
+      messageId: info.messageId,
+      accepted: (info.accepted ?? []).map(String),
+      rejected: (info.rejected ?? []).map(String),
+    };
+  } catch (err: unknown) {
+    resetTransporterCache();
+    const message = err instanceof Error ? err.message : String(err);
+    console.error("[lib/mail/naver] sendNaverMail error:", message);
+    throw err;
+  }
 }

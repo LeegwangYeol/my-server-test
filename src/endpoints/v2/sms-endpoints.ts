@@ -50,25 +50,54 @@ export const v2SmsEndpoints = async (app: any) => {
           return { success: false, error: "unauthorized" };
         }
 
+        // 전화번호는 공백/하이픈을 제거해 전달 (예: "010-1234-5678" → "01012345678").
+        const rawTo = (body?.to ?? "").trim();
+        const to = rawTo.replace(/[\s-]/g, "");
+        const text = (body?.text ?? "").trim();
+
+        if (!rawTo || !to) {
+          set.status = 400;
+          return { success: false, error: "to required" };
+        }
+        if (to.length > 15) {
+          set.status = 400;
+          return {
+            success: false,
+            error: "phone number exceeds maximum length of 15 digits",
+          };
+        }
+        if (!/^\+?[0-9]{7,15}$/.test(to)) {
+          set.status = 400;
+          return { success: false, error: "invalid phone number format" };
+        }
+        if (!text) {
+          set.status = 400;
+          return { success: false, error: "text required" };
+        }
+        if (text.length > 2000) {
+          set.status = 400;
+          return {
+            success: false,
+            error: "text exceeds maximum length of 2000 characters",
+          };
+        }
+
         if (!isSmsConfigured()) {
+          set.status = 500;
           return {
             success: false,
             error: `SMS provider(${activeProvider()}) 환경변수 미설정 — PUSHBULLET_ACCESS_TOKEN 과 (PUSHBULLET_DEVICE_NICKNAME 또는 PUSHBULLET_DEVICE_IDEN) 을 확인하세요.`,
           };
         }
 
-        // 전화번호는 공백/하이픈을 제거해 전달 (예: "010-1234-5678" → "01012345678").
-        const to = (body?.to ?? "").replace(/[\s-]/g, "").trim();
-        const text = (body?.text ?? "").trim();
-        if (!to) return { success: false, error: "to required" };
-        if (!text) return { success: false, error: "text required" };
-
         try {
           const result = await sendSms({ phoneNumber: to, text });
+          if (!result.ok) set.status = 502;
           return { success: result.ok, ...result };
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
           console.error("[v2/admin/sms/send] failed:", message);
+          set.status = 502;
           return { success: false, error: message };
         }
       },

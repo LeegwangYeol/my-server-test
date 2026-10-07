@@ -14,9 +14,18 @@ const getApp = () => {
 };
 
 const toWebRequest = (req: IncomingMessage, res?: ServerResponse): Request => {
-  const host = req.headers.host ?? "localhost";
-  const protocol =
+  const rawHost =
+    (req.headers["x-forwarded-host"] as string | undefined) ??
+    req.headers.host ??
+    "localhost";
+  const hostStr = Array.isArray(rawHost) ? rawHost[0] : rawHost;
+  const host = (hostStr ?? "localhost").split(",")[0].trim() || "localhost";
+
+  const rawProto =
     (req.headers["x-forwarded-proto"] as string | undefined) ?? "https";
+  const protoStr = Array.isArray(rawProto) ? rawProto[0] : rawProto;
+  const protocol = (protoStr ?? "https").split(",")[0].trim() || "https";
+
   const url = `${protocol}://${host}${req.url ?? "/"}`;
 
   const headers = new Headers();
@@ -36,7 +45,7 @@ const toWebRequest = (req: IncomingMessage, res?: ServerResponse): Request => {
   const onAbort = () => controller.abort();
   req.on("aborted", onAbort);
   req.on("close", () => {
-    if (req.destroyed) onAbort();
+    if (!req.complete) onAbort();
   });
   if (res && typeof res.on === "function") {
     res.on("close", () => {
@@ -49,20 +58,44 @@ const toWebRequest = (req: IncomingMessage, res?: ServerResponse): Request => {
   return new Request(url, {
     method,
     headers,
-    // @ts-ignore - duplex is required by Node when sending a stream body
     duplex: hasBody ? "half" : undefined,
     body: hasBody ? (req as any) : undefined,
     signal: controller.signal,
-  });
+  } as RequestInit & { duplex?: "half" });
 };
 
 const writeWebResponse = async (
   res: ServerResponse,
   webRes: Response,
+  signal?: AbortSignal,
 ): Promise<void> => {
   res.statusCode = webRes.status;
+
+  // Preserve multiple Set-Cookie headers without clobbering
+  if (typeof (webRes.headers as any).getSetCookie === "function") {
+    const cookies = (webRes.headers as any).getSetCookie();
+    if (Array.isArray(cookies) && cookies.length > 0) {
+      res.setHeader("set-cookie", cookies);
+    }
+  }
+
   webRes.headers.forEach((value, key) => {
-    res.setHeader(key, value);
+    if (key.toLowerCase() !== "set-cookie") {
+      res.setHeader(key, value);
+    } else if (typeof (webRes.headers as any).getSetCookie !== "function") {
+      // Fallback for environments without getSetCookie
+      if (typeof (res as any).appendHeader === "function") {
+        (res as any).appendHeader(key, value);
+      } else {
+        const prev = res.getHeader(key);
+        if (prev) {
+          const arr = Array.isArray(prev) ? [...prev, value] : [String(prev), value];
+          res.setHeader(key, arr);
+        } else {
+          res.setHeader(key, value);
+        }
+      }
+    }
   });
 
   if (!webRes.body) {
@@ -100,12 +133,26 @@ const writeWebResponse = async (
             cleanup();
             resolve();
           };
+          const onSignalAbort = () => {
+            cleanup();
+            resolve();
+          };
           const cleanup = () => {
             if (typeof res.off === "function") {
               res.off("drain", onDrain);
               res.off("close", onCloseDrain);
             }
+            if (signal) {
+              signal.removeEventListener("abort", onSignalAbort);
+            }
           };
+          if (signal?.aborted) {
+            resolve();
+            return;
+          }
+          if (signal) {
+            signal.addEventListener("abort", onSignalAbort, { once: true });
+          }
           if (typeof res.on === "function") {
             res.once("drain", onDrain);
             res.once("close", onCloseDrain);
@@ -138,19 +185,20 @@ export default async function handler(
     const app = await getApp();
     const webReq = toWebRequest(req, res);
     const webRes: Response = await app.handle(webReq);
-    await writeWebResponse(res, webRes);
+    await writeWebResponse(res, webRes, webReq.signal);
   } catch (error: any) {
     console.error("Serverless handler error:", error);
     if (!res.headersSent) {
       res.statusCode = 500;
       res.setHeader("content-type", "application/json");
+      res.setHeader("x-content-type-options", "nosniff");
       const isProd =
         process.env.NODE_ENV === "production" ||
         process.env.VERCEL_ENV === "production";
       res.end(
         JSON.stringify({
           error: "Internal Server Error",
-          message: error?.message ?? String(error),
+          message: isProd ? "Internal Server Error" : error?.message,
           stack: isProd ? undefined : error?.stack,
         }),
       );

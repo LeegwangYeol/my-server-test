@@ -47,6 +47,25 @@ export const createApp = async (serverless = false) => {
           error: "Payload Too Large: request body exceeds 1MB limit",
         };
       }
+
+      if (code === "NOT_FOUND" || code === "VALIDATION" || code === "PARSE") {
+        return;
+      }
+
+      const isProd =
+        process.env.NODE_ENV === "production" ||
+        process.env.VERCEL_ENV === "production";
+
+      set.status =
+        typeof set.status === "number" && set.status >= 400
+          ? set.status
+          : 500;
+      return {
+        success: false,
+        error: isProd
+          ? "Internal Server Error"
+          : (error?.message ?? "Internal Server Error"),
+      };
     })
     .onParse(async ({ request, contentType }) => {
       if (contentType === "application/json") {
@@ -55,16 +74,6 @@ export const createApp = async (serverless = false) => {
           throw new Error("PAYLOAD_TOO_LARGE");
         }
         return JSON.parse(text);
-      }
-    })
-    .onAfterHandle(({ request, set }) => {
-      // * Only process CORS requests
-      if (request.method !== "OPTIONS") return;
-
-      const allowHeader = set.headers["Access-Control-Allow-Headers"];
-      if (allowHeader === "*") {
-        set.headers["Access-Control-Allow-Headers"] =
-          request.headers.get("Access-Control-Request-Headers") ?? "";
       }
     })
     .use(
@@ -91,17 +100,11 @@ export const createApp = async (serverless = false) => {
       }),
     );
 
-  // 타입 체크 비활성화
-  // @ts-ignore
-  v1Endpoints(app);
-  // @ts-ignore
-  v2WidgetEndpoints(app);
-  // @ts-ignore
-  v2MailEndpoints(app);
-  // @ts-ignore
-  v2SmsEndpoints(app);
-  // @ts-ignore
-  healthzEndpoint(app);
+  await v1Endpoints(app);
+  await v2WidgetEndpoints(app);
+  await v2MailEndpoints(app);
+  await v2SmsEndpoints(app);
+  await healthzEndpoint(app);
 
   // Platform sanity stub for local parity with Vercel api/hello.js
   app.get("/api/hello", ({ request }) => ({
@@ -112,9 +115,29 @@ export const createApp = async (serverless = false) => {
     method: request.method,
   }));
 
-  // 서버리스 모드가 아닌 경우에만 listen 호출
+  // Recompile router so all asynchronously mounted routes are indexed
+  app.compile();
+
+  // 서버리스 모드가 아닌 경우에만 listen 호출 및 graceful shutdown 리스너 등록
   if (!serverless) {
     app.listen(process.env.PORT ?? 3000);
+
+    const shutdown = async (signal: string) => {
+      console.log(`Received ${signal}, shutting down gracefully...`);
+      try {
+        await app.stop();
+      } catch (err) {
+        console.error("Error during graceful shutdown:", err);
+      }
+      process.exit(0);
+    };
+
+    process.once("SIGTERM", () => {
+      void shutdown("SIGTERM");
+    });
+    process.once("SIGINT", () => {
+      void shutdown("SIGINT");
+    });
   }
 
   return app;

@@ -237,10 +237,20 @@ describe("Empirical Challenger M3: Adversarial Swarm Stress & Zero-Leak Invarian
     });
 
     const startTime = performance.now();
-    await Promise.race([
-      Promise.all(promises),
-      new Promise((_, reject) => setTimeout(() => reject(new Error("DEADLOCK: Swarm did not finish in 15s")), 15000)),
-    ]);
+    let deadlockTimer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        Promise.all(promises),
+        new Promise((_, reject) => {
+          deadlockTimer = setTimeout(
+            () => reject(new Error("DEADLOCK: Swarm did not finish in 15s")),
+            15000
+          );
+        }),
+      ]);
+    } finally {
+      if (deadlockTimer) clearTimeout(deadlockTimer);
+    }
     const durationMs = performance.now() - startTime;
 
     expect(completedCount).toBe(TOTAL_REQUESTS);

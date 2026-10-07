@@ -44,11 +44,23 @@ export const v1VideoList = (app: any) => {
           };
         }
 
+        // maxResults 처리 (기본값: 50, 허용 범위: 0~50)
+        let max = 50;
+        if (maxResults !== undefined && maxResults !== null && maxResults !== "") {
+          const parsed =
+            typeof maxResults === "number"
+              ? maxResults
+              : parseInt(String(maxResults), 10);
+          if (!isNaN(parsed) && parsed >= 0 && parsed <= 50) {
+            max = parsed;
+          }
+        }
+
         // 업로드 플레이리스트에서 동영상 리스트 가져오기
         const response = await youtube.playlistItems.list({
           part: ["snippet", "contentDetails"],
           playlistId: uploadsPlaylistId,
-          maxResults: maxResults ? parseInt(maxResults, 10) : 50,
+          maxResults: max,
           pageToken: pageToken || undefined,
         });
 
@@ -56,9 +68,12 @@ export const v1VideoList = (app: any) => {
           success: true,
           message: "채널의 동영상 목록을 성공적으로 가져왔습니다.",
           data: {
-            items: response.data.items,
+            items: response.data.items || [],
             nextPageToken: response.data.nextPageToken,
-            pageInfo: response.data.pageInfo,
+            pageInfo: response.data.pageInfo || {
+              totalResults: 0,
+              resultsPerPage: max,
+            },
           },
         };
       } catch (error: any) {
@@ -87,7 +102,7 @@ export const v1VideoList = (app: any) => {
           error: "Access Token이 필요합니다.",
         }),
         maxResults: t.Optional(
-          t.String({
+          t.Union([t.String(), t.Number()], {
             description: "한 페이지당 최대 결과 수 (0-50)",
             error: "최대 페이지 결과수는 0 에서 50 사이입니다.",
           }),
@@ -105,10 +120,12 @@ export const v1VideoList = (app: any) => {
           data: t.Object({
             items: t.Array(t.Any()),
             nextPageToken: t.Optional(t.String()),
-            pageInfo: t.Object({
-              totalResults: t.Number(),
-              resultsPerPage: t.Number(),
-            }),
+            pageInfo: t.Optional(
+              t.Object({
+                totalResults: t.Number(),
+                resultsPerPage: t.Number(),
+              }),
+            ),
           }),
         }),
         400: t.Object({

@@ -74,8 +74,70 @@ interface CacheEntry {
   row: WidgetRow | null;
   expiresAt: number;
 }
-const widgetCache = new Map<string, CacheEntry>();
-const CACHE_TTL_MS = 60_000;
+
+export const MAX_CACHE_ENTRIES = 500;
+export const CACHE_TTL_MS = 60_000;
+
+/**
+ * Bounded LRU cache with TTL expiration.
+ * Evicts expired entries first, then evicts oldest entries (LRU) when capacity is reached.
+ */
+export class BoundedLRUCache<K, V extends { expiresAt: number }> {
+  private readonly max: number;
+  private readonly map = new Map<K, V>();
+
+  constructor(max: number) {
+    this.max = max;
+  }
+
+  get(key: K): V | undefined {
+    const entry = this.map.get(key);
+    if (!entry) return undefined;
+    if (entry.expiresAt <= Date.now()) {
+      this.map.delete(key);
+      return undefined;
+    }
+    // Refresh LRU position (delete and re-insert at tail)
+    this.map.delete(key);
+    this.map.set(key, entry);
+    return entry;
+  }
+
+  set(key: K, value: V): void {
+    if (this.map.has(key)) {
+      this.map.delete(key);
+    } else if (this.map.size >= this.max) {
+      // Evict expired entries first
+      const now = Date.now();
+      for (const [k, v] of this.map.entries()) {
+        if (v.expiresAt <= now) {
+          this.map.delete(k);
+        }
+      }
+      // If still at or over capacity, evict oldest entry (LRU)
+      while (this.map.size >= this.max) {
+        const oldestKey = this.map.keys().next().value;
+        if (oldestKey === undefined) break;
+        this.map.delete(oldestKey);
+      }
+    }
+    this.map.set(key, value);
+  }
+
+  delete(key: K): boolean {
+    return this.map.delete(key);
+  }
+
+  clear(): void {
+    this.map.clear();
+  }
+
+  get size(): number {
+    return this.map.size;
+  }
+}
+
+const widgetCache = new BoundedLRUCache<string, CacheEntry>(MAX_CACHE_ENTRIES);
 
 export function invalidateWidgetCache(id?: string) {
   if (id) {

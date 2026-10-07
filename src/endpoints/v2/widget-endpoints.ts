@@ -126,8 +126,8 @@ export const v2WidgetEndpoints = async (app: any) => {
       },
       {
         body: t.Object({
-          widgetId: t.Optional(t.String()),
-          threadId: t.Optional(t.String()),
+          widgetId: t.Optional(t.String({ maxLength: 100 })),
+          threadId: t.Optional(t.String({ maxLength: 100 })),
         }),
         detail: {
           tags: ["API"],
@@ -160,7 +160,18 @@ export const v2WidgetEndpoints = async (app: any) => {
           set.status = 403;
           return { success: false, error: "unregistered widget_id" };
         }
-        const threadId = (await createThread(widgetId)) ?? "";
+        let threadId: string | null = null;
+        try {
+          threadId = await createThread(widgetId);
+        } catch (err) {
+          console.error("[v2/widget/create-thread] createThread failed:", err);
+          set.status = 500;
+          return { success: false, error: "Failed to create thread" };
+        }
+        if (!threadId) {
+          set.status = 500;
+          return { success: false, error: "Failed to create thread" };
+        }
         return { success: true, threadId, thread_id: threadId };
       },
       {
@@ -368,32 +379,6 @@ export const v2WidgetEndpoints = async (app: any) => {
         );
         const maxTokens = Number.isFinite(maxTokensRaw) ? maxTokensRaw : 512;
 
-        // Canned reply fallback when no LLM API key is configured
-        if (!provider) {
-          set.headers["Content-Type"] = "text/event-stream";
-          set.headers["Cache-Control"] = "no-cache, no-transform";
-          set.headers["Connection"] = "keep-alive";
-
-          const enc = new TextEncoder();
-          const fallback = pickReply(userMessage);
-          const stream = new ReadableStream({
-            async start(controller) {
-              for (const tk of chunkText(fallback)) {
-                const safe = tk
-                  .replace(/%/g, "%25")
-                  .replace(/ /g, "%20")
-                  .replace(/\n/g, "%0a")
-                  .replace(/\r/g, "%0d");
-                controller.enqueue(enc.encode(`data: ${safe}\n\n`));
-                await sleep(40);
-              }
-              controller.enqueue(enc.encode(`data: [DONE]\n\n`));
-              controller.close();
-            },
-          });
-          return new Response(stream);
-        }
-
         // Setup double-wired abort controller
         const abortController = new AbortController();
         if (request?.signal) {
@@ -404,6 +389,53 @@ export const v2WidgetEndpoints = async (app: any) => {
               once: true,
             });
           }
+        }
+
+        // Canned reply fallback when no LLM API key is configured
+        if (!provider) {
+          set.headers["Content-Type"] = "text/event-stream";
+          set.headers["Cache-Control"] = "no-cache, no-transform";
+          set.headers["Connection"] = "keep-alive";
+
+          const enc = new TextEncoder();
+          const fallback = pickReply(userMessage);
+          const stream = new ReadableStream({
+            async start(controller) {
+              try {
+                for (const tk of chunkText(fallback)) {
+                  if (abortController.signal.aborted) break;
+                  const safe = tk
+                    .replace(/%/g, "%25")
+                    .replace(/ /g, "%20")
+                    .replace(/\n/g, "%0a")
+                    .replace(/\r/g, "%0d");
+                  controller.enqueue(enc.encode(`data: ${safe}\n\n`));
+                  await sleep(40);
+                }
+              } finally {
+                if (threadId && fallback.trim()) {
+                  try {
+                    await appendMessage(threadId, "assistant", fallback);
+                  } catch (e) {
+                    console.error("[v2/ask] persist assistant failed (demo mode):", e);
+                  }
+                }
+                if (!abortController.signal.aborted) {
+                  controller.enqueue(enc.encode(`data: [DONE]\n\n`));
+                  try {
+                    controller.close();
+                  } catch {
+                    /* already closed */
+                  }
+                }
+              }
+            },
+            cancel(reason) {
+              console.log("[v2/ask] Client disconnected (demo mode), cancelling stream:", reason);
+              abortController.abort(reason);
+            },
+          });
+          return new Response(stream);
         }
 
         // ── PRE-STREAM ERROR BOUNDARY ────────────────────────────────────
@@ -542,9 +574,11 @@ export const v2WidgetEndpoints = async (app: any) => {
               }
             } finally {
               if (threadId && assistantBuffer.trim()) {
-                appendMessage(threadId, "assistant", assistantBuffer).catch(
-                  (e) => console.error("[v2/ask] persist assistant failed:", e),
-                );
+                try {
+                  await appendMessage(threadId, "assistant", assistantBuffer);
+                } catch (e) {
+                  console.error("[v2/ask] persist assistant failed:", e);
+                }
               }
               if (!abortController.signal.aborted) {
                 controller.enqueue(enc.encode(`data: [DONE]\n\n`));
