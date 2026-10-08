@@ -92,6 +92,7 @@ export class OpenAICompatibleProvider implements LLMProvider {
       }
     } finally {
       try {
+        await reader.cancel().catch(() => {});
         reader.releaseLock();
       } catch {
         /* noop */
