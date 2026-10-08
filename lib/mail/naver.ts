@@ -98,6 +98,12 @@ export function resetTransporterCache(): void {
   }
 }
 
+import {
+  executeWithFallback,
+  mailFallbackQueue,
+  type FallbackJob,
+} from "../queue/fallback-queue";
+
 export interface SendMailInput {
   to: string | string[];
   subject: string;
@@ -111,6 +117,8 @@ export interface SendMailResult {
   messageId: string;
   accepted: string[];
   rejected: string[];
+  queued?: boolean;
+  jobId?: string;
 }
 
 /** True when the required Naver mail env vars are present. */
@@ -121,6 +129,7 @@ export function isNaverMailConfigured(): boolean {
 
 export async function sendNaverMail(
   input: SendMailInput,
+  options?: { maxRetries?: number; allowQueue?: boolean; idempotencyKey?: string },
 ): Promise<SendMailResult> {
   if (!input.text && !input.html) {
     throw new Error("text 또는 html 중 하나는 반드시 포함해야 합니다.");
@@ -133,20 +142,53 @@ export async function sendNaverMail(
   // only ever vary the display name — the address stays NAVER_MAIL_USER.
   const defaultFrom = fromName ? `${fromName} <${user}>` : user;
 
-  try {
-    const info = await transporter.sendMail({
-      from: input.from?.trim() || defaultFrom,
-      to: Array.isArray(input.to) ? input.to.join(", ") : input.to,
-      subject: input.subject,
-      text: input.text,
-      html: input.html,
-    });
+  const allowQueue = options?.allowQueue !== false;
+  const maxRetries = options?.maxRetries ?? 3;
 
-    return {
-      messageId: info.messageId,
-      accepted: (info.accepted ?? []).map(String),
-      rejected: (info.rejected ?? []).map(String),
-    };
+  try {
+    const execRes = await executeWithFallback(
+      async () => {
+        const info = await transporter.sendMail({
+          from: input.from?.trim() || defaultFrom,
+          to: Array.isArray(input.to) ? input.to.join(", ") : input.to,
+          subject: input.subject,
+          text: input.text,
+          html: input.html,
+        });
+
+        return {
+          messageId: info.messageId,
+          accepted: (info.accepted ?? []).map(String),
+          rejected: (info.rejected ?? []).map(String),
+        };
+      },
+      {
+        queue: allowQueue ? mailFallbackQueue : undefined,
+        fallbackPayload: input,
+        type: "mail",
+        idempotencyKey: options?.idempotencyKey,
+        maxRetries,
+        baseDelayMs: 200,
+        maxDelayMs: 5000,
+        operationName: "sendNaverMail",
+      },
+    );
+
+    if (execRes.queued && execRes.job) {
+      return {
+        messageId: `queued-${execRes.job.id}`,
+        accepted: Array.isArray(input.to) ? input.to : [input.to],
+        rejected: [],
+        queued: true,
+        jobId: execRes.job.id,
+      };
+    }
+
+    if (execRes.result) {
+      return execRes.result;
+    }
+
+    throw execRes.error || new Error("Failed to send mail");
   } catch (err: unknown) {
     resetTransporterCache();
     const message = err instanceof Error ? err.message : String(err);
@@ -154,3 +196,18 @@ export async function sendNaverMail(
     throw err;
   }
 }
+
+/**
+ * Replays and processes pending emails stored in the mail fallback queue.
+ */
+export async function processMailQueue(): Promise<{
+  processed: number;
+  succeeded: number;
+  failed: number;
+}> {
+  return mailFallbackQueue.processPending(async (job: FallbackJob<SendMailInput>) => {
+    const res = await sendNaverMail(job.payload, { allowQueue: false });
+    return res.rejected.length === 0;
+  });
+}
+

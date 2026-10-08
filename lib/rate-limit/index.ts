@@ -14,6 +14,7 @@ export interface RateLimitResult {
   limit: number;
   remaining: number;
   resetMs: number;
+  resetEpochSec: number;
 }
 
 export interface WindowBucket {
@@ -28,7 +29,8 @@ export class SlidingWindowRateLimiter {
   private readonly cache = new Map<string, WindowBucket>();
 
   constructor(maxEntries = 5000) {
-    this.maxEntries = maxEntries;
+    this.maxEntries =
+      Number.isFinite(maxEntries) && maxEntries > 0 ? Math.floor(maxEntries) : 5000;
   }
 
   /**
@@ -40,7 +42,12 @@ export class SlidingWindowRateLimiter {
     windowMs: number,
     now: number = Date.now()
   ): RateLimitResult {
-    let bucket = this.cache.get(key);
+    const safeKey = (key || "unknown").trim();
+    const safeLimit = Number.isFinite(limit) && limit >= 0 ? limit : 0;
+    const safeWindowMs = Number.isFinite(windowMs) && windowMs > 0 ? windowMs : 60_000;
+    const safeNow = Number.isFinite(now) ? now : Date.now();
+
+    let bucket = this.cache.get(safeKey);
 
     if (!bucket) {
       if (this.cache.size >= this.maxEntries) {
@@ -51,60 +58,61 @@ export class SlidingWindowRateLimiter {
         }
       }
       bucket = {
-        currentWindowStart: now,
+        currentWindowStart: safeNow,
         currentCount: 0,
         prevCount: 0,
-        lastSeen: now,
+        lastSeen: safeNow,
       };
-      this.cache.set(key, bucket);
+      this.cache.set(safeKey, bucket);
     } else {
       // Refresh LRU order (delete & set moves key to end of Map)
-      this.cache.delete(key);
-      this.cache.set(key, bucket);
-      bucket.lastSeen = now;
+      this.cache.delete(safeKey);
+      this.cache.set(safeKey, bucket);
+      bucket.lastSeen = safeNow;
     }
 
-    const elapsed = now - bucket.currentWindowStart;
+    const elapsed = safeNow - bucket.currentWindowStart;
 
     if (elapsed < 0) {
-      // Clock drift backwards protection
-      bucket.currentWindowStart = now;
-      bucket.prevCount = 0;
-      bucket.currentCount = 0;
-    } else if (elapsed >= windowMs * 2) {
+      // Clock drift backwards protection: adjust window start without wiping counts
+      bucket.currentWindowStart = safeNow;
+    } else if (elapsed >= safeWindowMs * 2) {
       // Both windows completely expired
-      bucket.currentWindowStart = now;
+      bucket.currentWindowStart = safeNow;
       bucket.prevCount = 0;
       bucket.currentCount = 0;
-    } else if (elapsed >= windowMs) {
+    } else if (elapsed >= safeWindowMs) {
       // Advance to next window: current becomes previous
       bucket.prevCount = bucket.currentCount;
       bucket.currentCount = 0;
-      bucket.currentWindowStart += windowMs;
+      bucket.currentWindowStart += safeWindowMs;
     }
 
-    const currentElapsed = Math.max(0, now - bucket.currentWindowStart);
-    const weight = Math.max(0, Math.min(1, (windowMs - currentElapsed) / windowMs));
+    const currentElapsed = Math.max(0, safeNow - bucket.currentWindowStart);
+    const weight = Math.max(0, Math.min(1, (safeWindowMs - currentElapsed) / safeWindowMs));
     const estimatedCount = bucket.prevCount * weight + bucket.currentCount;
-    const resetMs = Math.max(1, windowMs - currentElapsed);
+    const resetMs = Math.max(1, safeWindowMs - currentElapsed);
+    const resetEpochSec = Math.ceil((safeNow + resetMs) / 1000);
 
-    if (estimatedCount + 1 > limit) {
+    if (estimatedCount + 1 > safeLimit) {
       return {
         allowed: false,
-        limit,
+        limit: safeLimit,
         remaining: 0,
         resetMs,
+        resetEpochSec,
       };
     }
 
     bucket.currentCount += 1;
-    const remaining = Math.max(0, Math.floor(limit - (estimatedCount + 1)));
+    const remaining = Math.max(0, Math.floor(safeLimit - (estimatedCount + 1)));
 
     return {
       allowed: true,
-      limit,
+      limit: safeLimit,
       remaining,
       resetMs,
+      resetEpochSec,
     };
   }
 
@@ -112,9 +120,12 @@ export class SlidingWindowRateLimiter {
    * Active pruning of expired buckets older than maxIdleMs (default 2 hours).
    */
   public prune(maxIdleMs = 2 * 60 * 60 * 1000, now: number = Date.now()): number {
+    const safeIdle =
+      Number.isFinite(maxIdleMs) && maxIdleMs > 0 ? maxIdleMs : 2 * 60 * 60 * 1000;
+    const safeNow = Number.isFinite(now) ? now : Date.now();
     let deleted = 0;
     for (const [key, bucket] of this.cache.entries()) {
-      if (now - bucket.lastSeen >= maxIdleMs) {
+      if (safeNow - bucket.lastSeen >= safeIdle) {
         this.cache.delete(key);
         deleted++;
       }
@@ -181,20 +192,32 @@ export const ROUTE_POLICIES: Record<string, RouteLimitPolicy> = {
  * Resolves the appropriate rate limiting policy for a given pathname and HTTP method.
  */
 export function resolvePolicy(pathname: string, method: string = "GET"): RouteLimitPolicy {
+  let p = (pathname || "/").trim();
+  // Collapse consecutive slashes e.g. /v2//ask -> /v2/ask
+  p = p.replace(/\/+/g, "/");
+  // Strip /api prefix if present (case-insensitive Vercel rewrite parity)
+  if (p.toLowerCase().startsWith("/api/")) {
+    p = p.slice(4);
+  }
+  // Strip all trailing slashes for non-root paths (e.g. /v2/ask/// -> /v2/ask)
+  if (p.length > 1) {
+    p = p.replace(/\/+$/, "");
+  }
+
   // Tier 1: Ask (LLM Stream)
-  if (pathname === "/v2/ask") return ROUTE_POLICIES.ask;
+  if (p === "/v2/ask") return ROUTE_POLICIES.ask;
 
   // Tier 2: Widget Client
-  if (pathname === "/v2/widget/create-thread") return ROUTE_POLICIES.widgetCreateThread;
-  if (pathname.startsWith("/v2/widget/")) return ROUTE_POLICIES.widget;
+  if (p === "/v2/widget/create-thread") return ROUTE_POLICIES.widgetCreateThread;
+  if (p.startsWith("/v2/widget/")) return ROUTE_POLICIES.widget;
 
   // Tier 3: YouTube
-  if (pathname.startsWith("/v1/youtube/")) {
+  if (p.startsWith("/v1/youtube/")) {
     if (
-      pathname === "/v1/youtube/comment" ||
-      pathname === "/v1/youtube/comment/delete" ||
-      pathname === "/v1/youtube/reply" ||
-      pathname === "/v1/youtube/auth/confirm"
+      p === "/v1/youtube/comment" ||
+      p === "/v1/youtube/comment/delete" ||
+      p === "/v1/youtube/reply" ||
+      p === "/v1/youtube/auth/confirm"
     ) {
       return ROUTE_POLICIES.youtubeWrite;
     }
@@ -202,17 +225,17 @@ export function resolvePolicy(pathname: string, method: string = "GET"): RouteLi
   }
 
   // Tier 4: Admin
-  if (pathname.startsWith("/v2/admin/")) {
-    if (pathname === "/v2/admin/mail/send" || pathname === "/v2/admin/sms/send") {
+  if (p.startsWith("/v2/admin/")) {
+    if (p === "/v2/admin/mail/send" || p === "/v2/admin/sms/send") {
       return ROUTE_POLICIES.adminComms;
     }
-    if (pathname === "/v2/admin/widgets/upload-icon") return ROUTE_POLICIES.adminUpload;
-    if (pathname === "/v2/admin/db/migrate") return ROUTE_POLICIES.adminCritical;
+    if (p === "/v2/admin/widgets/upload-icon") return ROUTE_POLICIES.adminUpload;
+    if (p === "/v2/admin/db/migrate") return ROUTE_POLICIES.adminCritical;
     if (
-      pathname.endsWith("/upsert") ||
-      pathname.endsWith("/delete") ||
-      pathname.endsWith("/update") ||
-      pathname.endsWith("/rename")
+      p.endsWith("/upsert") ||
+      p.endsWith("/delete") ||
+      p.endsWith("/update") ||
+      p.endsWith("/rename")
     ) {
       return ROUTE_POLICIES.adminWrite;
     }
@@ -220,23 +243,66 @@ export function resolvePolicy(pathname: string, method: string = "GET"): RouteLi
   }
 
   // Tier 5: Public / Docs / Health
-  if (pathname === "/json" || pathname === "/v1/heartbeat") return ROUTE_POLICIES.docs;
-  if (pathname === "/" || pathname === "/v1/healthz" || pathname === "/api/hello") return ROUTE_POLICIES.public;
+  if (p === "/json" || p === "/v1/heartbeat") return ROUTE_POLICIES.docs;
+  if (p === "" || p === "/" || p === "/v1/healthz" || p === "/hello" || p === "/api/hello") return ROUTE_POLICIES.public;
 
   return ROUTE_POLICIES.default;
+}
+
+/**
+ * Sanitizes and normalizes an IP string (strips quotes, ports, brackets, and whitespace).
+ */
+export function normalizeIp(raw: string): string {
+  let ip = (raw || "").trim();
+  if (!ip) return "127.0.0.1";
+
+  // Strip surrounding quotes if present (e.g. "1.2.3.4" or '1.2.3.4')
+  ip = ip.replace(/^["']+|["']+$/g, "").trim();
+  if (!ip) return "127.0.0.1";
+
+  // Bracketed IPv6/IPv4-mapped with optional port: [2001:db8::1]:8080 or [::ffff:192.168.1.1]:8080 or [fe80::1%eth0]:8080
+  const bracketMatch = ip.match(/^\[([a-zA-Z0-9:.%_\-]+)\](?::\d+)?$/);
+  if (bracketMatch) {
+    return bracketMatch[1].toLowerCase();
+  }
+
+  // IPv4 with port: 1.2.3.4:8080
+  const ipv4PortMatch = ip.match(/^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):\d+$/);
+  if (ipv4PortMatch) {
+    return ipv4PortMatch[1];
+  }
+
+  // Pure IPv4
+  if (/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(ip)) {
+    return ip;
+  }
+
+  // Pure IPv6 or IPv4-mapped IPv6 (contains colons)
+  if (ip.includes(":")) {
+    // If IPv4-mapped with trailing port without brackets, e.g. ::ffff:192.168.1.1:8080
+    const mappedPortMatch = ip.match(/^((?:[a-fA-F0-9:]+:)?\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):\d+$/);
+    if (mappedPortMatch) {
+      return mappedPortMatch[1].toLowerCase();
+    }
+    return ip.toLowerCase();
+  }
+
+  return ip;
 }
 
 /**
  * Extracts normalized client IP from request headers or fallback to 127.0.0.1.
  */
 export function extractClientIp(
-  req: Request | { headers?: Headers | Record<string, string | undefined> | null } | null | undefined
+  req: Request | Headers | { headers?: Headers | Record<string, string | undefined> | null } | null | undefined
 ): string {
   if (!req) return "127.0.0.1";
 
   let headers: Headers | Record<string, string | undefined> | undefined;
   if (req instanceof Request) {
     headers = req.headers;
+  } else if (req instanceof Headers || (typeof (req as any)?.get === "function" && !("headers" in req))) {
+    headers = req as any;
   } else if ("headers" in req && req.headers) {
     headers = req.headers;
   }
@@ -250,17 +316,22 @@ export function extractClientIp(
     return record[name] ?? record[name.toLowerCase()] ?? record[name.toUpperCase()] ?? null;
   };
 
+  // Priority 1: Cloudflare Edge IP (authoritative, cannot be spoofed by client)
+  const cfConnectingIp = getHeader("cf-connecting-ip");
+  if (cfConnectingIp?.trim()) return normalizeIp(cfConnectingIp);
+
+  // Priority 2: Reverse proxy header (e.g. Nginx, ALB)
+  const xRealIp = getHeader("x-real-ip");
+  if (xRealIp?.trim()) return normalizeIp(xRealIp);
+
+  // Priority 3: X-Forwarded-For (extract first non-empty IP entry)
   const xForwardedFor = getHeader("x-forwarded-for");
   if (xForwardedFor) {
-    const firstIp = xForwardedFor.split(",")[0].trim();
-    if (firstIp) return firstIp;
+    const ips = xForwardedFor.split(",").map((s) => s.trim()).filter(Boolean);
+    if (ips.length > 0) {
+      return normalizeIp(ips[0]);
+    }
   }
-
-  const xRealIp = getHeader("x-real-ip");
-  if (xRealIp?.trim()) return xRealIp.trim();
-
-  const cfConnectingIp = getHeader("cf-connecting-ip");
-  if (cfConnectingIp?.trim()) return cfConnectingIp.trim();
 
   return "127.0.0.1";
 }
@@ -322,16 +393,18 @@ export function checkRateLimit(
   reqOrHeaders?: Request | Headers | { headers?: any } | Record<string, any> | null,
   now?: number
 ): RateLimitResult {
+  const t = now ?? Date.now();
   if (reqOrHeaders && isTestRateLimitBypassed(reqOrHeaders)) {
     return {
       allowed: true,
       limit,
       remaining: limit,
       resetMs: 0,
+      resetEpochSec: Math.ceil((t + windowMs) / 1000),
     };
   }
 
-  return globalLimiter.check(key, limit, windowMs, now);
+  return globalLimiter.check(key, limit, windowMs, t);
 }
 
 /**

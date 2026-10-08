@@ -7,6 +7,12 @@ import { v2SmsEndpoints } from "./endpoints/v2/sms-endpoints";
 import { healthzEndpoint } from "./endpoints/healthz";
 import { cors } from "@elysiajs/cors";
 
+import {
+  checkRateLimit,
+  resolvePolicy,
+  extractClientIp,
+} from "../lib/rate-limit";
+
 const MAX_REQUEST_BODY_SIZE = 1024 * 1024; // 1MB
 
 export const createApp = async (serverless = false) => {
@@ -18,6 +24,18 @@ export const createApp = async (serverless = false) => {
 
   app
     .onRequest(({ request, set }) => {
+      const origin = request.headers.get("origin");
+      const applyCorsHeaders = () => {
+        if (origin) {
+          set.headers = set.headers || {};
+          set.headers["access-control-allow-origin"] = origin;
+          set.headers["access-control-allow-credentials"] = "true";
+          set.headers["access-control-expose-headers"] =
+            "retry-after, x-ratelimit-limit, x-ratelimit-remaining, x-ratelimit-reset";
+          set.headers["vary"] = "Origin";
+        }
+      };
+
       const contentLength = request.headers.get("content-length");
       if (contentLength) {
         const size = parseInt(contentLength, 10);
@@ -27,12 +45,62 @@ export const createApp = async (serverless = false) => {
         const limit = isUpload ? 2 * 1024 * 1024 : MAX_REQUEST_BODY_SIZE;
         if (!isNaN(size) && size > limit) {
           set.status = 413;
+          applyCorsHeaders();
           return {
             success: false,
             error: `Payload Too Large: request body exceeds ${isUpload ? "2MB" : "1MB"} limit`,
           };
         }
       }
+
+      // Bypass rate limit for CORS preflight
+      if (request.method === "OPTIONS") {
+        return;
+      }
+
+      // Endpoint Rate Limiting
+      let pathname = "/";
+      try {
+        const url = new URL(request.url, "http://localhost");
+        pathname = url.pathname;
+      } catch {
+        pathname = "/";
+      }
+
+      const policy = resolvePolicy(pathname, request.method);
+      const clientIp = extractClientIp(request);
+      const rateLimitKey = `${clientIp}:${policy.tier}`;
+
+      const rateLimitRes = checkRateLimit(
+        rateLimitKey,
+        policy.limit,
+        policy.windowMs,
+        request,
+      );
+
+      if (!rateLimitRes.allowed) {
+        set.status = 429;
+        const retryAfterSec = Math.max(1, Math.ceil(rateLimitRes.resetMs / 1000));
+        set.headers = set.headers || {};
+        set.headers["retry-after"] = String(retryAfterSec);
+        set.headers["x-ratelimit-limit"] = String(policy.limit);
+        set.headers["x-ratelimit-remaining"] = "0";
+        set.headers["x-ratelimit-reset"] = String(rateLimitRes.resetEpochSec);
+        applyCorsHeaders();
+        return {
+          success: false,
+          error: "Too Many Requests",
+          message: `Rate limit exceeded for tier '${policy.tier}'. Please retry after ${retryAfterSec} seconds.`,
+          retryAfter: retryAfterSec,
+        };
+      }
+
+      set.headers = set.headers || {};
+      set.headers["x-ratelimit-limit"] = String(policy.limit);
+      set.headers["x-ratelimit-remaining"] = String(rateLimitRes.remaining);
+      set.headers["x-ratelimit-reset"] = String(rateLimitRes.resetEpochSec);
+      set.headers["access-control-expose-headers"] =
+        "retry-after, x-ratelimit-limit, x-ratelimit-remaining, x-ratelimit-reset";
     })
     .onError(({ error, code, set }: any) => {
       if (

@@ -68,3 +68,29 @@ Integrity mode: benchmark
 - [ ] 꼼수(ts-ignore 등) 없이 백엔드 전체 테스트 100% 통과 (Exit code 0)
 - [ ] 카오스 봇의 악성 페이로드 및 DDoS 공격을 Rate Limit으로 완벽히 방어했는가?
 - [ ] SMTP/DB 통신 429 에러 시 큐(Queue)를 통한 무중단 재시도 로직이 커밋 완료되었는가?
+
+
+## 2026-10-08T05:08:38Z
+
+# Teamwork Project Prompt
+
+> Requested team: This is a single self-contained fix; keep it small and focused.
+
+어제 서버 과부하(429 에러)로 중단되었던 백엔드 서버(`my-server-test`)의 시스템 안정화 작업을 재시도합니다. 외부 API 429 에러 방어를 위한 폴백 큐(Queue)를 구축하고, 트래픽 제한(Rate Limiting)을 이식하는 프로젝트입니다.
+
+Working directory: /Users/user/src/my-server-test
+Integrity mode: development
+
+## Requirements
+
+### R1. 서드파티 통신 429 에러 폴백(Fallback) 구축
+Naver SMTP나 DB 통신 시 429 에러가 발생하더라도 요청이 유실되지 않고 안전하게 재시도(지수 백오프)되거나 로컬 큐에 저장되도록 무중단 복구 구조를 구현해야 합니다.
+
+### R2. 엔드포인트 트래픽 제한 (Rate Limiting)
+악의적인 다중 호출 스팸이나 카오스 테스트에도 백엔드 프로세스가 뻗지 않도록 주요 API 엔드포인트에 Rate Limiter를 장착해야 합니다.
+
+## Acceptance Criteria
+
+### Verification
+- [ ] `npm run test` (또는 로컬 테스트 스크립트)를 실행했을 때 전체 백엔드 테스트가 에러 없이 100% 통과해야 합니다.
+- [ ] 테스트 코드 내에 의도적인 트래픽 스팸(DDoS 시뮬레이션)을 발생시켰을 때, Rate Limiter가 정상 작동하여 서버가 멈추지 않고 차단 상태(429)를 정상 반환해야 합니다.

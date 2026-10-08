@@ -126,39 +126,189 @@ export async function rollbackThread(threadId: string): Promise<boolean> {
   return true;
 }
 
+import {
+  executeWithFallback,
+  dbFallbackQueue,
+  is429OrQuotaError,
+  getQueuedMessagesForThread,
+  registerDefaultDbHandler,
+  type FallbackJob,
+} from "./queue/fallback-queue";
+
 /* ─── messages ─────────────────────────────────────────────────────── */
 
 export async function listMessages(
   threadId: string,
   limit = 50,
 ): Promise<ChatMessageRow[]> {
-  const { data, error } = await supabaseUntyped
-    .from("chat_message")
-    .select("*")
-    .eq("thread_id", threadId)
-    .order("created_at", { ascending: true })
-    .limit(limit);
-  if (error) {
-    console.error("[chat-store] listMessages failed:", error.message);
-    return [];
+  const safeLimit = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 50;
+  let rows: ChatMessageRow[] = [];
+  try {
+    const { data, error } = await supabaseUntyped
+      .from("chat_message")
+      .select("*")
+      .eq("thread_id", threadId)
+      .order("created_at", { ascending: true })
+      .limit(safeLimit);
+
+    if (data) {
+      rows = data as ChatMessageRow[];
+    }
+    if (error) {
+      console.error("[chat-store] listMessages failed:", error.message);
+    }
+  } catch (err: any) {
+    console.warn(
+      "[chat-store] listMessages database query failed or skipped:",
+      err?.message || err,
+    );
   }
-  return (data as ChatMessageRow[] | null) ?? [];
+
+  // Merge any pending unpersisted messages in dbFallbackQueue for this thread
+  const queuedRows = getQueuedMessagesForThread(threadId);
+  if (queuedRows.length > 0) {
+    rows = [...rows, ...(queuedRows as ChatMessageRow[])];
+    rows.sort(
+      (a, b) =>
+        new Date(a.created_at).getTime() - new Date(b.created_at).getTime(),
+    );
+    if (rows.length > safeLimit) {
+      rows = rows.slice(-safeLimit);
+    }
+  }
+
+  return rows;
 }
 
 export async function appendMessage(
   threadId: string,
   role: ChatRole,
   content: string,
+  options?: {
+    allowQueue?: boolean;
+    maxRetries?: number;
+    idempotencyKey?: string;
+  },
 ): Promise<boolean> {
   if (!threadId) return false;
-  const { error } = await supabaseUntyped
-    .from("chat_message")
-    .insert({ thread_id: threadId, role, content });
-  if (error) {
-    console.error("[chat-store] appendMessage failed:", error.message);
+
+  const allowQueue = options?.allowQueue !== false;
+  const maxRetries = options?.maxRetries ?? 3;
+  const idempotencyKey =
+    options?.idempotencyKey ??
+    `${threadId}:${role}:${Date.now()}:${Math.random().toString(36).slice(2, 6)}`;
+
+  try {
+    const execRes = await executeWithFallback(
+      async () => {
+        const { error } = await supabaseUntyped
+          .from("chat_message")
+          .insert({ thread_id: threadId, role, content });
+        if (error) {
+          throw error;
+        }
+        return true;
+      },
+      {
+        queue: allowQueue ? dbFallbackQueue : undefined,
+        fallbackPayload: {
+          threadId,
+          role,
+          content,
+          createdAt: new Date().toISOString(),
+        },
+        type: "db_chat_message",
+        idempotencyKey,
+        maxRetries,
+        baseDelayMs: 200,
+        maxDelayMs: 5000,
+        operationName: "appendMessage",
+      },
+    );
+
+    if (execRes.queued) {
+      console.warn(
+        `[chat-store] appendMessage queued due to DB 429 quota (thread: ${threadId})`,
+      );
+      return true;
+    }
+
+    return execRes.success;
+  } catch (err: any) {
+    console.error("[chat-store] appendMessage failed:", err?.message || err);
     return false;
   }
-  return true;
+}
+
+const defaultDbInsert = async (payload: {
+  threadId: string;
+  role: ChatRole;
+  content: string;
+  createdAt?: string;
+}): Promise<boolean> => {
+  try {
+    const insertData: Record<string, any> = {
+      thread_id: payload.threadId,
+      role: payload.role,
+      content: payload.content,
+    };
+    if (payload.createdAt) {
+      insertData.created_at = payload.createdAt;
+    }
+    const { error } = await supabaseUntyped
+      .from("chat_message")
+      .insert(insertData);
+
+    if (error) {
+      if (is429OrQuotaError(error)) {
+        throw error; // throw so processPending/markFailed can extract Retry-After and record real error
+      }
+      console.error(
+        "[chat-store] processDbQueue non-429 error:",
+        error.message,
+      );
+      return true; // discard non-retriable error to prevent queue clog
+    }
+    return true;
+  } catch (err: any) {
+    if (is429OrQuotaError(err)) {
+      throw err;
+    }
+    console.error(
+      "[chat-store] processDbQueue error:",
+      err?.message || err,
+    );
+    return true;
+  }
+};
+
+registerDefaultDbHandler(defaultDbInsert);
+
+/**
+ * Replays and processes pending DB writes stored in the db fallback queue.
+ */
+export async function processDbQueue(
+  insertFn?: (payload: {
+    threadId: string;
+    role: ChatRole;
+    content: string;
+  }) => Promise<boolean>,
+): Promise<{
+  processed: number;
+  succeeded: number;
+  failed: number;
+}> {
+  return dbFallbackQueue.processPending(
+    async (
+      job: FallbackJob<{ threadId: string; role: ChatRole; content: string }>,
+    ) => {
+      const payload = job.payload;
+      if (insertFn) {
+        return await insertFn(payload);
+      }
+      return await defaultDbInsert(payload);
+    },
+  );
 }
 
 /* ─── admin / sessions panel ───────────────────────────────────────── */

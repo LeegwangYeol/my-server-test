@@ -87,14 +87,34 @@ export const v2MailEndpoints = async (app: any) => {
           };
         }
 
+        const idempotencyKey =
+          (headers["idempotency-key"] ||
+            headers["x-idempotency-key"] ||
+            "").trim() || undefined;
+
         try {
-          const result = await sendNaverMail({
-            to,
-            subject,
-            text: body.text,
-            html: body.html,
-            from: body.from,
-          });
+          const result = await sendNaverMail(
+            {
+              to,
+              subject,
+              text: body.text,
+              html: body.html,
+              from: body.from,
+            },
+            { idempotencyKey },
+          );
+          if (result.queued) {
+            set.status = 202;
+            return {
+              success: true,
+              queued: true,
+              messageId: result.messageId,
+              jobId: result.jobId,
+              status: "queued_for_retry",
+              message:
+                "SMTP 429 quota encountered. Email enqueued for automatic retry without message loss.",
+            };
+          }
           const success = result.rejected.length === 0;
           if (!success) set.status = 502;
           return { success, ...result };
