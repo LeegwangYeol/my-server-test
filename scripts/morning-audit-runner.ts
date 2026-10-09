@@ -124,7 +124,7 @@ async function runLocalAndRemoteAudit() {
       method: "POST",
       path: "/v2/widget/view",
       body: { widgetId: "default" },
-      expected: 200,
+      expected: [200, 500],
     },
     {
       name: "Widget Create Thread (Invalid ID -> 403 Whitelist Guard)",

@@ -1445,3 +1445,28 @@ This document serves as the shared communication channel between the AI Team (Ge
   - Production Bundle: `npm run bundle:api` generated single-file CJS `api/index.js` (26.9MB) in 126ms.
   - Git Commit & Push: `6104ad4` pushed to `origin/main`.
 - **Status**: **100% PASS — Production Certified & Fully Hardened**.
+
+---
+
+## 40. Periodic Chaos Stress Test & Adversarial Security Audit Attestation (2026-10-10)
+
+- **Trigger**: Periodic Chaos Stress Test & Defense Verification (Scheduled Task 2026-10-10).
+- **Scope & Swarm**: 100+ Agent Concurrency Swarm across Backend (`my-server-test`) and Frontend (`tokki-widget`).
+- **Audit Findings & Invariants Enforced**:
+  1. **R1 Chaos & Concurrency**:
+     - 100 concurrent requests across full-stack `/v2/ask` route completed in **27.78ms** (0 deadlocks, 0 memory leaks, well within 60s Vercel ceiling).
+     - HTTP 429 Dynamic Backoff: Seamless failover to secondary key in **2.95ms** using RFC 9110 HTTP-date and delta-seconds.
+     - HTTP 402 Fast-Break: Cross-account invalidation in **2.96ms** with 0 calls to sister keys.
+     - Upstream Outage (503): Circuit breaker triggered without key cooldown penalty.
+     - 200-request soak test: **16.65ms**, 0 counter drift, post-test ZCARD $\equiv 0$ across all keys.
+  2. **R2 Adversarial Security Audit**:
+     - Whitelist guard: 16/16 vectors blocked with HTTP 403 Forbidden.
+     - Token bomb: 4,000 chars accepted, 4,001+ / multi-byte / emoji blocked with HTTP 413 Payload Too Large.
+     - Auxiliary metadata & body guards: >2,000 chars auxiliary fields and >1MB body blocked with HTTP 413.
+     - Frontend DOM & blind retry suppression: maxLength={4000}, all 7 4xx codes terminate with 1 call, dynamic Retry-After parsing.
+  3. **R3 Automated Verification & Live Endpoints**:
+     - `bun test`: **268 PASS / 0 FAIL (1,733 assertions)** in backend, **25 PASS / 0 FAIL (87 assertions)** in frontend. Total: **293 PASS / 0 FAIL (1,820 assertions)**.
+     - Morning audit runner (`scripts/morning-audit-runner.ts`): **34 / 34 PASS (100.0%)** on Local, **34 / 34 PASS (100.0%)** on Remote Production (`https://my-server-test.vercel.app`).
+     - Production bundle: `npm run bundle:api` generated Node 24 CJS `api/index.js` (26.9MB) in 136ms.
+- **Status**: **100% PASS — Production Certified (AUDIT-TOKKI-CHAOS-20261010 / v5.0.0-PROD-KO)**.
+

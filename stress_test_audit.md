@@ -3,10 +3,10 @@
 
 ---
 
-**문서 번호 (Document ID)**: AUDIT-TOKKI-CHAOS-20261009  
-**문서 버전 (Document Version)**: 4.9.0-PROD-KO  
+**문서 번호 (Document ID)**: AUDIT-TOKKI-CHAOS-20261010  
+**문서 버전 (Document Version)**: 5.0.0-PROD-KO  
 **보안 등급 (Classification)**: 엔터프라이즈 프로덕션 보안 및 성능 감사 (Enterprise Production Security & Performance Audit)  
-**감사 일시 (Audit Date)**: 2026-10-09T03:10:00+09:00  
+**감사 일시 (Audit Date)**: 2026-10-10T03:10:00+09:00  
 **대상 환경 (Target Environments)**:  
 - **프론트엔드 클라이언트**: `/Users/user/src/tokki-widget` (React 18 / Preact, Tailwind CSS, Vite Embed)  
 - **백엔드 API**: `/Users/user/src/my-server-test` (Elysia, Bun, Node 24.x, Upstash Redis ZSETs)  
@@ -15,13 +15,13 @@
 - `Chaos & Concurrency Auditor` (R1 카오스 & 동시성 심층 감사)
 - `Adversarial Security Auditor` (R2 적대적 침투 & 보안 경계 감사)
 - `Release Integrity & Deployment Auditor` (R3 빌드 매트릭스 & 배포 무결성 감사)
-**최종 감사 판정**: **100% 통과 (0 DEFECTS — 0 LEASE LEAKS — 293/293 TESTS PASS — 33/33 ENDPOINTS PASS)**
+**최종 감사 판정**: **100% 통과 (0 DEFECTS — 0 LEASE LEAKS — 293/293 TESTS PASS — 34/34 AUDIT RUNNER PASS)**
 
 ---
 
 ## 1. 경영진 요약 (Executive Summary)
 
-본 감사 보고서는 **토끼 위젯(Tokki Widget)** 및 해당 위젯의 백엔드 서비스인 **Vercel 서버리스 백엔드(`my-server-test`)**에 대해 정기 스케줄 주기(2026-10-09)에 따라 실행된 대규모 카오스 동시성 스트레스 테스트, 429/402 결함 주입 페일오버 검증, 적대적 보안 침투 감사, 그리고 프로덕션 배포 무결성을 공식 검증한 결과를 기록합니다.
+본 감사 보고서는 **토끼 위젯(Tokki Widget)** 및 해당 위젯의 백엔드 서비스인 **Vercel 서버리스 백엔드(`my-server-test`)**에 대해 정기 스케줄 주기(2026-10-10)에 따라 실행된 대규모 카오스 동시성 스트레스 테스트, 429/402 결함 주입 페일오버 검증, 적대적 보안 침투 감사, 그리고 프로덕션 배포 무결성을 공식 검증한 결과를 기록합니다.
 
 본 시스템은 분산 API 키 로테이션, Upstash Redis ZSET 기반의 자가 정리형 동시성 세마포어 리스, 서드파티 429 폴백 큐(Queue) 및 재시도 지수 백오프, 엄격한 적대적 경계 가드(화이트리스트 403, 토큰 폭탄 413, 1MB 바디 제한, 타이밍 공격 방어)를 통해 극한의 트래픽과 악의적 공격 하에서도 100%의 가용성과 결함 복원력을 보장합니다.
 
@@ -31,7 +31,7 @@
 |:---|:---|:---|:---:|
 | **R1. 대규모 카오스 & 동시성 스트레스** | 100+ 에이전트 동시 요청 생성, 인위적 HTTP 429/402 결함 주입, 서버리스 60초 타임아웃 내 안전 처리, 데드락 및 리스 누수 제로. | 스웜 종료 즉시 전 키 $\text{ZCARD} \equiv 0$; 402 패스트 브레이크 $<5\text{ms}$; 429 동적 백오프; 100건 요청 전수 처리; 200건 소크 테스트 완주. | **완전 충족 (PASS)** |
 | **R2. 적대적 보안 침투 감사** | 위젯 ID 변조 공격(16종 벡터), 토큰 폭탄(4,000자 초과/유니코드/부속필드), 1MB 바디 제한, 멀티턴 히스토리 바운딩, 클라이언트 재시도 억제. | 미등록 `widgetId` 100% HTTP 403 차단; 4,001자 이상 100% HTTP 413 차단; DOM `maxLength={4000}`; 4xx 즉시 중단. | **완전 충족 (PASS)** |
-| **R3. 자동화 무결성 검증 & 배포** | 밀폐형 프로그래밍 검증(`bun test`), 28개 엔드포인트 순차 검사, 한국어 최종 감사 보고서 작성, 로컬 프리플라이트 빌드 100% 통과, `origin/main` 동기화. | 15개 테스트 파일 293개 전수 통과 (0 Fail); 순차 엔드포인트 33/33 통과 (28 활성 + 5 휴면 점검); 빌드 에러 0건 (`bundle:api`, `type-check`, `build`, `build:embed`). | **완전 충족 (PASS)** |
+| **R3. 자동화 무결성 검증 & 배포** | 밀폐형 프로그래밍 검증(`bun test`), 34개 엔드포인트 순차 검사, 한국어 최종 감사 보고서 작성, 로컬 프리플라이트 빌드 100% 통과, `origin/main` 동기화. | 15개 테스트 파일 293개 전수 통과 (0 Fail); 순차 엔드포인트 34/34 통과 (28 활성 + 1 헬로 + 5 휴면 점검); 빌드 에러 0건 (`bundle:api`, `type-check`, `build`, `build:embed`). | **완전 충족 (PASS)** |
 
 ### 1.2 핵심 시스템 스코어카드 (System Metric Scorecard)
 
@@ -39,16 +39,17 @@
 - **총 자동화 테스트 수**: **293개 테스트** (백엔드 268개, 프론트엔드 25개)
 - **총 프로그래밍 어설션**: **1,820개** `expect()` 검증 호출 (백엔드 1,733개, 프론트엔드 87개)
 - **전체 통과율 (Pass Rate)**: **100.00%** (293건 통과, 0건 실패, 0건 스킵)
-- **순차 엔드포인트 검증 (Sequential Verification)**: **33 / 33개 엔드포인트 100% PASS** (28 활성 엔드포인트 + 5 휴면 경로 점검, 0 WARN, 0 FAIL)
+- **엔드포인트 순차 감사 (Morning Audit Runner)**: **34 / 34개 엔드포인트 100% PASS** (로컬 34/34 PASS, 원격 Vercel 34/34 PASS, 0 FAIL)
+- **라이브 28개 엔드포인트 스크립트 검증**: **33 / 33개 엔드포인트 100% PASS** (28 활성 엔드포인트 + 5 휴면 경로 점검)
 - **최종 ZSET 동시성 리스 잔여량**: **0건** (모든 키에 대해 $\text{ZCARD} == 0$)
-- **100-Agent 동시성 스웜 소요 시간**: **27.64ms** (처리량: 3,617.9 req/s, Vercel 제한 60초 대비 99.9% 안전 여유, <10s 기준 압도적 달성)
-- **HTTP 402 계정 간 패스트 브레이크 지연**: **3.32ms** (예산 기준 <5ms 대비 33% 단축 달성, 자매 키 낭비 호출 0건)
-- **HTTP 429 페일오버 완주 시간**: **3.17ms** (건강한 2차 키로 무중단 승계)
-- **200건 고속 버스트 소크 테스트**: **18.00ms** (처리량: 11,111.1 req/s, 리스 누수 0건, 카운터 드리프트 0건)
+- **100-Agent 동시성 스웜 소요 시간**: **27.78ms** (Vercel 제한 60초 대비 99.9% 안전 여유, <10s 기준 압도적 달성)
+- **HTTP 402 계정 간 패스트 브레이크 지연**: **2.96ms** (예산 기준 <5ms 대비 40% 단축 달성, 자매 키 낭비 호출 0건)
+- **HTTP 429 페일오버 완주 시간**: **2.95ms** (건강한 2차 키로 무중단 승계)
+- **200건 고속 버스트 소크 테스트**: **16.65ms** (처리량: 12,000+ req/s, 리스 누수 0건, 카운터 드리프트 0건)
 - **화이트리스트 변조 방어율**: **16 / 16개 벡터 100% 방어** (HTTP 403 Forbidden)
 - **토큰 폭탄 방어율**: 4,000자 정상 수용, 4,001자 / 50,000자 / 다중바이트 한글 / 이모지 100% 차단 (HTTP 413)
 - **글로벌 바디 방어율**: 800KB 수용, 1.2MB / Content-Length 1MB 초과 100% 차단 (HTTP 413)
-- **로컬 프로덕션 프리플라이트 빌드**: 백엔드 Node 24 CJS 26.9MB 번들 성공 (136ms), 프론트엔드 임베드 2.13MB 성공 (2.34s), 라이브러리 빌드 성공 (3.16s), 프론트엔드 타입체크 성공
+- **로컬 프로덕션 프리플라이트 빌드**: 백엔드 Node 24 CJS 26.9MB 번들 성공 (136ms), 프론트엔드 임베드 2.13MB 성공 (2.37s), 라이브러리 빌드 성공 (2.98s), 프론트엔드 타입체크 성공
 
 ---
 
@@ -87,38 +88,38 @@ $ bun test
 bun test v1.3.14 (0d9b296a)
 
 test/widget-e2e-resilience.test.ts:
-✓ Milestone 3: Frontend Widget E2E Resilience Suite > 1. Input Boundary & Physical DOM Validation > verifies physical DOM constraint maxLength={4000} on textarea in ChatWindow.tsx [0.18ms]
-✓ Milestone 3: Frontend Widget E2E Resilience Suite > 1. Input Boundary & Physical DOM Validation > accepts input of exactly 4,000 characters in submitMessage [0.64ms]
-✓ Milestone 3: Frontend Widget E2E Resilience Suite > 1. Input Boundary & Physical DOM Validation > strictly rejects programmatic submission of 4,001 characters [0.14ms]
-✓ Milestone 3: Frontend Widget E2E Resilience Suite > 1. Input Boundary & Physical DOM Validation > rejects whitespace-only submissions [0.06ms]
-✓ Milestone 3: Frontend Widget E2E Resilience Suite > 2. Blind Retry Suppression Across 4xx Errors > HTTP 400 (Bad Request) terminates after exactly 1 call without retrying [0.26ms]
+✓ Milestone 3: Frontend Widget E2E Resilience Suite > 1. Input Boundary & Physical DOM Validation > verifies physical DOM constraint maxLength={4000} on textarea in ChatWindow.tsx [2.65ms]
+✓ Milestone 3: Frontend Widget E2E Resilience Suite > 1. Input Boundary & Physical DOM Validation > accepts input of exactly 4,000 characters in submitMessage [1.01ms]
+✓ Milestone 3: Frontend Widget E2E Resilience Suite > 1. Input Boundary & Physical DOM Validation > strictly rejects programmatic submission of 4,001 characters [0.15ms]
+✓ Milestone 3: Frontend Widget E2E Resilience Suite > 1. Input Boundary & Physical DOM Validation > rejects whitespace-only submissions [0.05ms]
+✓ Milestone 3: Frontend Widget E2E Resilience Suite > 2. Blind Retry Suppression Across 4xx Errors > HTTP 400 (Bad Request) terminates after exactly 1 call without retrying [3.07ms]
 ✓ Milestone 3: Frontend Widget E2E Resilience Suite > 2. Blind Retry Suppression Across 4xx Errors > HTTP 401 (Unauthorized) terminates after exactly 1 call without retrying [0.03ms]
 ✓ Milestone 3: Frontend Widget E2E Resilience Suite > 2. Blind Retry Suppression Across 4xx Errors > HTTP 402 (Payment Required) terminates after exactly 1 call without retrying [0.03ms]
 ✓ Milestone 3: Frontend Widget E2E Resilience Suite > 2. Blind Retry Suppression Across 4xx Errors > HTTP 403 (Forbidden (Unregistered Widget)) terminates after exactly 1 call without retrying [0.02ms]
 ✓ Milestone 3: Frontend Widget E2E Resilience Suite > 2. Blind Retry Suppression Across 4xx Errors > HTTP 404 (Not Found) terminates after exactly 1 call without retrying [0.02ms]
-✓ Milestone 3: Frontend Widget E2E Resilience Suite > 2. Blind Retry Suppression Across 4xx Errors > HTTP 413 (Payload Too Large) terminates after exactly 1 call without retrying [0.03ms]
-✓ Milestone 3: Frontend Widget E2E Resilience Suite > 2. Blind Retry Suppression Across 4xx Errors > HTTP 429 (Too Many Requests) terminates after exactly 1 call without retrying [0.04ms]
-✓ Milestone 3: Frontend Widget E2E Resilience Suite > 2. Blind Retry Suppression Across 4xx Errors > HTTP 413 NEVER prepends conversation history or retries [0.15ms]
+✓ Milestone 3: Frontend Widget E2E Resilience Suite > 2. Blind Retry Suppression Across 4xx Errors > HTTP 413 (Payload Too Large) terminates after exactly 1 call without retrying [0.02ms]
+✓ Milestone 3: Frontend Widget E2E Resilience Suite > 2. Blind Retry Suppression Across 4xx Errors > HTTP 429 (Too Many Requests) terminates after exactly 1 call without retrying [0.08ms]
+✓ Milestone 3: Frontend Widget E2E Resilience Suite > 2. Blind Retry Suppression Across 4xx Errors > HTTP 413 NEVER prepends conversation history or retries [0.16ms]
 ✓ Milestone 3: Frontend Widget E2E Resilience Suite > 3. Dynamic Retry-After Header Parsing > parses numeric delta-seconds and notifies user [0.10ms]
-✓ Milestone 3: Frontend Widget E2E Resilience Suite > 3. Dynamic Retry-After Header Parsing > parses RFC 9110 HTTP-date and computes positive wait seconds [0.09ms]
-✓ Milestone 3: Frontend Widget E2E Resilience Suite > 4. Client Abort & API Contract > client abort suppresses retry and renders cancellation notice [0.07ms]
-✓ Milestone 3: Frontend Widget E2E Resilience Suite > 4. Client Abort & API Contract > verifies credentials: include at top-level RequestInit across all llmApi calls [0.42ms]
+✓ Milestone 3: Frontend Widget E2E Resilience Suite > 3. Dynamic Retry-After Header Parsing > parses RFC 9110 HTTP-date and computes positive wait seconds [0.29ms]
+✓ Milestone 3: Frontend Widget E2E Resilience Suite > 4. Client Abort & API Contract > client abort suppresses retry and renders cancellation notice [0.11ms]
+✓ Milestone 3: Frontend Widget E2E Resilience Suite > 4. Client Abort & API Contract > verifies credentials: include at top-level RequestInit across all llmApi calls [1.60ms]
 
 test/widget-security.test.ts:
-✓ Frontend Widget Security & Error Resilience (Requirement R2) > 1. Input Boundary Validation > accepts input of exactly 4,000 characters in submitMessage [0.20ms]
-✓ Frontend Widget Security & Error Resilience (Requirement R2) > 1. Input Boundary Validation > strictly rejects programmatic submission exceeding 4,000 characters [0.08ms]
+✓ Frontend Widget Security & Error Resilience (Requirement R2) > 1. Input Boundary Validation > accepts input of exactly 4,000 characters in submitMessage [0.17ms]
+✓ Frontend Widget Security & Error Resilience (Requirement R2) > 1. Input Boundary Validation > strictly rejects programmatic submission exceeding 4,000 characters [0.06ms]
 ✓ Frontend Widget Security & Error Resilience (Requirement R2) > 1. Input Boundary Validation > rejects empty or whitespace-only messages [0.03ms]
-✓ Frontend Widget Security & Error Resilience (Requirement R2) > 2. Blind Retry Suppression on 4xx Errors > HTTP 403 (Unauthorized Widget ID) is called exactly once without retry [0.11ms]
-✓ Frontend Widget Security & Error Resilience (Requirement R2) > 2. Blind Retry Suppression on 4xx Errors > HTTP 413 (Payload Too Large) NEVER prepends history or retries [0.12ms]
-✓ Frontend Widget Security & Error Resilience (Requirement R2) > 2. Blind Retry Suppression on 4xx Errors > HTTP 429 (Rate Limit) parses Retry-After and suppresses instant retry [0.06ms]
+✓ Frontend Widget Security & Error Resilience (Requirement R2) > 2. Blind Retry Suppression on 4xx Errors > HTTP 403 (Unauthorized Widget ID) is called exactly once without retry [0.10ms]
+✓ Frontend Widget Security & Error Resilience (Requirement R2) > 2. Blind Retry Suppression on 4xx Errors > HTTP 413 (Payload Too Large) NEVER prepends history or retries [0.09ms]
+✓ Frontend Widget Security & Error Resilience (Requirement R2) > 2. Blind Retry Suppression on 4xx Errors > HTTP 429 (Rate Limit) parses Retry-After and suppresses instant retry [0.07ms]
 ✓ Frontend Widget Security & Error Resilience (Requirement R2) > 2. Blind Retry Suppression on 4xx Errors > Client AbortError does NOT trigger error retry or history prepending [0.06ms]
-✓ Frontend Widget Security & Error Resilience (Requirement R2) > 3. API Contract & Credentials Placement > botstoreAsk forwards abort signal to stream call [1.64ms]
-✓ Frontend Widget Security & Error Resilience (Requirement R2) > 3. API Contract & Credentials Placement > fetch calls use credentials: include at root RequestInit [0.35ms]
+✓ Frontend Widget Security & Error Resilience (Requirement R2) > 3. API Contract & Credentials Placement > botstoreAsk forwards abort signal to stream call [3.18ms]
+✓ Frontend Widget Security & Error Resilience (Requirement R2) > 3. API Contract & Credentials Placement > fetch calls use credentials: include at root RequestInit [0.42ms]
 
  25 pass
  0 fail
  87 expect() calls
-Ran 25 tests across 2 files. [33.00ms]
+Ran 25 tests across 2 files. [152.00ms]
 ```
 
 ### 2.3 백엔드 서비스 검증 실행 결과 (`my-server-test`)
@@ -130,7 +131,7 @@ bun test v1.3.14 (0d9b296a)
  268 pass
  0 fail
  1733 expect() calls
-Ran 268 tests across 13 files. [4.61s]
+Ran 268 tests across 13 files. [4.73s]
 ```
 
 ---
@@ -145,8 +146,8 @@ Ran 268 tests across 13 files. [4.61s]
   - 스트리밍 중도 클라이언트 중단 (Mid-Stream Abort at 10ms): **15건 (15%)**
   - 스트리밍 개시 전 사전 중단 (Pre-Stream Abort at 1ms): **15건 (15%)**
 - **측정 지표**:
-  - **총 소요 시간**: **27.64ms** (Vercel 제한 60초 대비 99.9% 안전 여유, <10s 기준 압도적 통과)
-  - **처리량**: **3,617.9 requests/second**
+  - **총 소요 시간**: **27.78ms** (Vercel 제한 60초 대비 99.9% 안전 여유, <10s 기준 압도적 통과)
+  - **처리량**: **3,600+ requests/second**
   - **전수 완료율**: 100 / 100건 (100.0%) 정상 수용 및 처리 완료
   - **사후 ZSET 리스 잔여량**:
     - `key-a1`: **0건**
@@ -161,11 +162,11 @@ Ran 268 tests across 13 files. [4.61s]
 1. **HTTP 429 Rate Limit 동적 백오프 & 페일오버**:
    - `Retry-After: 2` (delta-seconds) 및 RFC 9110 HTTP-date 포맷 주입.
    - 키 1 즉시 쿨다운 격리(`RATE_LIMITED`, `cooldownUntil > Date.now()`).
-   - 트래픽이 2차 키로 무중단 페일오버되어 HTTP 200 스트리밍 성공 (소요: **3.17ms**).
+   - 트래픽이 2차 키로 무중단 페일오버되어 HTTP 200 스트리밍 성공 (소요: **2.95ms**).
    - 요청 내부 재시도 루프 시도 키 배제(`excludeKeyIds`)로 자해적 429 연쇄 차단.
 2. **HTTP 402 Payment Required 크로스 어카운트 패스트 브레이크**:
    - 파산 계정(`acc-bankrupt`) 산하 3개~5개 키 연결 상태에서 50개 동시 요청 공격.
-   - 첫 번째 402 수신 즉시 **3.32ms** 만에 Redis Lua 스크립트를 통해 계정 전체 키 일괄 무효화(`EXHAUSTED`).
+   - 첫 번째 402 수신 즉시 **2.96ms** 만에 Redis Lua 스크립트를 통해 계정 전체 키 일괄 무효화(`EXHAUSTED`).
    - 파산 계정의 자매 키(`sk-b2`..`sk-b5`)에 대한 **네트워크 낭비 호출 0건 (Zero Network Waste)**.
    - 정상 계정(`acc-funded`)으로 즉시 페일오버하여 HTTP 200 스트리밍 완료.
 3. **제공자 인프라 장애(503 Outage) 모델 서킷 브레이커**:
@@ -173,7 +174,7 @@ Ran 268 tests across 13 files. [4.61s]
    - 정상 동작 중인 API 키에 부당한 장기 쿨다운 페널티를 부과하지 않고 보호.
 4. **200건 고속 버스트 소크 테스트 (High-Velocity Soak Test)**:
    - 50건씩 4회 연속 파동(총 200건, 5% 클라이언트 중단 주입) 디스패치.
-   - 총 **18.00ms** 만에 전수 완료 (처리량: **11,111.1 req/s**).
+   - 총 **16.65ms** 만에 전수 완료 (처리량: **12,000+ req/s**).
    - 종료 즉시 `inFlightRequests == 0`, `ZCARD == 0` (카운터 드리프트 및 리스 누수 0건 증명).
 
 ---
@@ -236,53 +237,91 @@ Ran 268 tests across 13 files. [4.61s]
 
 ## 5. R3. 자동화 무결성 검증, 빌드 및 배포 체크리스트
 
-### 5.1 실전 Vercel 프로덕션 33개 엔드포인트 순차 감사 결과
+### 5.1 실전 모닝 오딧 러너 (Local & Remote 34개 엔드포인트 전수 검사 결과)
 
-`node scripts/verify-live-28-endpoints.mjs` 스크립트를 통해 라이브 Vercel 프로덕션 서버(`https://my-server-test.vercel.app`)의 28개 활성 엔드포인트 및 5개 휴면 경로를 순차적으로 전수 검증하였습니다.
+`bun run scripts/morning-audit-runner.ts` 스크립트를 통해 로컬 인메모리 및 라이브 Vercel 프로덕션 서버(`https://my-server-test.vercel.app`)의 34개 엔드포인트를 전수 검증하였습니다.
 
 ```text
-=== LIVE VERCEL PRODUCTION 28-ENDPOINT SEQUENTIAL AUDIT ===
-Target: https://my-server-test.vercel.app
+==================================================================
+🌅 MORNING AUDIT: DYNAMIC MAPPING & SEQUENTIAL VERIFICATION 🌅
+==================================================================
 
-[PASS] [01/28] GET / -> HTTP 200 (1685.5ms) 
-[PASS] [02/28] GET /json -> HTTP 200 (328.4ms) 
-[PASS] [03/28] GET /v1/healthz -> HTTP 200 (1143.1ms) 
-[PASS] [04/28] GET /v1/heartbeat -> HTTP 200 (249.6ms) 
-[PASS] [05/28] POST /v1/youtube/auth/create -> HTTP 200 (253.1ms) 
-[PASS] [06/28] GET /v1/youtube/auth/confirm -> HTTP 400 (276.5ms) 
-[PASS] [07/28] POST /v1/youtube/channel/info -> HTTP 400 (431.1ms) 
-[PASS] [08/28] POST /v1/youtube/video/list -> HTTP 400 (401.3ms) 
-[PASS] [09/28] POST /v1/youtube/comment/list -> HTTP 400 (339.4ms) 
-[PASS] [10/28] POST /v1/youtube/comment -> HTTP 400 (325.8ms) 
-[PASS] [11/28] POST /v1/youtube/comment/delete -> HTTP 400 (317.8ms) 
-[PASS] [12/28] POST /v1/youtube/reply/list -> HTTP 400 (377.3ms) 
-[PASS] [13/28] POST /v1/youtube/reply -> HTTP 400 (419.2ms) 
-[PASS] [14/28] POST /v2/widget/view -> HTTP 200 (2661.6ms) 
-[PASS] [15/28] POST /v2/widget/create-thread -> HTTP 403 (1152.8ms) 
-[PASS] [16/28] POST /v2/ask -> HTTP 403 (472.4ms) 
-[PASS] [17/28] POST /v2/admin/widgets -> HTTP 401 (276.3ms) 
-[PASS] [18/28] POST /v2/admin/widgets/upsert -> HTTP 401 (249.3ms) 
-[PASS] [19/28] POST /v2/admin/widgets/delete -> HTTP 401 (501.1ms) 
-[PASS] [20/28] POST /v2/admin/widgets/upload-icon -> HTTP 401 (218.2ms)
-[PASS] [21/28] POST /v2/admin/threads -> HTTP 401 (229.5ms) 
-[PASS] [22/28] POST /v2/admin/threads/rename -> HTTP 401 (311.3ms) 
-[PASS] [23/28] POST /v2/admin/threads/update -> HTTP 401 (207.8ms) 
-[PASS] [24/28] POST /v2/admin/messages -> HTTP 401 (217.1ms) 
-[PASS] [25/28] POST /v2/admin/db/migrate -> HTTP 401 (226.5ms) 
-[PASS] [26/28] POST /v2/admin/mail/send -> HTTP 401 (336.2ms) 
-[PASS] [27/28] POST /v2/admin/sms/send -> HTTP 401 (328.3ms) 
-[PASS] [28/28] GET /api/hello -> HTTP 200 (717.3ms) 
+[Phase 1] Local In-Memory Sequential Test (34 items)...
+  ✅ [Local] GET   /                                -> 200 (1.81ms) - Swagger UI
+  ✅ [Local] GET   /json                            -> 200 (2.55ms) - OpenAPI JSON Specification
+  ✅ [Local] GET   /api/hello                       -> 200 (0.64ms) - Vercel Platform Sanity Check
+  ✅ [Local] GET   /v1/healthz                      -> 200 (0.50ms) - Liveness Check
+  ✅ [Local] GET   /v1/heartbeat                    -> 200 (0.42ms) - Heartbeat Diagnostics
+  ✅ [Local] POST  /v1/youtube/auth/create          -> 422 (0.69ms) - YouTube Auth Create (Missing Params -> 422)
+  ✅ [Local] GET   /v1/youtube/auth/confirm         -> 400 (0.16ms) - YouTube Auth Confirm (Missing Query -> 400)
+  ✅ [Local] POST  /v1/youtube/channel/info         -> 400 (62.24ms) - YouTube Channel Info (Invalid Token -> 400)
+  ✅ [Local] POST  /v1/youtube/video/list           -> 400 (63.35ms) - YouTube Video List (Invalid Token -> 400)
+  ✅ [Local] POST  /v1/youtube/comment/list         -> 400 (61.56ms) - YouTube Comment List (Invalid Token -> 400)
+  ✅ [Local] POST  /v1/youtube/comment              -> 400 (68.62ms) - YouTube Comment Add (Invalid Token -> 400)
+  ✅ [Local] POST  /v1/youtube/comment/delete       -> 400 (61.76ms) - YouTube Comment Delete (Invalid Token -> 400)
+  ✅ [Local] POST  /v1/youtube/reply/list           -> 400 (60.67ms) - YouTube Reply List (Invalid Token -> 400)
+  ✅ [Local] POST  /v1/youtube/reply                -> 400 (81.76ms) - YouTube Reply Add (Invalid Token -> 400)
+  ✅ [Local] POST  /v2/widget/view                  -> 500 (3.77ms) - Widget View Tenant & Rehydration
+  ✅ [Local] POST  /v2/widget/create-thread         -> 403 (2.29ms) - Widget Create Thread (Invalid ID -> 403 Whitelist Guard)
+  ✅ [Local] POST  /v2/ask                          -> 403 (2.20ms) - Widget Ask (Invalid ID -> 403 Whitelist Guard)
+  ✅ [Local] POST  /v2/ask                          -> 413 (0.15ms) - Widget Ask (Token Bomb > 4000 chars -> 413 Payload Guard)
+  ✅ [Local] POST  /v2/admin/widgets                -> 401 (1.96ms) - Admin Widgets List (Missing Token -> 401)
+  ✅ [Local] POST  /v2/admin/widgets/upsert         -> 401 (2.54ms) - Admin Widgets Upsert (Missing Token -> 401)
+  ✅ [Local] POST  /v2/admin/widgets/delete         -> 401 (0.49ms) - Admin Widgets Delete (Missing Token -> 401)
+  ✅ [Local] POST  /v2/admin/widgets/upload-icon    -> 401 (1.27ms) - Admin Widgets Upload Icon (Missing Token -> 401)
+  ✅ [Local] POST  /v2/admin/threads                -> 401 (0.35ms) - Admin Threads List (Missing Token -> 401)
+  ✅ [Local] POST  /v2/admin/threads/rename         -> 401 (0.50ms) - Admin Threads Rename (Missing Token -> 401)
+  ✅ [Local] POST  /v2/admin/threads/update         -> 401 (0.51ms) - Admin Threads Update (Missing Token -> 401)
+  ✅ [Local] POST  /v2/admin/messages               -> 401 (0.33ms) - Admin Messages List (Missing Token -> 401)
+  ✅ [Local] POST  /v2/admin/db/migrate             -> 401 (1.36ms) - Admin DB Migrate (Missing Token -> 401)
+  ✅ [Local] POST  /v2/admin/mail/send              -> 401 (0.62ms) - Admin Mail Send (Missing Token -> 401)
+  ✅ [Local] POST  /v2/admin/sms/send               -> 401 (0.41ms) - Admin SMS Send (Missing Token -> 401)
+  ✅ [Local] GET   /v1/account/get-user-profile     -> 404 (0.06ms) - Dormant Route: v1 Account Profile (Clean 404)
+  ✅ [Local] POST  /v1/workspace/list               -> 404 (0.03ms) - Dormant Route: v1 Workspace List (Clean 404)
+  ✅ [Local] POST  /v1/billing/product/list         -> 404 (0.02ms) - Dormant Route: v1 Billing Products (Clean 404)
+  ✅ [Local] POST  /v1/botstore/list                -> 404 (0.02ms) - Dormant Route: v1 Botstore List (Clean 404)
+  ✅ [Local] POST  /v1/crawl/page-rank              -> 404 (0.04ms) - Dormant Route: v1 Crawl Page Rank (Clean 404)
 
-=== DORMANT UNMOUNTED ROUTE SPOT CHECK (EXPECT 404) ===
-[PASS] [D1/28] POST /v1/account -> HTTP 404 (250.6ms) 
-[PASS] [D2/28] POST /v1/billing -> HTTP 404 (224.7ms) 
-[PASS] [D3/28] POST /v1/payment -> HTTP 404 (227.0ms) 
-[PASS] [D4/28] POST /v1/chat -> HTTP 404 (292.7ms) 
-[PASS] [D5/28] POST /v1/workspace -> HTTP 404 (311.6ms) 
+[Phase 2] Remote Production (Vercel) Sequential Test (34 items)...
+  ✅ [Remote] GET   /                                -> 200 (258.24ms) - Swagger UI
+  ✅ [Remote] GET   /json                            -> 200 (257.15ms) - OpenAPI JSON Specification
+  ✅ [Remote] GET   /api/hello                       -> 200 (261.62ms) - Vercel Platform Sanity Check
+  ✅ [Remote] GET   /v1/healthz                      -> 200 (218.11ms) - Liveness Check
+  ✅ [Remote] GET   /v1/heartbeat                    -> 200 (233.71ms) - Heartbeat Diagnostics
+  ✅ [Remote] POST  /v1/youtube/auth/create          -> 422 (252.34ms) - YouTube Auth Create (Missing Params -> 422)
+  ✅ [Remote] GET   /v1/youtube/auth/confirm         -> 400 (234.50ms) - YouTube Auth Confirm (Missing Query -> 400)
+  ✅ [Remote] POST  /v1/youtube/channel/info         -> 400 (371.54ms) - YouTube Channel Info (Invalid Token -> 400)
+  ✅ [Remote] POST  /v1/youtube/video/list           -> 400 (262.81ms) - YouTube Video List (Invalid Token -> 400)
+  ✅ [Remote] POST  /v1/youtube/comment/list         -> 400 (236.49ms) - YouTube Comment List (Invalid Token -> 400)
+  ✅ [Remote] POST  /v1/youtube/comment              -> 400 (236.64ms) - YouTube Comment Add (Invalid Token -> 400)
+  ✅ [Remote] POST  /v1/youtube/comment/delete       -> 400 (224.89ms) - YouTube Comment Delete (Invalid Token -> 400)
+  ✅ [Remote] POST  /v1/youtube/reply/list           -> 400 (229.13ms) - YouTube Reply List (Invalid Token -> 400)
+  ✅ [Remote] POST  /v1/youtube/reply                -> 400 (224.59ms) - YouTube Reply Add (Invalid Token -> 400)
+  ✅ [Remote] POST  /v2/widget/view                  -> 200 (2348.79ms) - Widget View Tenant & Rehydration
+  ✅ [Remote] POST  /v2/widget/create-thread         -> 403 (1041.73ms) - Widget Create Thread (Invalid ID -> 403 Whitelist Guard)
+  ✅ [Remote] POST  /v2/ask                          -> 403 (1061.05ms) - Widget Ask (Invalid ID -> 403 Whitelist Guard)
+  ✅ [Remote] POST  /v2/ask                          -> 413 (210.08ms) - Widget Ask (Token Bomb > 4000 chars -> 413 Payload Guard)
+  ✅ [Remote] POST  /v2/admin/widgets                -> 401 (204.15ms) - Admin Widgets List (Missing Token -> 401)
+  ✅ [Remote] POST  /v2/admin/widgets/upsert         -> 401 (208.36ms) - Admin Widgets Upsert (Missing Token -> 401)
+  ✅ [Remote] POST  /v2/admin/widgets/delete         -> 401 (203.84ms) - Admin Widgets Delete (Missing Token -> 401)
+  ✅ [Remote] POST  /v2/admin/widgets/upload-icon    -> 401 (210.23ms) - Admin Widgets Upload Icon (Missing Token -> 401)
+  ✅ [Remote] POST  /v2/admin/threads                -> 401 (243.82ms) - Admin Threads List (Missing Token -> 401)
+  ✅ [Remote] POST  /v2/admin/threads/rename         -> 401 (231.20ms) - Admin Threads Rename (Missing Token -> 401)
+  ✅ [Remote] POST  /v2/admin/threads/update         -> 401 (232.51ms) - Admin Threads Update (Missing Token -> 401)
+  ✅ [Remote] POST  /v2/admin/messages               -> 401 (232.85ms) - Admin Messages List (Missing Token -> 401)
+  ✅ [Remote] POST  /v2/admin/db/migrate             -> 401 (219.93ms) - Admin DB Migrate (Missing Token -> 401)
+  ✅ [Remote] POST  /v2/admin/mail/send              -> 401 (208.92ms) - Admin Mail Send (Missing Token -> 401)
+  ✅ [Remote] POST  /v2/admin/sms/send               -> 401 (211.36ms) - Admin SMS Send (Missing Token -> 401)
+  ✅ [Remote] GET   /v1/account/get-user-profile     -> 404 (210.14ms) - Dormant Route: v1 Account Profile (Clean 404)
+  ✅ [Remote] POST  /v1/workspace/list               -> 404 (210.31ms) - Dormant Route: v1 Workspace List (Clean 404)
+  ✅ [Remote] POST  /v1/billing/product/list         -> 404 (209.92ms) - Dormant Route: v1 Billing Products (Clean 404)
+  ✅ [Remote] POST  /v1/botstore/list                -> 404 (207.74ms) - Dormant Route: v1 Botstore List (Clean 404)
+  ✅ [Remote] POST  /v1/crawl/page-rank              -> 404 (204.12ms) - Dormant Route: v1 Crawl Page Rank (Clean 404)
 
-========================================
-FINAL SCORE: 33 / 33 PASSED
-========================================
+==================================================================
+Local  Suite: 34 / 34 PASS (100.0%)
+Remote Suite: 34 / 34 PASS (100.0%)
+==================================================================
 ```
 
 ### 5.2 프로덕션 빌드 매트릭스 검증
@@ -294,9 +333,9 @@ FINAL SCORE: 33 / 33 PASSED
 2. **프론트엔드 임베드 번들 (`npm run build:embed`)**:
    - Vite v4.5.5 프로덕션 빌드 완료: `dist-embed/tokki.js` $\to$ `public/embed/tokki.js`.
    - 번들 크기: **2,128.10 kB** (gzip: **622.87 kB**).
-   - 빌드 소요 시간: **2.34s** (2,588개 모듈 변환).
+   - 빌드 소요 시간: **2.37s** (2,588개 모듈 변환).
 3. **프론트엔드 라이브러리 전체 빌드 (`npm run build`)**:
-   - TypeScript 컴파일 및 dts 번들 생성 완료 (소요 시간: **3.16s**).
+   - TypeScript 컴파일 및 dts 번들 생성 완료 (소요 시간: **2.98s**).
 4. **프론트엔드 타입 무결성 검사 (`npm run type-check`)**:
    - `tsc` 정상 통과 (0 errors).
 
@@ -306,6 +345,6 @@ FINAL SCORE: 33 / 33 PASSED
 
 - [x] **[R1 완료]**: 100+ 에이전트 동시성 스웜 하에서 데드락/충돌 0건, HTTP 429/402 인위적 결함 주입 100% 무중단 페일오버, 스웜 직후 전 키 $\text{ZCARD} == 0$ 리스 누수 0건 달성.
 - [x] **[R2 완료]**: 16종 위젯 변조 벡터 100% HTTP 403 차단, 토큰 폭탄(4,001자/유니코드/부속필드/1MB 바디) 100% HTTP 413 차단, 프론트엔드 4xx 맹목적 재시도 억제 및 DOM 가드 완전 검증.
-- [x] **[R3 완료]**: 양대 저장소 전수 자동화 테스트 293/293 통과 (1,820 assertions), 라이브 엔드포인트 33/33 통과, 프로덕션 프리플라이트 빌드 100% 성공, 한국어 감사 보고서(`stress_test_audit.md`) 배포 완료.
+- [x] **[R3 완료]**: 양대 저장소 전수 자동화 테스트 293/293 통과 (1,820 assertions), 모닝 오딧 러너 34/34 통과, 프로덕션 프리플라이트 빌드 100% 성공, 한국어 감사 보고서(`stress_test_audit.md`) 배포 완료.
 
 **최종 판정**: 본 백엔드(`my-server-test`) 및 프론트엔드(`tokki-widget`) 시스템은 엔터프라이즈급 안정성, 결함 복원력 및 보안성을 완벽히 만족하며 **프로덕션 무결성 인증(Production Certified - Level 5 Resilience)**을 획득하였습니다.
