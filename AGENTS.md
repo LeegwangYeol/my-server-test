@@ -162,6 +162,10 @@ curl -s https://my-server-test.vercel.app/v1/heartbeat        # → {"status":"a
 
 🔒 = `x-admin-token` 헤더 필수 (7번 절 참고). 토큰 없거나 불일치 → `{success:false, error:"unauthorized"}`.
 
+> **사용자에게 메일 보내기(에이전트용)**: HTTP 엔드포인트 대신 로컬 스크립트가 정석 경로다. 토큰이 필요 없고 자격증명은 `.env` 안에만 머문다.
+> `npm run mail:send -- --subject "제목" --text "본문"` (`--to` 생략 시 계정 주인 = 사용자 본인. 긴 본문은 `--text-file <path>`, stdin은 `--text-file -`).
+> 출력은 JSON 한 줄, exit 0=발송 / 1=설정·SMTP 오류 / 2=수신 거부. 다른 프로젝트의 세션은 사용자 레벨 스킬 `mail-me`(`~/.claude/skills/mail-me`)로 같은 스크립트를 호출한다.
+
 > 명절 인사 등 **일괄 SMS 발송은 이 HTTP 엔드포인트가 아니라 `test/sms-local/send-greetings.ts`를 로컬에서 직접 실행**하는 게 정석 경로다(9번 절). Vercel 배포와 무관하게 동작한다.
 
 **검증 시 기대 응답:** valid 입력 → 200, 입력 누락 → 422(Elysia validation), 미존재 경로 → 404, admin 토큰 누락 → `success:false`. `/v1/youtube/auth/confirm`은 에러 시 **400 + `{success:false, message}`** (200 schema와 분리하려고 `set.status=400` 명시함 — 빼면 422 validation wrapper로 깨짐).

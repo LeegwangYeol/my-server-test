@@ -102,7 +102,30 @@ import {
   executeWithFallback,
   mailFallbackQueue,
   type FallbackJob,
-} from "../queue/fallback-queue";
+} from "../queue/fallback-queue.ts";
+
+// INFO : nodemailer reports Naver's refusals as bare SMTP codes; this maps the common
+//   ones to the account-side setting that fixes them and keeps the original text.
+function explainSmtpError(err: unknown): Error {
+  const e = err as { code?: string; responseCode?: number; message?: string };
+  const raw = e?.message ?? String(err);
+  let hint = "";
+  if (e?.code === "EAUTH" || e?.responseCode === 535) {
+    hint =
+      "네이버 로그인 거부 — 메일 > 환경설정 > POP3/IMAP 설정에서 'IMAP/SMTP 사용'을 켜고, " +
+      "2단계 인증 계정이면 애플리케이션 비밀번호를 NAVER_MAIL_PASSWORD 에 넣으세요. " +
+      "해외 서버(Vercel)에서 실패하면 해외 로그인 차단도 확인하세요.";
+  } else if (
+    e?.code === "ETIMEDOUT" ||
+    e?.code === "ECONNECTION" ||
+    e?.code === "ESOCKET"
+  ) {
+    hint = `${SMTP_HOST}:${SMTP_PORT} 연결 실패 — 네트워크 또는 465 포트 차단 확인.`;
+  } else if (e?.responseCode === 553 || e?.responseCode === 554) {
+    hint = "보낸 주소 거부 — from 주소는 NAVER_MAIL_USER 와 같아야 합니다.";
+  }
+  return new Error(hint ? `${hint} (${raw})` : raw);
+}
 
 export interface SendMailInput {
   to: string | string[];
@@ -193,7 +216,7 @@ export async function sendNaverMail(
     resetTransporterCache();
     const message = err instanceof Error ? err.message : String(err);
     console.error("[lib/mail/naver] sendNaverMail error:", message);
-    throw err;
+    throw explainSmtpError(err);
   }
 }
 

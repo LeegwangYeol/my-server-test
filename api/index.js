@@ -714941,6 +714941,19 @@ function resetTransporterCache() {
     cached = null;
   }
 }
+function explainSmtpError(err) {
+  const e = err;
+  const raw = e?.message ?? String(err);
+  let hint = "";
+  if (e?.code === "EAUTH" || e?.responseCode === 535) {
+    hint = "\uB124\uC774\uBC84 \uB85C\uADF8\uC778 \uAC70\uBD80 \u2014 \uBA54\uC77C > \uD658\uACBD\uC124\uC815 > POP3/IMAP \uC124\uC815\uC5D0\uC11C 'IMAP/SMTP \uC0AC\uC6A9'\uC744 \uCF1C\uACE0, 2\uB2E8\uACC4 \uC778\uC99D \uACC4\uC815\uC774\uBA74 \uC560\uD50C\uB9AC\uCF00\uC774\uC158 \uBE44\uBC00\uBC88\uD638\uB97C NAVER_MAIL_PASSWORD \uC5D0 \uB123\uC73C\uC138\uC694. \uD574\uC678 \uC11C\uBC84(Vercel)\uC5D0\uC11C \uC2E4\uD328\uD558\uBA74 \uD574\uC678 \uB85C\uADF8\uC778 \uCC28\uB2E8\uB3C4 \uD655\uC778\uD558\uC138\uC694.";
+  } else if (e?.code === "ETIMEDOUT" || e?.code === "ECONNECTION" || e?.code === "ESOCKET") {
+    hint = `${SMTP_HOST}:${SMTP_PORT} \uC5F0\uACB0 \uC2E4\uD328 \u2014 \uB124\uD2B8\uC6CC\uD06C \uB610\uB294 465 \uD3EC\uD2B8 \uCC28\uB2E8 \uD655\uC778.`;
+  } else if (e?.responseCode === 553 || e?.responseCode === 554) {
+    hint = "\uBCF4\uB0B8 \uC8FC\uC18C \uAC70\uBD80 \u2014 from \uC8FC\uC18C\uB294 NAVER_MAIL_USER \uC640 \uAC19\uC544\uC57C \uD569\uB2C8\uB2E4.";
+  }
+  return new Error(hint ? `${hint} (${raw})` : raw);
+}
 function isNaverMailConfigured() {
   const { user, pass } = resolveCreds();
   return Boolean(user && pass);
@@ -714999,7 +715012,7 @@ async function sendNaverMail(input, options) {
     resetTransporterCache();
     const message = err instanceof Error ? err.message : String(err);
     console.error("[lib/mail/naver] sendNaverMail error:", message);
-    throw err;
+    throw explainSmtpError(err);
   }
 }
 

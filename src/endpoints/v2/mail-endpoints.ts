@@ -6,10 +6,10 @@ import { isNaverMailConfigured, sendNaverMail } from "../../../lib/mail/naver";
  *
  *   POST /v2/admin/mail/send  → send an email through smtp.naver.com
  *
- * Auth: shared secret in the `X-Admin-Token` header matching the ADMIN_TOKEN
- * env var, the same scheme as /v2/admin/db/migrate. Sending mail is an
- * abusable capability (open-relay / spam), so the endpoint is fail-closed:
- * when ADMIN_TOKEN is unset it refuses to run.
+ * Auth: shared secret in the `X-Admin-Token` header matching MAIL_SEND_TOKEN
+ * (mail-only) or ADMIN_TOKEN (full admin). Sending mail is an abusable
+ * capability (open-relay / spam), so the endpoint is fail-closed: when
+ * neither token is set it refuses to run.
  */
 import { timingSafeMatch } from "./widget-endpoints";
 

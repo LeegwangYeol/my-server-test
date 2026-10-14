@@ -11,6 +11,7 @@
     "start": "NODE_ENV=production node dist/index.js",
     "test": "bun test",
     "mail:test": "node --env-file=.env scripts/send-test-mail.ts",
+    "mail:send": "node --no-warnings --env-file=.env scripts/send-mail.ts",
     "greetings": "node --env-file=.env test/sms-local/send-greetings.ts",
     "widget:upsert": "node --env-file=.env scripts/upsert-widget.ts",
     "sms:usage": "node --env-file=.env test/sms-local/sms-usage.ts",
