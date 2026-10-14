@@ -3,10 +3,10 @@
 
 ---
 
-**문서 번호 (Document ID)**: AUDIT-TOKKI-CHAOS-20261014  
-**문서 버전 (Document Version)**: 5.4.0-PROD-KO  
+**문서 번호 (Document ID)**: AUDIT-TOKKI-CHAOS-20261015  
+**문서 버전 (Document Version)**: 5.5.0-PROD-KO  
 **보안 등급 (Classification)**: 엔터프라이즈 프로덕션 보안 및 성능 감사 (Enterprise Production Security & Performance Audit)  
-**감사 일시 (Audit Date)**: 2026-10-14T03:07:00+09:00  
+**감사 일시 (Audit Date)**: 2026-10-15T03:07:00+09:00  
 **대상 환경 (Target Environments)**:  
 - **프론트엔드 클라이언트**: `/Users/user/src/tokki-widget` (React 18 / Preact, Tailwind CSS, Vite Embed)  
 - **백엔드 API**: `/Users/user/src/my-server-test` (Elysia, Bun, Node 24.x, Upstash Redis ZSETs)  
@@ -21,7 +21,7 @@
 
 ## 1. 경영진 요약 (Executive Summary)
 
-본 감사 보고서는 **토끼 위젯(Tokki Widget)** 및 해당 위젯의 백엔드 서비스인 **Vercel 서버리스 백엔드(`my-server-test`)**에 대해 정기 스케줄 주기(2026-10-14)에 따라 실행된 대규모 카오스 동시성 스트레스 테스트, 429/402 결함 주입 페일오버 검증, 적대적 보안 침투 감사, 그리고 프로덕션 배포 무결성을 공식 검증한 결과를 기록합니다.
+본 감사 보고서는 **토끼 위젯(Tokki Widget)** 및 해당 위젯의 백엔드 서비스인 **Vercel 서버리스 백엔드(`my-server-test`)**에 대해 정기 스케줄 주기(2026-10-15)에 따라 실행된 대규모 카오스 동시성 스트레스 테스트, 429/402 결함 주입 페일오버 검증, 적대적 보안 침투 감사, 그리고 프로덕션 배포 무결성을 공식 검증한 결과를 기록합니다.
 
 본 시스템은 분산 API 키 로테이션, Upstash Redis ZSET 기반의 자가 정리형 동시성 세마포어 리스, 서드파티 429 폴백 큐(Queue) 및 재시도 지수 백오프, 엄격한 적대적 경계 가드(화이트리스트 403, 토큰 폭탄 413, 1MB 바디 제한, 타이밍 공격 방어)를 통해 극한의 트래픽과 악의적 공격 하에서도 100%의 가용성과 결함 복원력을 보장합니다.
 
@@ -42,14 +42,14 @@
 - **엔드포인트 순차 감사 (Morning Audit Runner)**: **34 / 34개 엔드포인트 100% PASS** (로컬 34/34 PASS, 원격 Vercel 34/34 PASS, 0 FAIL)
 - **라이브 28개 엔드포인트 스크립트 검증**: **33 / 33개 엔드포인트 100% PASS** (28 활성 엔드포인트 + 5 휴면 경로 점검)
 - **최종 ZSET 동시성 리스 잔여량**: **0건** (모든 키에 대해 $\text{ZCARD} == 0$)
-- **100-Agent 동시성 스웜 소요 시간**: **25.53ms** (Vercel 제한 60초 대비 99.9% 안전 여유, <10s 기준 압도적 달성)
-- **HTTP 402 계정 간 패스트 브레이크 지연**: **2.94ms** (예산 기준 <5ms 대비 안전 여유 달성, 자매 키 낭비 호출 0건)
-- **HTTP 429 페일오버 완주 시간**: **3.17ms** (건강한 2차 키로 무중단 승계)
-- **200건 고속 버스트 소크 테스트**: **16.99ms** (처리량: 11,000+ req/s, 리스 누수 0건, 카운터 드리프트 0건)
+- **100-Agent 동시성 스웜 소요 시간**: **24.73ms** (Vercel 제한 60초 대비 99.9% 안전 여유, <10s 기준 압도적 달성)
+- **HTTP 402 계정 간 패스트 브레이크 지연**: **4.16ms** (예산 기준 <5ms 대비 안전 여유 달성, 자매 키 낭비 호출 0건)
+- **HTTP 429 페일오버 완주 시간**: **3.18ms** (건강한 2차 키로 무중단 승계)
+- **200건 고속 버스트 소크 테스트**: **17.36ms** (처리량: 11,000+ req/s, 리스 누수 0건, 카운터 드리프트 0건)
 - **화이트리스트 변조 방어율**: **16 / 16개 벡터 100% 방어** (HTTP 403 Forbidden)
 - **토큰 폭탄 방어율**: 4,000자 정상 수용, 4,001자 / 50,000자 / 다중바이트 한글 / 이모지 100% 차단 (HTTP 413)
 - **글로벌 바디 방어율**: 800KB 수용, 1.2MB / Content-Length 1MB 초과 100% 차단 (HTTP 413)
-- **로컬 프로덕션 프리플라이트 빌드**: 백엔드 Node 24 CJS 26.9MB 번들 성공 (133ms), 프론트엔드 임베드 2.13MB 성공 (2.32s), 라이브러리 빌드 성공 (3.09s), 프론트엔드 타입체크 성공 (0 errors)
+- **로컬 프로덕션 프리플라이트 빌드**: 백엔드 Node 24 CJS 26.9MB 번들 성공 (154ms), 프론트엔드 임베드 2.13MB 성공 (2.31s), 라이브러리 빌드 성공 (3.12s), 프론트엔드 타입체크 성공 (0 errors)
 
 ---
 
@@ -250,76 +250,76 @@ Ran 268 tests across 13 files. [5.16s]
 ==================================================================
 
 [Phase 1] Local In-Memory Sequential Test (34 items)...
-  ✅ [Local] GET   /                                -> 200 (1.81ms) - Swagger UI
-  ✅ [Local] GET   /json                            -> 200 (2.55ms) - OpenAPI JSON Specification
-  ✅ [Local] GET   /api/hello                       -> 200 (0.64ms) - Vercel Platform Sanity Check
-  ✅ [Local] GET   /v1/healthz                      -> 200 (0.50ms) - Liveness Check
+  ✅ [Local] GET   /                                -> 200 (1.67ms) - Swagger UI
+  ✅ [Local] GET   /json                            -> 200 (2.59ms) - OpenAPI JSON Specification
+  ✅ [Local] GET   /api/hello                       -> 200 (0.75ms) - Vercel Platform Sanity Check
+  ✅ [Local] GET   /v1/healthz                      -> 200 (0.49ms) - Liveness Check
   ✅ [Local] GET   /v1/heartbeat                    -> 200 (0.42ms) - Heartbeat Diagnostics
-  ✅ [Local] POST  /v1/youtube/auth/create          -> 422 (0.69ms) - YouTube Auth Create (Missing Params -> 422)
-  ✅ [Local] GET   /v1/youtube/auth/confirm         -> 400 (0.16ms) - YouTube Auth Confirm (Missing Query -> 400)
-  ✅ [Local] POST  /v1/youtube/channel/info         -> 400 (62.24ms) - YouTube Channel Info (Invalid Token -> 400)
-  ✅ [Local] POST  /v1/youtube/video/list           -> 400 (63.35ms) - YouTube Video List (Invalid Token -> 400)
-  ✅ [Local] POST  /v1/youtube/comment/list         -> 400 (61.56ms) - YouTube Comment List (Invalid Token -> 400)
-  ✅ [Local] POST  /v1/youtube/comment              -> 400 (68.62ms) - YouTube Comment Add (Invalid Token -> 400)
-  ✅ [Local] POST  /v1/youtube/comment/delete       -> 400 (61.76ms) - YouTube Comment Delete (Invalid Token -> 400)
+  ✅ [Local] POST  /v1/youtube/auth/create          -> 422 (0.64ms) - YouTube Auth Create (Missing Params -> 422)
+  ✅ [Local] GET   /v1/youtube/auth/confirm         -> 400 (0.17ms) - YouTube Auth Confirm (Missing Query -> 400)
+  ✅ [Local] POST  /v1/youtube/channel/info         -> 400 (63.88ms) - YouTube Channel Info (Invalid Token -> 400)
+  ✅ [Local] POST  /v1/youtube/video/list           -> 400 (62.30ms) - YouTube Video List (Invalid Token -> 400)
+  ✅ [Local] POST  /v1/youtube/comment/list         -> 400 (64.33ms) - YouTube Comment List (Invalid Token -> 400)
+  ✅ [Local] POST  /v1/youtube/comment              -> 400 (66.52ms) - YouTube Comment Add (Invalid Token -> 400)
+  ✅ [Local] POST  /v1/youtube/comment/delete       -> 400 (65.25ms) - YouTube Comment Delete (Invalid Token -> 400)
   ✅ [Local] POST  /v1/youtube/reply/list           -> 400 (60.67ms) - YouTube Reply List (Invalid Token -> 400)
-  ✅ [Local] POST  /v1/youtube/reply                -> 400 (84.17ms) - YouTube Reply Add (Invalid Token -> 400)
-  ✅ [Local] POST  /v2/widget/view                  -> 500 (3.21ms) - Widget View Tenant & Rehydration
-  ✅ [Local] POST  /v2/widget/create-thread         -> 403 (1.82ms) - Widget Create Thread (Invalid ID -> 403 Whitelist Guard)
-  ✅ [Local] POST  /v2/ask                          -> 403 (1.81ms) - Widget Ask (Invalid ID -> 403 Whitelist Guard)
-  ✅ [Local] POST  /v2/ask                          -> 413 (0.10ms) - Widget Ask (Token Bomb > 4000 chars -> 413 Payload Guard)
-  ✅ [Local] POST  /v2/admin/widgets                -> 401 (1.26ms) - Admin Widgets List (Missing Token -> 401)
-  ✅ [Local] POST  /v2/admin/widgets/upsert         -> 401 (1.71ms) - Admin Widgets Upsert (Missing Token -> 401)
-  ✅ [Local] POST  /v2/admin/widgets/delete         -> 401 (0.43ms) - Admin Widgets Delete (Missing Token -> 401)
-  ✅ [Local] POST  /v2/admin/widgets/upload-icon    -> 401 (1.23ms) - Admin Widgets Upload Icon (Missing Token -> 401)
-  ✅ [Local] POST  /v2/admin/threads                -> 401 (0.33ms) - Admin Threads List (Missing Token -> 401)
-  ✅ [Local] POST  /v2/admin/threads/rename         -> 401 (0.48ms) - Admin Threads Rename (Missing Token -> 401)
-  ✅ [Local] POST  /v2/admin/threads/update         -> 401 (0.48ms) - Admin Threads Update (Missing Token -> 401)
-  ✅ [Local] POST  /v2/admin/messages               -> 401 (0.33ms) - Admin Messages List (Missing Token -> 401)
-  ✅ [Local] POST  /v2/admin/db/migrate             -> 401 (1.24ms) - Admin DB Migrate (Missing Token -> 401)
-  ✅ [Local] POST  /v2/admin/mail/send              -> 401 (0.56ms) - Admin Mail Send (Missing Token -> 401)
-  ✅ [Local] POST  /v2/admin/sms/send               -> 401 (0.38ms) - Admin SMS Send (Missing Token -> 401)
+  ✅ [Local] POST  /v1/youtube/reply                -> 400 (86.76ms) - YouTube Reply Add (Invalid Token -> 400)
+  ✅ [Local] POST  /v2/widget/view                  -> 500 (4.48ms) - Widget View Tenant & Rehydration
+  ✅ [Local] POST  /v2/widget/create-thread         -> 403 (2.18ms) - Widget Create Thread (Invalid ID -> 403 Whitelist Guard)
+  ✅ [Local] POST  /v2/ask                          -> 403 (1.88ms) - Widget Ask (Invalid ID -> 403 Whitelist Guard)
+  ✅ [Local] POST  /v2/ask                          -> 413 (0.11ms) - Widget Ask (Token Bomb > 4000 chars -> 413 Payload Guard)
+  ✅ [Local] POST  /v2/admin/widgets                -> 401 (1.47ms) - Admin Widgets List (Missing Token -> 401)
+  ✅ [Local] POST  /v2/admin/widgets/upsert         -> 401 (2.00ms) - Admin Widgets Upsert (Missing Token -> 401)
+  ✅ [Local] POST  /v2/admin/widgets/delete         -> 401 (0.50ms) - Admin Widgets Delete (Missing Token -> 401)
+  ✅ [Local] POST  /v2/admin/widgets/upload-icon    -> 401 (1.33ms) - Admin Widgets Upload Icon (Missing Token -> 401)
+  ✅ [Local] POST  /v2/admin/threads                -> 401 (0.36ms) - Admin Threads List (Missing Token -> 401)
+  ✅ [Local] POST  /v2/admin/threads/rename         -> 401 (0.51ms) - Admin Threads Rename (Missing Token -> 401)
+  ✅ [Local] POST  /v2/admin/threads/update         -> 401 (0.50ms) - Admin Threads Update (Missing Token -> 401)
+  ✅ [Local] POST  /v2/admin/messages               -> 401 (0.34ms) - Admin Messages List (Missing Token -> 401)
+  ✅ [Local] POST  /v2/admin/db/migrate             -> 401 (1.23ms) - Admin DB Migrate (Missing Token -> 401)
+  ✅ [Local] POST  /v2/admin/mail/send              -> 401 (0.57ms) - Admin Mail Send (Missing Token -> 401)
+  ✅ [Local] POST  /v2/admin/sms/send               -> 401 (0.39ms) - Admin SMS Send (Missing Token -> 401)
   ✅ [Local] GET   /v1/account/get-user-profile     -> 404 (0.06ms) - Dormant Route: v1 Account Profile (Clean 404)
   ✅ [Local] POST  /v1/workspace/list               -> 404 (0.03ms) - Dormant Route: v1 Workspace List (Clean 404)
   ✅ [Local] POST  /v1/billing/product/list         -> 404 (0.02ms) - Dormant Route: v1 Billing Products (Clean 404)
   ✅ [Local] POST  /v1/botstore/list                -> 404 (0.02ms) - Dormant Route: v1 Botstore List (Clean 404)
-  ✅ [Local] POST  /v1/crawl/page-rank              -> 404 (0.04ms) - Dormant Route: v1 Crawl Page Rank (Clean 404)
+  ✅ [Local] POST  /v1/crawl/page-rank              -> 404 (0.03ms) - Dormant Route: v1 Crawl Page Rank (Clean 404)
 
 [Phase 2] Remote Production (Vercel) Sequential Test (34 items)...
-  ✅ [Remote] GET   /                                -> 200 (1605.58ms) - Swagger UI
-  ✅ [Remote] GET   /json                            -> 200 (372.25ms) - OpenAPI JSON Specification
-  ✅ [Remote] GET   /api/hello                       -> 200 (758.88ms) - Vercel Platform Sanity Check
-  ✅ [Remote] GET   /v1/healthz                      -> 200 (219.58ms) - Liveness Check
-  ✅ [Remote] GET   /v1/heartbeat                    -> 200 (263.78ms) - Heartbeat Diagnostics
-  ✅ [Remote] POST  /v1/youtube/auth/create          -> 422 (208.05ms) - YouTube Auth Create (Missing Params -> 422)
-  ✅ [Remote] GET   /v1/youtube/auth/confirm         -> 400 (214.55ms) - YouTube Auth Confirm (Missing Query -> 400)
-  ✅ [Remote] POST  /v1/youtube/channel/info         -> 400 (362.43ms) - YouTube Channel Info (Invalid Token -> 400)
-  ✅ [Remote] POST  /v1/youtube/video/list           -> 400 (410.72ms) - YouTube Video List (Invalid Token -> 400)
-  ✅ [Remote] POST  /v1/youtube/comment/list         -> 400 (1145.08ms) - YouTube Comment List (Invalid Token -> 400)
-  ✅ [Remote] POST  /v1/youtube/comment              -> 400 (322.33ms) - YouTube Comment Add (Invalid Token -> 400)
-  ✅ [Remote] POST  /v1/youtube/comment/delete       -> 400 (393.11ms) - YouTube Comment Delete (Invalid Token -> 400)
-  ✅ [Remote] POST  /v1/youtube/reply/list           -> 400 (555.27ms) - YouTube Reply List (Invalid Token -> 400)
-  ✅ [Remote] POST  /v1/youtube/reply                -> 400 (233.33ms) - YouTube Reply Add (Invalid Token -> 400)
-  ✅ [Remote] POST  /v2/widget/view                  -> 200 (2591.03ms) - Widget View Tenant & Rehydration
-  ✅ [Remote] POST  /v2/widget/create-thread         -> 403 (780.69ms) - Widget Create Thread (Invalid ID -> 403 Whitelist Guard)
-  ✅ [Remote] POST  /v2/ask                          -> 403 (1267.42ms) - Widget Ask (Invalid ID -> 403 Whitelist Guard)
-  ✅ [Remote] POST  /v2/ask                          -> 413 (226.11ms) - Widget Ask (Token Bomb > 4000 chars -> 413 Payload Guard)
-  ✅ [Remote] POST  /v2/admin/widgets                -> 401 (283.34ms) - Admin Widgets List (Missing Token -> 401)
-  ✅ [Remote] POST  /v2/admin/widgets/upsert         -> 401 (203.63ms) - Admin Widgets Upsert (Missing Token -> 401)
-  ✅ [Remote] POST  /v2/admin/widgets/delete         -> 401 (203.75ms) - Admin Widgets Delete (Missing Token -> 401)
-  ✅ [Remote] POST  /v2/admin/widgets/upload-icon    -> 401 (208.99ms) - Admin Widgets Upload Icon (Missing Token -> 401)
-  ✅ [Remote] POST  /v2/admin/threads                -> 401 (210.70ms) - Admin Threads List (Missing Token -> 401)
-  ✅ [Remote] POST  /v2/admin/threads/rename         -> 401 (256.12ms) - Admin Threads Rename (Missing Token -> 401)
-  ✅ [Remote] POST  /v2/admin/threads/update         -> 401 (256.93ms) - Admin Threads Update (Missing Token -> 401)
-  ✅ [Remote] POST  /v2/admin/messages               -> 401 (227.38ms) - Admin Messages List (Missing Token -> 401)
-  ✅ [Remote] POST  /v2/admin/db/migrate             -> 401 (350.40ms) - Admin DB Migrate (Missing Token -> 401)
-  ✅ [Remote] POST  /v2/admin/mail/send              -> 401 (231.05ms) - Admin Mail Send (Missing Token -> 401)
-  ✅ [Remote] POST  /v2/admin/sms/send               -> 401 (246.06ms) - Admin SMS Send (Missing Token -> 401)
-  ✅ [Remote] GET   /v1/account/get-user-profile     -> 404 (310.91ms) - Dormant Route: v1 Account Profile (Clean 404)
-  ✅ [Remote] POST  /v1/workspace/list               -> 404 (262.53ms) - Dormant Route: v1 Workspace List (Clean 404)
-  ✅ [Remote] POST  /v1/billing/product/list         -> 404 (307.84ms) - Dormant Route: v1 Billing Products (Clean 404)
-  ✅ [Remote] POST  /v1/botstore/list                -> 404 (307.13ms) - Dormant Route: v1 Botstore List (Clean 404)
-  ✅ [Remote] POST  /v1/crawl/page-rank              -> 404 (255.95ms) - Dormant Route: v1 Crawl Page Rank (Clean 404)
+  ✅ [Remote] GET   /                                -> 200 (2050.53ms) - Swagger UI
+  ✅ [Remote] GET   /json                            -> 200 (385.39ms) - OpenAPI JSON Specification
+  ✅ [Remote] GET   /api/hello                       -> 200 (800.28ms) - Vercel Platform Sanity Check
+  ✅ [Remote] GET   /v1/healthz                      -> 200 (252.47ms) - Liveness Check
+  ✅ [Remote] GET   /v1/heartbeat                    -> 200 (304.03ms) - Heartbeat Diagnostics
+  ✅ [Remote] POST  /v1/youtube/auth/create          -> 422 (229.21ms) - YouTube Auth Create (Missing Params -> 422)
+  ✅ [Remote] GET   /v1/youtube/auth/confirm         -> 400 (212.56ms) - YouTube Auth Confirm (Missing Query -> 400)
+  ✅ [Remote] POST  /v1/youtube/channel/info         -> 400 (394.27ms) - YouTube Channel Info (Invalid Token -> 400)
+  ✅ [Remote] POST  /v1/youtube/video/list           -> 400 (376.17ms) - YouTube Video List (Invalid Token -> 400)
+  ✅ [Remote] POST  /v1/youtube/comment/list         -> 400 (330.58ms) - YouTube Comment List (Invalid Token -> 400)
+  ✅ [Remote] POST  /v1/youtube/comment              -> 400 (323.40ms) - YouTube Comment Add (Invalid Token -> 400)
+  ✅ [Remote] POST  /v1/youtube/comment/delete       -> 400 (342.12ms) - YouTube Comment Delete (Invalid Token -> 400)
+  ✅ [Remote] POST  /v1/youtube/reply/list           -> 400 (318.45ms) - YouTube Reply List (Invalid Token -> 400)
+  ✅ [Remote] POST  /v1/youtube/reply                -> 400 (3985.26ms) - YouTube Reply Add (Invalid Token -> 400)
+  ✅ [Remote] POST  /v2/widget/view                  -> 200 (2799.73ms) - Widget View Tenant & Rehydration
+  ✅ [Remote] POST  /v2/widget/create-thread         -> 403 (1232.85ms) - Widget Create Thread (Invalid ID -> 403 Whitelist Guard)
+  ✅ [Remote] POST  /v2/ask                          -> 403 (1042.30ms) - Widget Ask (Invalid ID -> 403 Whitelist Guard)
+  ✅ [Remote] POST  /v2/ask                          -> 413 (293.01ms) - Widget Ask (Token Bomb > 4000 chars -> 413 Payload Guard)
+  ✅ [Remote] POST  /v2/admin/widgets                -> 401 (226.86ms) - Admin Widgets List (Missing Token -> 401)
+  ✅ [Remote] POST  /v2/admin/widgets/upsert         -> 401 (241.69ms) - Admin Widgets Upsert (Missing Token -> 401)
+  ✅ [Remote] POST  /v2/admin/widgets/delete         -> 401 (213.90ms) - Admin Widgets Delete (Missing Token -> 401)
+  ✅ [Remote] POST  /v2/admin/widgets/upload-icon    -> 401 (323.86ms) - Admin Widgets Upload Icon (Missing Token -> 401)
+  ✅ [Remote] POST  /v2/admin/threads                -> 401 (221.01ms) - Admin Threads List (Missing Token -> 401)
+  ✅ [Remote] POST  /v2/admin/threads/rename         -> 401 (239.78ms) - Admin Threads Rename (Missing Token -> 401)
+  ✅ [Remote] POST  /v2/admin/threads/update         -> 401 (279.35ms) - Admin Threads Update (Missing Token -> 401)
+  ✅ [Remote] POST  /v2/admin/messages               -> 401 (281.09ms) - Admin Messages List (Missing Token -> 401)
+  ✅ [Remote] POST  /v2/admin/db/migrate             -> 401 (358.63ms) - Admin DB Migrate (Missing Token -> 401)
+  ✅ [Remote] POST  /v2/admin/mail/send              -> 401 (238.68ms) - Admin Mail Send (Missing Token -> 401)
+  ✅ [Remote] POST  /v2/admin/sms/send               -> 401 (212.89ms) - Admin SMS Send (Missing Token -> 401)
+  ✅ [Remote] GET   /v1/account/get-user-profile     -> 404 (218.08ms) - Dormant Route: v1 Account Profile (Clean 404)
+  ✅ [Remote] POST  /v1/workspace/list               -> 404 (269.88ms) - Dormant Route: v1 Workspace List (Clean 404)
+  ✅ [Remote] POST  /v1/billing/product/list         -> 404 (207.42ms) - Dormant Route: v1 Billing Products (Clean 404)
+  ✅ [Remote] POST  /v1/botstore/list                -> 404 (210.00ms) - Dormant Route: v1 Botstore List (Clean 404)
+  ✅ [Remote] POST  /v1/crawl/page-rank              -> 404 (222.42ms) - Dormant Route: v1 Crawl Page Rank (Clean 404)
 
 ==================================================================
 Local  Suite: 34 / 34 PASS (100.0%)
@@ -332,13 +332,13 @@ Remote Suite: 34 / 34 PASS (100.0%)
 1. **백엔드 서버리스 단일 번들 (`npm run bundle:api`)**:
    - `scripts/build-migrations.mjs` 실행: 7개 마이그레이션 생성 완료.
    - `esbuild` Node 24 CJS 타깃 빌드 완료: `api/index.js` **26.9MB** (28,193,156 바이트).
-   - 빌드 소요 시간: **133ms**.
+   - 빌드 소요 시간: **154ms**.
 2. **프론트엔드 임베드 번들 (`npm run build:embed`)**:
    - Vite v4.5.5 프로덕션 빌드 완료: `dist-embed/tokki.js` $\to$ `public/embed/tokki.js`.
    - 번들 크기: **2,128.10 kB** (gzip: **622.87 kB**).
-   - 빌드 소요 시간: **2.32s** (2,588개 모듈 변환).
+   - 빌드 소요 시간: **2.31s** (2,588개 모듈 변환).
 3. **프론트엔드 라이브러리 전체 빌드 (`npm run build`)**:
-   - TypeScript 컴파일 및 dts 번들 생성 완료 (소요 시간: **3.09s**).
+   - TypeScript 컴파일 및 dts 번들 생성 완료 (소요 시간: **3.12s**).
 4. **프론트엔드 타입 무결성 검사 (`npm run type-check`)**:
    - `tsc` 정상 통과 (0 errors).
 
