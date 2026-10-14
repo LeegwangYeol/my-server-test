@@ -72,7 +72,9 @@ src/
     v1/
       v1-endpoints.ts   ← v1 그룹. 현재 youtube만 등록됨.
       youtube/          ← YouTube OAuth + 댓글/답글/영상/채널 (활성)
-      account/ widget/ billing/ chat/ ... ← 다수 존재하나 v1-endpoints.ts에 미등록 (비활성)
+      (LLAMI 레거시 v1 — account/ widget/ billing/ chat/ workspace/ 등 20개 그룹, src/billing, src/cron,
+       src/utils, lib/real-time, lib/vector 등 — 는 어디서도 import 되지 않아 삭제됨. 필요하면 git 이력
+       `2dcd11b` 이전에서 복구. 번들 api/index.js 는 삭제 전후 바이트 동일했음.)
     v2/
       widget-endpoints.ts ← 위젯 백엔드 + admin (/v2/widget/*, /v2/ask, /v2/admin/*). requireAdmin 가드 포함.
       mail-endpoints.ts   ← /v2/admin/mail/send (네이버 SMTP). X-Admin-Token 인증.

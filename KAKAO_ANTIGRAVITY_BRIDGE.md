@@ -101,7 +101,7 @@ send-message [--title=<title>] <recipient_id> <content>
 | 봇이 먼저 말하기 | Event API 없이는 불가 | VERIFIED |
 
 ### 2.3 기존 레포 코드 (등록 안 됨)
-`src/endpoints/v1/kakao/chatbot-connect.ts` 에 useCallback 스킬 엔드포인트 초안 존재. 결함:
+`src/endpoints/v1/kakao/chatbot-connect.ts` 에 useCallback 스킬 엔드포인트 초안 존재 (LLAMI 레거시 정리로 삭제됨 — 참고하려면 `git show 2dcd11b:src/endpoints/v1/kakao/chatbot-connect.ts`). 결함:
 1. `cf-connecting-ip`(Cloudflare 헤더)로 IP 검사 → Vercel 은 이 헤더를 주지 않음 → **전부 403**.
 2. 응답 후 분리된 async IIFE 로 LLM 호출·콜백 POST → Vercel 에서는 `waitUntil` 없이는 실행 보장 없음 (레포 전체에 waitUntil 사용 없음).
 3. `src/config/kakao.ts` IP 목록에 현재 공식 목록에 없는 옛 대역 혼재.

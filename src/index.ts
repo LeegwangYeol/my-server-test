@@ -1,4 +1,3 @@
-import { printLLAMIASCII } from "../lib/ascii";
 import { createApp } from "./app";
 import dotenv from "dotenv";
 // 상대 경로로 변경하여 경로 별칭 문제 해결
@@ -9,7 +8,7 @@ void (async function () {
   console.clear();
 
   // * Print initialization message
-  printLLAMIASCII("🚀 Initializing API server...");
+  console.log("🚀 Initializing API server...");
 
   // * Load environment variables
   dotenv.config();
@@ -22,5 +21,5 @@ void (async function () {
   );
 })();
 
-// 서버리스 환경을 위해 serverless.ts 파일로 코드 이동
-// 이 파일은 일반 서버 실행용으로만 사용됨
+// 서버리스 진입점은 lambda-src/handler.ts (esbuild → api/index.js)
+// 이 파일은 로컬 dev(app.listen) 전용
