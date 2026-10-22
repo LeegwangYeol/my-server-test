@@ -26,11 +26,24 @@ jobs:
             Find ONE real defect and fix it in a small, safe pull request.
             If nothing qualifies, make no changes and open no pull request.
 
+            ## Working alone
+            - No human will answer during this run. Never ask questions or wait for input;
+              decide yourself using the priority order below.
+            - If you cannot settle on a safe fix, finish without changes and without a pull request.
+
             ## What to look for, in priority order
-            1. Build or test failures. Run the project's build and test commands first.
+            1. Build or test failures. Install the project's dependencies first
+               (for example `npm ci`, `bun install`, `pip install -r requirements.txt`),
+               then run the project's build and test commands.
             2. Bugs: null/undefined dereference, off-by-one, unhandled errors, resource leaks, race conditions.
             3. Security: hard-coded secrets, injection, unsafe deserialization, vulnerable dependency usage.
             4. Regressions introduced by the recent commits listed below.
+
+            ## Not defects
+            - Failures caused only by missing secrets or environment variables
+              (for example an unset database URL or API key in this environment).
+            - Code whose intent is stated in a commit message. Read the commit messages
+              (the log below and `git log`) before calling something a bug.
 
             ## Rules
             - Fix bugs only. Do not change intended behavior, public APIs, or design.
