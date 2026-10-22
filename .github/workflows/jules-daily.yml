@@ -13,13 +13,13 @@ jobs:
   jules:
     runs-on: ubuntu-latest
     steps:
-      - uses: google-labs-code/jules-action@v1.0.0
+      - uses: actions/checkout@v5
         with:
-          # INFO : scheduled runs start from the default branch, manual runs from the branch picked in the Run dialog
-          starting_branch: ${{ github.ref_name }}
-          include_commit_log: true
-          jules_api_key: ${{ secrets.JULES_API_KEY }}
-          prompt: |
+          fetch-depth: 30
+
+      - name: Build prompt
+        env:
+          PROMPT: |
             You are the daily health checker for this repository.
 
             ## Goal
@@ -46,3 +46,48 @@ jobs:
             - The fix
             - How it was verified (build/test command and result)
             - Not fixed (problems that need a decision), or "none"
+        run: |
+          printf '%s\n' "$PROMPT" > prompt.txt
+          {
+            printf '\n\nLog of the last 20 commits (in the format of `git log --stat`):\n```\n'
+            git log -20 --stat
+            printf '```\n'
+          } >> prompt.txt
+
+      - name: Start Jules session
+        env:
+          JULES_API_KEY: ${{ secrets.JULES_API_KEY }}
+          # INFO : scheduled runs start from the default branch, manual runs from the branch picked in the Run dialog
+          STARTING_BRANCH: ${{ github.ref_name }}
+        run: |
+          if [ -z "$JULES_API_KEY" ]; then
+            echo "::error::JULES_API_KEY secret is not set"
+            exit 1
+          fi
+
+          # INFO : --rawfile reads the prompt from disk, so a long commit log cannot hit the argument size limit
+          jq -n --rawfile prompt prompt.txt \
+                --arg source "sources/github/$GITHUB_REPOSITORY" \
+                --arg branch "$STARTING_BRANCH" \
+                '{prompt: $prompt,
+                  sourceContext: {source: $source, githubRepoContext: {startingBranch: $branch}},
+                  requirePlanApproval: false,
+                  automationMode: "AUTO_CREATE_PR"}' > payload.json
+
+          # INFO : --fail-with-body makes an HTTP error fail the step while keeping the API's error message
+          if ! curl -sS --fail-with-body https://jules.googleapis.com/v1alpha/sessions \
+                 -H "Content-Type: application/json" \
+                 -H "X-Goog-Api-Key: $JULES_API_KEY" \
+                 -d @payload.json -o response.json; then
+            echo "::error::Jules API rejected the request"
+            cat response.json
+            exit 1
+          fi
+
+          url="$(jq -r '.url // empty' response.json)"
+          if [ -z "$url" ]; then
+            echo "::error::Jules API response has no session URL"
+            cat response.json
+            exit 1
+          fi
+          echo "Jules session: $url"
