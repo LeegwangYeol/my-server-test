@@ -1,0 +1,48 @@
+name: Jules Daily Check
+
+on:
+  schedule:
+    # INFO : GitHub evaluates cron in UTC; this fires at 06:00 KST
+    - cron: '0 21 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  jules:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: google-labs-code/jules-action@v1.0.0
+        with:
+          # INFO : scheduled runs start from the default branch, manual runs from the branch picked in the Run dialog
+          starting_branch: ${{ github.ref_name }}
+          include_commit_log: true
+          jules_api_key: ${{ secrets.JULES_API_KEY }}
+          prompt: |
+            You are the daily health checker for this repository.
+
+            ## Goal
+            Find ONE real defect and fix it in a small, safe pull request.
+            If nothing qualifies, make no changes and open no pull request.
+
+            ## What to look for, in priority order
+            1. Build or test failures. Run the project's build and test commands first.
+            2. Bugs: null/undefined dereference, off-by-one, unhandled errors, resource leaks, race conditions.
+            3. Security: hard-coded secrets, injection, unsafe deserialization, vulnerable dependency usage.
+            4. Regressions introduced by the recent commits listed below.
+
+            ## Rules
+            - Fix bugs only. Do not change intended behavior, public APIs, or design.
+            - Do not refactor, reformat, rename, or update dependencies unless that is the fix itself.
+            - Keep the change under 100 lines and run the tests before opening the pull request.
+            - A problem that needs a design decision is not yours to fix: leave the code alone and
+              list it under "Not fixed" in the pull request body.
+
+            ## Pull request format
+            Title: "[Jules daily] <one-line summary>"
+            Body, in English, one fact per line:
+            - What was wrong (file and line)
+            - The fix
+            - How it was verified (build/test command and result)
+            - Not fixed (problems that need a decision), or "none"
