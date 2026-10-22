@@ -22,19 +22,22 @@ jobs:
           PROMPT: |
             You are the daily health checker for this repository.
 
+            ## This run is unattended
+            - Nobody reads this session until it is over. A question or a request for confirmation
+              is never answered, and the run is wasted.
+            - Never ask whether your approach looks good, which issue to pick, or whether to continue.
+              Make the call yourself using the priority order below and keep going to the end.
+            - If you cannot settle on a safe fix, finish without changes and without a pull request.
+
             ## Goal
             Find ONE real defect and fix it in a small, safe pull request.
             If nothing qualifies, make no changes and open no pull request.
-
-            ## Working alone
-            - No human will answer during this run. Never ask questions or wait for input;
-              decide yourself using the priority order below.
-            - If you cannot settle on a safe fix, finish without changes and without a pull request.
 
             ## What to look for, in priority order
             1. Build or test failures. Install the project's dependencies first
                (for example `npm ci`, `bun install`, `pip install -r requirements.txt`),
                then run the project's build and test commands.
+               If they fail for several reasons, fix ONE of them; do not try to make everything pass.
             2. Bugs: null/undefined dereference, off-by-one, unhandled errors, resource leaks, race conditions.
             3. Security: hard-coded secrets, injection, unsafe deserialization, vulnerable dependency usage.
             4. Regressions introduced by the recent commits listed below.
@@ -59,6 +62,8 @@ jobs:
             - The fix
             - How it was verified (build/test command and result)
             - Not fixed (problems that need a decision), or "none"
+
+            Reminder: do not ask questions. Decide, finish, and open the pull request or stop.
         run: |
           printf '%s\n' "$PROMPT" > prompt.txt
           {
