@@ -31,8 +31,9 @@ jobs:
               answer you chose under "Assumptions" in the pull request body, then continue.
             - When several candidates qualify, any one is fine. Pick one and go;
               the next daily run picks up the others.
-            - Earlier daily runs may already be fixing something. Run `git fetch origin` and
-              `git branch -r` first; skip any issue that an existing fix branch already addresses.
+            - Earlier daily runs may already be fixing something. Run `git branch -r` first and skip
+              any issue that an existing fix branch already addresses. Do not run `git fetch` or
+              `git pull`: this environment has no GitHub credentials and the command fails.
             - If you cannot settle on a safe fix, finish without changes and without a pull request.
 
             ## This repository
@@ -44,7 +45,9 @@ jobs:
             - Supabase, YouTube OAuth, Naver SMTP and `ADMIN_TOKEN` are absent here; tests that need them are not defects. Keep secrets out of logs.
 
             Focus:
-            - Runtime behaviour in `src/endpoints/v2/*` (request validation, status codes, SSE stream termination, the request body-size limit: compare byte length, not character length), error mapping in `lib/mail/naver.ts`, CLI error paths in `scripts/*.ts`, request/response adapter edge cases in `lambda-src/handler.ts` (headers, binary bodies).
+            - Runtime behaviour in `src/endpoints/v2/*` (request validation, status codes, SSE stream termination), error mapping in `lib/mail/naver.ts`, CLI error paths in `scripts/*.ts`, request/response adapter edge cases in `lambda-src/handler.ts` (headers, binary bodies).
+            - The 1 MB raw-body limit `MAX_REQUEST_BODY_SIZE` in the `onParse` hook of `src/app.ts` compares `text.length` (characters) although the limit is in bytes, so multi-byte bodies slip past it; the `bun test` cases that expect HTTP 413 above 1 MB show it. That specific check is a defect.
+            - The per-message guards in `src/endpoints/v2/widget-endpoints.ts` (`MAX_MESSAGE_CHARS = 4000`, `MAX_AUX_CHARS`, `MAX_HISTORY_CHARS`) are intentional character limits with tests that pin them; do not convert them to bytes.
 
             Leave alone:
             - `api/index.js` (generated: do not commit a rebundle; note in the PR that a rebundle is needed before deploy), `api/hello.js`, `vercel.json`, the `.ts`-extension imports (intentional for `node --env-file`, see commit db1910d), the `engines` field in `package.json`, `COLLABORATION.md` and the audit `.md` files.
