@@ -24,7 +24,11 @@ function fail(error: string, code = 1): never {
 //   squeezed through shell quoting
 function readBody(path: string | undefined): string | undefined {
   if (path === undefined) return undefined;
-  return readFileSync(path === "-" ? 0 : path, "utf8");
+  try {
+    return readFileSync(path === "-" ? 0 : path, "utf8");
+  } catch (err) {
+    fail(`파일 읽기 실패: ${path} (${err instanceof Error ? err.message : String(err)})`);
+  }
 }
 
 let args;
