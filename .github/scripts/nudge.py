@@ -19,6 +19,13 @@ REPLY = (
     "If no fix qualifies, finish without changes and without a pull request. "
     "Write the question you had, and the answer you chose, under \"Assumptions\" in the pull request body."
 )
+# INFO : a session that stops a second time gets one terse order to wrap up; after that it is left alone,
+#   so an agent that keeps asking ends the run instead of looping forever
+FINAL = (
+    "Finish now. If you have a working fix, commit it and open the pull request as it is; "
+    "otherwise end this session with no changes. Do not send another message."
+)
+REPLIES = (REPLY, FINAL)
 
 
 def api(path: str, body: dict | None = None) -> dict:
@@ -46,15 +53,14 @@ def main() -> None:
                 return
             if s["state"] != "AWAITING_USER_FEEDBACK":
                 continue
-            # INFO : a session already nudged once is left alone, so a second question ends the run
-            #   instead of looping the agent forever
             acts = api(f"{s['name']}/activities?pageSize=100").get("activities", [])
-            if any(a.get("userMessaged", {}).get("userMessage", "").startswith(REPLY[:40]) for a in acts):
-                print(f"skip  {s['id']} (already nudged)")
+            sent = sum(1 for a in acts if a.get("userMessaged", {}).get("userMessage", "") in REPLIES)
+            if sent >= len(REPLIES):
+                print(f"skip  {s['id']} (already nudged {sent}x)")
                 continue
-            api(f"{s['name']}:sendMessage", {"prompt": REPLY})
+            api(f"{s['name']}:sendMessage", {"prompt": REPLIES[sent]})
             nudged += 1
-            print(f"nudge {s['id']} {s.get('title', '')[:60]}")
+            print(f"nudge {s['id']} #{sent + 1} {s.get('title', '')[:40]}")
         token = page.get("nextPageToken")
         if not token:
             print(f"nudged {nudged}")
