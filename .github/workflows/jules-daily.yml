@@ -27,6 +27,10 @@ jobs:
               is never answered, and the run is wasted.
             - Never ask whether your approach looks good, which issue to pick, or whether to continue.
               Make the call yourself using the priority order below and keep going to the end.
+            - When you feel the need to ask something, do not send it. Write the question and the
+              answer you chose under "Assumptions" in the pull request body, then continue.
+            - When several candidates qualify, any one is fine. Pick one and go;
+              the next daily run picks up the others.
             - If you cannot settle on a safe fix, finish without changes and without a pull request.
 
             ## Goal
@@ -62,6 +66,7 @@ jobs:
             - The fix
             - How it was verified (build/test command and result)
             - Not fixed (problems that need a decision), or "none"
+            - Assumptions (questions you would have asked, with the answer you chose), or "none"
 
             Reminder: do not ask questions. Decide, finish, and open the pull request or stop.
         run: |
