@@ -54,10 +54,18 @@ def main() -> None:
             if s["state"] != "AWAITING_USER_FEEDBACK":
                 continue
             acts = api(f"{s['name']}/activities?pageSize=100").get("activities", [])
-            sent = sum(1 for a in acts if a.get("userMessaged", {}).get("userMessage", "") in REPLIES)
+            mine = [a for a in acts if a.get("userMessaged", {}).get("userMessage", "") in REPLIES]
+            sent = len(mine)
             if sent >= len(REPLIES):
                 print(f"skip  {s['id']} (already nudged {sent}x)")
                 continue
+            # INFO : the agent takes 10-20 minutes to pick a reply up, so a second reply inside that window
+            #   would cut the resumed work short
+            if mine:
+                last = dt.datetime.fromisoformat(mine[-1]["createTime"].replace("Z", "+00:00"))
+                if dt.datetime.now(dt.timezone.utc) - last < dt.timedelta(minutes=25):
+                    print(f"wait  {s['id']} (last reply {int((dt.datetime.now(dt.timezone.utc) - last).total_seconds() // 60)} min ago)")
+                    continue
             api(f"{s['name']}:sendMessage", {"prompt": REPLIES[sent]})
             nudged += 1
             print(f"nudge {s['id']} #{sent + 1} {s.get('title', '')[:40]}")
