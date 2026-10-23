@@ -35,6 +35,20 @@ jobs:
               `git branch -r` first; skip any issue that an existing fix branch already addresses.
             - If you cannot settle on a safe fix, finish without changes and without a pull request.
 
+            ## This repository
+            Elysia (TypeScript) REST API that runs as a single Vercel Node serverless function. `AGENTS.md` is the operating manual: read §2 (deploy architecture) before touching anything. `api/index.js` is a committed esbuild bundle of `lambda-src/handler.ts` + `src/` + `lib/`; `src/app.ts` assembles the Elysia app; endpoints live in `src/endpoints/v1` (YouTube OAuth) and `src/endpoints/v2` (chat widget backend, mail, admin). Tests in `test/` run with Bun.
+
+            Setup and checks:
+            - `npm ci`, `bun test`, `npx tsc --noEmit`
+            - `npm run build` (plain `tsc`) is known to fail on pre-existing type errors in `lib/supabase/client.ts` and `src/endpoints/v2/widget-endpoints.ts`. Those type-only errors are a known backlog, not today's defect, unless one can be fixed in isolation without `as any`.
+            - Supabase, YouTube OAuth, Naver SMTP and `ADMIN_TOKEN` are absent here; tests that need them are not defects. Keep secrets out of logs.
+
+            Focus:
+            - Runtime behaviour in `src/endpoints/v2/*` (request validation, status codes, SSE stream termination, the request body-size limit: compare byte length, not character length), error mapping in `lib/mail/naver.ts`, CLI error paths in `scripts/*.ts`, request/response adapter edge cases in `lambda-src/handler.ts` (headers, binary bodies).
+
+            Leave alone:
+            - `api/index.js` (generated: do not commit a rebundle; note in the PR that a rebundle is needed before deploy), `api/hello.js`, `vercel.json`, the `.ts`-extension imports (intentional for `node --env-file`, see commit db1910d), the `engines` field in `package.json`, `COLLABORATION.md` and the audit `.md` files.
+
             ## Goal
             Find ONE real defect and fix it in a small, safe pull request.
             If nothing qualifies, make no changes and open no pull request.
@@ -69,6 +83,8 @@ jobs:
             - How it was verified (build/test command and result)
             - Not fixed (problems that need a decision), or "none"
             - Assumptions (questions you would have asked, with the answer you chose), or "none"
+            - Prompt feedback (instructions above that were wrong, missing or unclear for this
+              repository, e.g. a build command that does not exist), or "none"
 
             Reminder: do not ask questions. Decide, finish, and open the pull request or stop.
         run: |
