@@ -1,0 +1,22 @@
+name: Jules Nudge
+
+on:
+  schedule:
+    # INFO : UTC; every half hour, so a session that stopped to ask a question waits at most ~30 min
+    - cron: '17,47 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  nudge:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          sparse-checkout: .github/scripts
+      - name: Answer sessions waiting for input
+        env:
+          JULES_API_KEY: ${{ secrets.JULES_API_KEY }}
+        run: python -I .github/scripts/nudge.py 12
