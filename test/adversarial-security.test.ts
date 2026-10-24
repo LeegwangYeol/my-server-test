@@ -4,7 +4,7 @@
  *
  * Verifies:
  * 1. Whitelist guard (HTTP 403) on /v2/ask and /v2/widget/create-thread against tampering, omissions, and injections.
- * 2. Token bomb defenses (HTTP 413) on message length > 4,000 characters and global raw body payloads > 1MB.
+ * 2. Token bomb defenses (HTTP 413) on message length > 4,000 bytes and global raw body payloads > 1MB.
  * 3. Multi-turn conversation context bounding to prevent context token bombs.
  */
 
@@ -197,7 +197,7 @@ describe("Adversarial Security Test Suite (Requirement R2)", () => {
   // ─── 2. Token Bomb Payload & Body Size Attacks (HTTP 413) ────────
   describe("2. Token Bomb & Payload Guard Verification (HTTP 413)", () => {
     describe("2.1 Message Length Boundary Checks (/v2/ask)", () => {
-      test("accepts message of exactly 4,000 ASCII characters", async () => {
+      test("accepts message of exactly 4,000 ASCII bytes", async () => {
         const exact4000 = "A".repeat(4000);
         const res = await postJson(app, "/v2/ask", {
           widgetId: VALID_WIDGET_ID,
@@ -206,7 +206,7 @@ describe("Adversarial Security Test Suite (Requirement R2)", () => {
         expect(res.status).not.toBe(413);
       });
 
-      test("rejects message of 4,001 ASCII characters with HTTP 413", async () => {
+      test("rejects message of 4,001 ASCII bytes with HTTP 413", async () => {
         const overflow4001 = "A".repeat(4001);
         const res = await postJson(app, "/v2/ask", {
           widgetId: VALID_WIDGET_ID,
@@ -215,7 +215,7 @@ describe("Adversarial Security Test Suite (Requirement R2)", () => {
         expect(res.status).toBe(413);
         const data = (await res.json()) as any;
         expect(data.success).toBe(false);
-        expect(data.error).toContain("message too long (4001 > 4000 chars)");
+        expect(data.error).toContain("message too long (4001 > 4000 bytes)");
       });
 
       test("rejects massive 50,000 character token bomb with HTTP 413", async () => {
@@ -230,7 +230,7 @@ describe("Adversarial Security Test Suite (Requirement R2)", () => {
         expect(data.error).toContain("message too long");
       });
 
-      test("rejects multi-byte Unicode string exceeding 4,000 code points with HTTP 413", async () => {
+      test("rejects multi-byte Unicode string exceeding 4,000 bytes with HTTP 413", async () => {
         const koreanBomb = "가".repeat(4001);
         const res = await postJson(app, "/v2/ask", {
           widgetId: VALID_WIDGET_ID,
@@ -275,7 +275,7 @@ describe("Adversarial Security Test Suite (Requirement R2)", () => {
     describe("2.3 Context History Token Bounding", () => {
       test("bounds accumulated multi-turn conversation history sent to LLM", async () => {
         mockMessages = [];
-        // Simulate a thread with 25 long past messages (25 x 800 chars = 20,000 chars)
+        // Simulate a thread with 25 long past messages (25 x 800 chars = 20,000 bytes)
         for (let i = 0; i < 25; i++) {
           mockMessages.push({
             id: i + 1,
@@ -298,7 +298,7 @@ describe("Adversarial Security Test Suite (Requirement R2)", () => {
     });
 
     describe("2.4 Auxiliary Field Payload Smuggling Checks (HTTP 413)", () => {
-      test("rejects browserInfo exceeding 2,000 characters with HTTP 413", async () => {
+      test("rejects browserInfo exceeding 2,000 bytes with HTTP 413", async () => {
         const res = await postJson(app, "/v2/ask", {
           widgetId: VALID_WIDGET_ID,
           message: "Safe message",
@@ -313,7 +313,7 @@ describe("Adversarial Security Test Suite (Requirement R2)", () => {
         expect(data.error).toContain("browserInfo too large");
       });
 
-      test("rejects search options exceeding 2,000 characters with HTTP 413", async () => {
+      test("rejects search options exceeding 2,000 bytes with HTTP 413", async () => {
         const res = await postJson(app, "/v2/ask", {
           widgetId: VALID_WIDGET_ID,
           message: "Safe message",
