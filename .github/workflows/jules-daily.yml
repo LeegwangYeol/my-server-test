@@ -5,19 +5,43 @@ on:
     # INFO : GitHub evaluates cron in UTC, not KST
     - cron: '0 21 * * *'
   workflow_dispatch:
+    inputs:
+      force:
+        description: Start a session even if a Jules PR is already open
+        type: boolean
+        default: false
 
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
   jules:
     runs-on: ubuntu-latest
     steps:
+      # INFO : one Jules PR per repository at a time - while one is open the agent would re-fix the same defect,
+      #   so the day is skipped until it is merged or closed; a manual run passes the gate when force=true
+      - name: Skip while a Jules PR is open
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ github.event.inputs.force }}
+        run: |
+          open="$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --search '"[Jules daily]" in:title' \
+                   --json number,title --jq '[.[] | select(.title | startswith("[Jules daily]"))] | length')"
+          echo "open Jules PRs: $open"
+          if [ "$open" != "0" ] && [ "$FORCE" != "true" ]; then
+            echo "::notice::skipped: $open open [Jules daily] PR(s) waiting for review"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/checkout@v5
+        if: steps.gate.outputs.skip != 'true'
         with:
           fetch-depth: 30
 
       - name: Build prompt
+        if: steps.gate.outputs.skip != 'true'
         env:
           PROMPT: |
             You are the daily health checker for this repository.
@@ -36,6 +60,8 @@ jobs:
               any issue that an existing fix branch already addresses. Do not run `git fetch` or
               `git pull`: this environment has no GitHub credentials and the command fails.
             - If you cannot settle on a safe fix, finish without changes and without a pull request.
+              Never open a pull request that changes no files: "no defects found" is a session that
+              simply ends, not a pull request.
 
             ## This repository
             Elysia (TypeScript) REST API that runs as a single Vercel Node serverless function. `AGENTS.md` is the operating manual: read §2 (deploy architecture) before touching anything. `api/index.js` is a committed esbuild bundle of `lambda-src/handler.ts` + `src/` + `lib/`; `src/app.ts` assembles the Elysia app; endpoints live in `src/endpoints/v1` (YouTube OAuth) and `src/endpoints/v2` (chat widget backend, mail, admin). Tests in `test/` run with Bun.
@@ -104,6 +130,7 @@ jobs:
           } >> prompt.txt
 
       - name: Start Jules session
+        if: steps.gate.outputs.skip != 'true'
         env:
           JULES_API_KEY: ${{ secrets.JULES_API_KEY }}
           # INFO : scheduled runs start from the default branch, manual runs from the branch picked in the Run dialog
