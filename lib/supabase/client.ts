@@ -2,7 +2,7 @@ import { createClient } from "@supabase/supabase-js";
 import { Database } from "./database.types";
 
 export const createSupabaseClient = <T extends keyof Database>(schema: T) => {
-  const supabase = createClient<Database, T>(
+  const supabase = createClient<Database, any>(
     process.env.SUPABASE_URL ??
       (() => {
         throw new Error("SUPABASE_URL is not set");
@@ -17,7 +17,7 @@ export const createSupabaseClient = <T extends keyof Database>(schema: T) => {
         autoRefreshToken: false,
         detectSessionInUrl: false,
       },
-      db: { schema },
+      db: { schema: schema as any },
     },
   );
 

@@ -102,7 +102,7 @@ import {
   executeWithFallback,
   mailFallbackQueue,
   type FallbackJob,
-} from "../queue/fallback-queue.ts";
+} from "../queue/fallback-queue";
 
 // INFO : nodemailer reports Naver's refusals as bare SMTP codes; this maps the common
 //   ones to the account-side setting that fixes them and keeps the original text.

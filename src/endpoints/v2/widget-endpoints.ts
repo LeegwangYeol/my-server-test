@@ -758,13 +758,13 @@ export const v2WidgetEndpoints = async (app: any) => {
       }: {
         headers: Record<string, string | undefined>;
         body: { dryRun?: boolean } | undefined;
+        set: any;
       }) => {
         const deny = requireAdmin(headers, set);
         if (deny) return deny;
 
         // Read history
-        const { data: appliedRows, error: histErr } = await supabaseClient
-          // @ts-expect-error — table not in generated types
+        const { data: appliedRows, error: histErr } = await (supabaseClient as any)
           .from("_migration_history")
           .select("name");
         if (histErr) {
@@ -797,8 +797,7 @@ export const v2WidgetEndpoints = async (app: any) => {
             results.push({ name: m.name, ok: false, error: execErr.message });
             break;
           }
-          const { error: trackErr } = await supabaseClient
-            // @ts-expect-error — table not in generated types
+          const { error: trackErr } = await (supabaseClient as any)
             .from("_migration_history")
             .insert({ name: m.name });
           if (trackErr) {
@@ -851,6 +850,7 @@ export const v2WidgetEndpoints = async (app: any) => {
       }: {
         headers: AdminHeaders;
         body: { widgetId: string; file: File };
+        set: any;
       }) => {
         const deny = requireAdmin(headers, set);
         if (deny) return deny;
@@ -917,6 +917,7 @@ export const v2WidgetEndpoints = async (app: any) => {
       }: {
         headers: AdminHeaders;
         body: { id?: string };
+        set: any;
       }) => {
         const deny = requireAdmin(headers, set);
         if (deny) return deny;
@@ -940,6 +941,7 @@ export const v2WidgetEndpoints = async (app: any) => {
       }: {
         headers: AdminHeaders;
         body: { widgetId?: string };
+        set: any;
       }) => {
         const deny = requireAdmin(headers, set);
         if (deny) return deny;
@@ -976,6 +978,7 @@ export const v2WidgetEndpoints = async (app: any) => {
           system_prompt?: string | null;
           context_text?: string | null;
         };
+        set: any;
       }) => {
         const deny = requireAdmin(headers, set);
         if (deny) return deny;
@@ -1021,6 +1024,7 @@ export const v2WidgetEndpoints = async (app: any) => {
       }: {
         headers: AdminHeaders;
         body: { widgetId?: string; threadId?: string; title?: string | null };
+        set: any;
       }) => {
         const deny = requireAdmin(headers, set);
         if (deny) return deny;
@@ -1055,6 +1059,7 @@ export const v2WidgetEndpoints = async (app: any) => {
       }: {
         headers: AdminHeaders;
         body: { widgetId?: string; threadId?: string };
+        set: any;
       }) => {
         const deny = requireAdmin(headers, set);
         if (deny) return deny;
