@@ -138,7 +138,7 @@ export const createApp = async (serverless = false) => {
     .onParse(async ({ request, contentType }) => {
       if (contentType === "application/json") {
         const text = await request.text();
-        if (text.length > MAX_REQUEST_BODY_SIZE) {
+        if (Buffer.byteLength(text, "utf8") > MAX_REQUEST_BODY_SIZE) {
           throw new Error("PAYLOAD_TOO_LARGE");
         }
         return JSON.parse(text);
