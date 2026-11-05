@@ -197,17 +197,17 @@ export const v2WidgetEndpoints = async (app: any) => {
         let threadId: string = body?.threadId ?? "";
 
         // ── Guard 1: 요청당 메시지 길이 상한 — 단일 요청 토큰 폭탄 방어 ──
-        const MAX_MESSAGE_CHARS = 4000;
-        if (userMessage.length > MAX_MESSAGE_CHARS) {
+        const MAX_MESSAGE_BYTES = 4000;
+        if (Buffer.byteLength(userMessage) > MAX_MESSAGE_BYTES) {
           set.status = 413;
           return {
             success: false,
-            error: `message too long (${userMessage.length} > ${MAX_MESSAGE_CHARS} chars)`,
+            error: `message too long (${Buffer.byteLength(userMessage)} > ${MAX_MESSAGE_BYTES} bytes)`,
           };
         }
 
         // ── Guard 1b: 보조 필드(browserInfo, search) 페이로드 스머글링 방어 ──
-        const MAX_AUX_CHARS = 2000;
+        const MAX_AUX_BYTES = 2000;
         if (body?.browserInfo) {
           let raw = "";
           try {
@@ -219,11 +219,11 @@ export const v2WidgetEndpoints = async (app: any) => {
             set.status = 400;
             return { success: false, error: "malformed browserInfo payload" };
           }
-          if (raw.length > MAX_AUX_CHARS) {
+          if (Buffer.byteLength(raw) > MAX_AUX_BYTES) {
             set.status = 413;
             return {
               success: false,
-              error: `browserInfo too large (${raw.length} > ${MAX_AUX_CHARS} chars)`,
+              error: `browserInfo too large (${Buffer.byteLength(raw)} > ${MAX_AUX_BYTES} bytes)`,
             };
           }
         }
@@ -238,11 +238,11 @@ export const v2WidgetEndpoints = async (app: any) => {
             set.status = 400;
             return { success: false, error: "malformed search payload" };
           }
-          if (raw.length > MAX_AUX_CHARS) {
+          if (Buffer.byteLength(raw) > MAX_AUX_BYTES) {
             set.status = 413;
             return {
               success: false,
-              error: `search options too large (${raw.length} > ${MAX_AUX_CHARS} chars)`,
+              error: `search options too large (${Buffer.byteLength(raw)} > ${MAX_AUX_BYTES} bytes)`,
             };
           }
         }
@@ -286,21 +286,21 @@ export const v2WidgetEndpoints = async (app: any) => {
 
         // ── Guard 3: 대화 기록 상한 — 다회차(multi-turn) 토큰 폭탄 방어 ──
         const MAX_HISTORY_MESSAGES = 10;
-        const MAX_HISTORY_CHARS = 16000;
+        const MAX_HISTORY_BYTES = 16000;
 
         const candidateHistory = history.slice(-MAX_HISTORY_MESSAGES);
         const boundedHistory: typeof history = [];
-        let totalChars = 0;
+        let totalBytes = 0;
 
         for (let i = candidateHistory.length - 1; i >= 0; i--) {
           const msg = candidateHistory[i];
-          const len = (msg.content || "").length;
+          const len = Buffer.byteLength(msg.content || "");
           if (
             boundedHistory.length === 0 ||
-            totalChars + len <= MAX_HISTORY_CHARS
+            totalBytes + len <= MAX_HISTORY_BYTES
           ) {
             boundedHistory.unshift(msg);
-            totalChars += len;
+            totalBytes += len;
           } else {
             break;
           }

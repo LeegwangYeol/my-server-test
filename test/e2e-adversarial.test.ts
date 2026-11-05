@@ -5,7 +5,7 @@
  * Verifies:
  * 1. Automated attacks with 16 tampering vectors against /v2/ask and /v2/widget/create-thread (100% HTTP 403).
  * 2. Token bomb attacks: 4,001+ chars, Hangul, Astral Emojis, auxiliary fields > 2,000 chars, raw body > 1MB (100% HTTP 413).
- * 3. Multi-turn conversation history bounding (clamped to <= 10 messages and <= 16,000 characters).
+ * 3. Multi-turn conversation history bounding (clamped to <= 10 messages and <= 16,000 bytes).
  */
 
 import { beforeAll, beforeEach, describe, expect, test, mock } from "bun:test";
@@ -169,7 +169,7 @@ describe("Milestone 3: E2E Adversarial Penetration Suite", () => {
   // ─── 2. Token Bomb & Body Payload Attacks (HTTP 413) ──────────────
   describe("2. Token Bomb & Payload Guard Verification (HTTP 413)", () => {
     describe("2.1 Message Length Boundaries (/v2/ask)", () => {
-      test("accepts boundary message of exactly 4,000 ASCII chars", async () => {
+      test("accepts boundary message of exactly 4,000 ASCII bytes", async () => {
         const res = await postJson(app, "/v2/ask", {
           widgetId: VALID_WIDGET_ID,
           message: "A".repeat(4000),
@@ -177,7 +177,7 @@ describe("Milestone 3: E2E Adversarial Penetration Suite", () => {
         expect(res.status).not.toBe(413);
       });
 
-      test("rejects 4,001 ASCII characters with HTTP 413 and exact error", async () => {
+      test("rejects 4,001 ASCII bytes with HTTP 413 and exact error", async () => {
         const res = await postJson(app, "/v2/ask", {
           widgetId: VALID_WIDGET_ID,
           message: "A".repeat(4001),
@@ -185,7 +185,7 @@ describe("Milestone 3: E2E Adversarial Penetration Suite", () => {
         expect(res.status).toBe(413);
         const data = (await res.json()) as any;
         expect(data.success).toBe(false);
-        expect(data.error).toContain("message too long (4001 > 4000 chars)");
+        expect(data.error).toContain("message too long (4001 > 4000 bytes)");
       });
 
       test("rejects massive 50,000 character token bomb with HTTP 413", async () => {
@@ -196,7 +196,7 @@ describe("Milestone 3: E2E Adversarial Penetration Suite", () => {
         expect(res.status).toBe(413);
       });
 
-      test("rejects multi-byte Hangul string of 4,002 code points with HTTP 413", async () => {
+      test("rejects multi-byte Hangul string of 4,002 bytes with HTTP 413", async () => {
         const res = await postJson(app, "/v2/ask", {
           widgetId: VALID_WIDGET_ID,
           message: "토끼".repeat(2001),
@@ -289,7 +289,7 @@ describe("Milestone 3: E2E Adversarial Penetration Suite", () => {
     });
 
     describe("2.4 Multi-Turn Context Bounding Invariants", () => {
-      test("bounds 50 prior turns (100,000 chars) to <= 10 messages and <= 16,000 chars", async () => {
+      test("bounds 50 prior turns (100,000 bytes) to <= 10 messages and <= 16,000 bytes", async () => {
         for (let i = 1; i <= 50; i++) {
           mockMessages.push({
             id: i,
@@ -312,7 +312,7 @@ describe("Milestone 3: E2E Adversarial Penetration Suite", () => {
 
         const turns = lastStreamRequest.messages.filter((m: any) => m.role !== "system");
         expect(turns.length).toBeLessThanOrEqual(10);
-        const totalChars = turns.reduce((acc: number, m: any) => acc + (m.content || "").length, 0);
+        const totalChars = turns.reduce((acc: number, m: any) => acc + Buffer.byteLength(m.content || ""), 0);
         expect(totalChars).toBeLessThanOrEqual(16000);
         expect(turns[turns.length - 1].content).toBe(userQuestion);
       });

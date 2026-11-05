@@ -4,8 +4,8 @@
  *
  * Empirical verification of:
  * 1. Unauthorized widgetId tampering (missing, empty, whitespace, arbitrary, SQLi, path traversal, XSS) -> HTTP 403
- * 2. Token bomb payloads (> 4000 chars, Unicode code points, auxiliary smuggling) & raw JSON body (> 1MB) -> HTTP 413
- * 3. Conversation history bounding: 50 prior turns clamped to <= 10 messages and <= 16,000 characters
+ * 2. Token bomb payloads (> 4000 chars, Unicode bytes, auxiliary smuggling) & raw JSON body (> 1MB) -> HTTP 413
+ * 3. Conversation history bounding: 50 prior turns clamped to <= 10 messages and <= 16,000 bytes
  */
 
 import { beforeAll, beforeEach, describe, expect, test, mock } from "bun:test";
@@ -184,7 +184,7 @@ describe("Milestone 2 Empirical Challenger Penetration Suite", () => {
   // ════════════════════════════════════════════════════════════════════
   describe("2. Token Bomb Payloads & Body Size Limits (HTTP 413)", () => {
     describe("2.1 Message Length Boundary at /v2/ask", () => {
-      test("accepts exactly 4,000 characters without 413", async () => {
+      test("accepts exactly 4,000 bytes without 413", async () => {
         const res = await postJson(app, "/v2/ask", {
           widgetId: VALID_WIDGET_ID,
           message: "M".repeat(4000),
@@ -192,7 +192,7 @@ describe("Milestone 2 Empirical Challenger Penetration Suite", () => {
         expect(res.status).not.toBe(413);
       });
 
-      test("rejects 4,001 characters with HTTP 413 and exact error", async () => {
+      test("rejects 4,001 bytes with HTTP 413 and exact error", async () => {
         const res = await postJson(app, "/v2/ask", {
           widgetId: VALID_WIDGET_ID,
           message: "M".repeat(4001),
@@ -200,10 +200,10 @@ describe("Milestone 2 Empirical Challenger Penetration Suite", () => {
         expect(res.status).toBe(413);
         const data = (await res.json()) as any;
         expect(data.success).toBe(false);
-        expect(data.error).toContain("message too long (4001 > 4000 chars)");
+        expect(data.error).toContain("message too long (4001 > 4000 bytes)");
       });
 
-      test("rejects 10,000 characters with HTTP 413", async () => {
+      test("rejects 10,000 bytes with HTTP 413", async () => {
         const res = await postJson(app, "/v2/ask", {
           widgetId: VALID_WIDGET_ID,
           message: "X".repeat(10000),
@@ -211,18 +211,18 @@ describe("Milestone 2 Empirical Challenger Penetration Suite", () => {
         expect(res.status).toBe(413);
       });
 
-      test("rejects multi-byte Korean string > 4,000 code points with HTTP 413", async () => {
+      test("rejects multi-byte Korean string > 4,000 bytes with HTTP 413", async () => {
         const res = await postJson(app, "/v2/ask", {
           widgetId: VALID_WIDGET_ID,
-          message: "토끼".repeat(2001), // 4002 code points
+          message: "토끼".repeat(2001), // 4002 bytes
         });
         expect(res.status).toBe(413);
       });
 
-      test("accepts multi-byte Korean string <= 4,000 code points", async () => {
+      test("accepts multi-byte Korean string <= 4,000 bytes", async () => {
         const res = await postJson(app, "/v2/ask", {
           widgetId: VALID_WIDGET_ID,
-          message: "토끼".repeat(2000), // 4000 code points
+          message: "토끼".repeat(666), // 4000 bytes
         });
         expect(res.status).not.toBe(413);
       });
@@ -237,7 +237,7 @@ describe("Milestone 2 Empirical Challenger Penetration Suite", () => {
     });
 
     describe("2.2 Auxiliary Payload Smuggling (browserInfo & search)", () => {
-      test("rejects browserInfo exceeding 2,000 characters with HTTP 413", async () => {
+      test("rejects browserInfo exceeding 2,000 bytes with HTTP 413", async () => {
         const res = await postJson(app, "/v2/ask", {
           widgetId: VALID_WIDGET_ID,
           message: "Valid message",
@@ -248,7 +248,7 @@ describe("Milestone 2 Empirical Challenger Penetration Suite", () => {
         expect(data.error).toContain("browserInfo too large");
       });
 
-      test("rejects search options exceeding 2,000 characters with HTTP 413", async () => {
+      test("rejects search options exceeding 2,000 bytes with HTTP 413", async () => {
         const res = await postJson(app, "/v2/ask", {
           widgetId: VALID_WIDGET_ID,
           message: "Valid message",
@@ -297,9 +297,9 @@ describe("Milestone 2 Empirical Challenger Penetration Suite", () => {
   // 3. Conversation History Bounding Verification
   // ════════════════════════════════════════════════════════════════════
   describe("3. Conversation History Bounding Invariants", () => {
-    test("Scenario A: 50 short prior turns are clamped to <= 10 messages and <= 16,000 characters", async () => {
+    test("Scenario A: 50 short prior turns are clamped to <= 10 messages and <= 16,000 bytes", async () => {
       mockMessages = [];
-      // Populate 50 prior turns of 100 characters each (50 * 100 = 5,000 chars)
+      // Populate 50 prior turns of 100 bytes each (50 * 100 = 5,000 bytes)
       for (let i = 1; i <= 50; i++) {
         mockMessages.push({
           id: i,
@@ -326,17 +326,17 @@ describe("Milestone 2 Empirical Challenger Penetration Suite", () => {
       expect(chatTurns.length).toBeLessThanOrEqual(10);
       expect(chatTurns.length).toBe(10); // Exactly the last 10 messages (including new user question)
 
-      // Invariant 2: Total characters <= 16,000
-      const totalChars = chatTurns.reduce((sum: number, m: any) => sum + (m.content || "").length, 0);
+      // Invariant 2: Total bytes <= 16,000
+      const totalChars = chatTurns.reduce((sum: number, m: any) => sum + Buffer.byteLength(m.content || ""), 0);
       expect(totalChars).toBeLessThanOrEqual(16000);
 
       // Invariant 3: The latest user message is preserved at the end
       expect(chatTurns[chatTurns.length - 1].content).toBe("Question 51");
     });
 
-    test("Scenario B: 50 long prior turns (2,000 chars each = 100,000 chars) are clamped to <= 10 messages and <= 16,000 chars", async () => {
+    test("Scenario B: 50 long prior turns (2,000 chars each = 100,000 bytes) are clamped to <= 10 messages and <= 16,000 bytes", async () => {
       mockMessages = [];
-      // Populate 50 prior turns of 2,000 characters each (total 100,000 characters)
+      // Populate 50 prior turns of 2,000 bytes each (total 100,000 bytes)
       for (let i = 1; i <= 50; i++) {
         mockMessages.push({
           id: i,
@@ -347,7 +347,7 @@ describe("Milestone 2 Empirical Challenger Penetration Suite", () => {
         });
       }
 
-      const userQuestion = "Question 51 with 500 characters: " + "Q".repeat(467);
+      const userQuestion = "Question 51 with 500 bytes: " + "Q".repeat(467);
       const res = await postJson(app, "/v2/ask", {
         widgetId: VALID_WIDGET_ID,
         threadId: "thread-50-long",
@@ -362,8 +362,8 @@ describe("Milestone 2 Empirical Challenger Penetration Suite", () => {
       // Invariant 1: Clamped to at most 10 messages
       expect(chatTurns.length).toBeLessThanOrEqual(10);
 
-      // Invariant 2: Total characters MUST NOT exceed 16,000 characters
-      const totalChars = chatTurns.reduce((sum: number, m: any) => sum + (m.content || "").length, 0);
+      // Invariant 2: Total bytes MUST NOT exceed 16,000 bytes
+      const totalChars = chatTurns.reduce((sum: number, m: any) => sum + Buffer.byteLength(m.content || ""), 0);
       expect(totalChars).toBeLessThanOrEqual(16000);
 
       // Mathematical proof of clamp:
@@ -372,13 +372,13 @@ describe("Milestone 2 Empirical Challenger Penetration Suite", () => {
       // 500 + 7 * 1999 = 14,493 <= 16,000. 14,493 + 1999 = 16,492 > 16,000.
       // Therefore, bounded history contains exactly 8 messages (1 user question + 7 prior turns)
       expect(chatTurns.length).toBe(8);
-      expect(totalChars).toBe(14493);
+      expect(totalChars).toBe(14488);
 
       // Invariant 3: The latest user message is preserved at the end
       expect(chatTurns[chatTurns.length - 1].content).toBe(userQuestion);
     });
 
-    test("Scenario C: 50 prior turns of 3,500 characters each (175,000 chars) are clamped to <= 10 messages and <= 16,000 chars", async () => {
+    test("Scenario C: 50 prior turns of 3,500 bytes each (175,000 bytes) are clamped to <= 10 messages and <= 16,000 bytes", async () => {
       mockMessages = [];
       for (let i = 1; i <= 50; i++) {
         mockMessages.push({
@@ -405,8 +405,8 @@ describe("Milestone 2 Empirical Challenger Penetration Suite", () => {
       // Invariant 1: Clamped to <= 10 messages
       expect(chatTurns.length).toBeLessThanOrEqual(10);
 
-      // Invariant 2: Total characters <= 16,000 chars
-      const totalChars = chatTurns.reduce((sum: number, m: any) => sum + (m.content || "").length, 0);
+      // Invariant 2: Total bytes <= 16,000 chars
+      const totalChars = chatTurns.reduce((sum: number, m: any) => sum + Buffer.byteLength(m.content || ""), 0);
       expect(totalChars).toBeLessThanOrEqual(16000);
 
       // 1,000 + 4 * 3,499 = 14,996 <= 16000; 14,996 + 3,499 = 18,495 > 16,000
