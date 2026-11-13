@@ -1,7 +1,7 @@
 // scripts/verify-live-28-endpoints.mjs
 // Live Vercel Production 28-Endpoint Verification Script
 
-const BASE_URL = process.env.BASE_URL || "https://my-server-test.vercel.app";
+const BASE_URL = process.env.BASE_URL || "https://my-server-mocha.vercel.app";
 
 const results = [];
 

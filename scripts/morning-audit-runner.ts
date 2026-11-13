@@ -11,7 +11,7 @@ interface TestResult {
   notes?: string;
 }
 
-const REMOTE_BASE = "https://my-server-test.vercel.app";
+const REMOTE_BASE = "https://my-server-mocha.vercel.app";
 
 async function runLocalAndRemoteAudit() {
   console.log("==================================================================");

@@ -18,7 +18,7 @@
  */
 
 const BASE = (
-  process.env.TOKKI_API_URL || "https://my-server-test.vercel.app"
+  process.env.TOKKI_API_URL || "https://my-server-mocha.vercel.app"
 ).replace(/\/$/, "");
 
 const TOKEN = process.env.ADMIN_TOKEN?.trim();

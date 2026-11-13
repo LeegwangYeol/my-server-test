@@ -673514,1879 +673514,6 @@ var require_main3 = __commonJS({
   }
 });
 
-// lib/llm/openai-compatible.ts
-function backoffMs(attempt) {
-  const base = Math.min(500 * 2 ** attempt, 2e3);
-  return Math.round(base * (0.8 + Math.random() * 0.4));
-}
-function parseRetryAfterMs(header, dateHeader) {
-  if (!header) return void 0;
-  const v = header.trim();
-  if (!v) return void 0;
-  if (/^(?:\d+(?:\.\d*)?|\.\d+)s?$/i.test(v)) {
-    const sec = parseFloat(v);
-    if (!Number.isNaN(sec) && Number.isFinite(sec) && sec >= 0) {
-      const baseMs = sec * 1e3;
-      if (baseMs === 0) return 0;
-      const jitter = 0.8 + Math.random() * 0.4;
-      return Math.max(0, Math.round(baseMs * jitter));
-    }
-    return void 0;
-  }
-  if (!Number.isNaN(Number(v))) {
-    return void 0;
-  }
-  const at = Date.parse(v);
-  if (!Number.isNaN(at)) {
-    let skew = 0;
-    if (dateHeader) {
-      const serverTime = Date.parse(dateHeader);
-      if (!Number.isNaN(serverTime)) {
-        skew = serverTime - Date.now();
-      }
-    }
-    const diff = at - (Date.now() + skew);
-    if (diff <= 0) return 0;
-    const jitter = 0.8 + Math.random() * 0.4;
-    return Math.max(0, Math.round(diff * jitter));
-  }
-  return void 0;
-}
-function envInt(name, fallback, min, max) {
-  const raw = process.env[name]?.trim();
-  if (!raw) return fallback;
-  const n = Number(raw);
-  if (!Number.isInteger(n)) return fallback;
-  return Math.min(max, Math.max(min, n));
-}
-function isAbortError(err) {
-  return typeof err === "object" && err !== null && err.name === "AbortError";
-}
-function sleep2(ms, signal) {
-  return new Promise((resolve, reject) => {
-    if (signal?.aborted) return reject(abortError());
-    const onAbort = () => {
-      clearTimeout(timer);
-      reject(abortError());
-    };
-    const timer = setTimeout(() => {
-      signal?.removeEventListener("abort", onAbort);
-      resolve();
-    }, ms);
-    signal?.addEventListener("abort", onAbort, { once: true });
-  });
-}
-function abortError() {
-  try {
-    return new DOMException("The operation was aborted.", "AbortError");
-  } catch {
-    return Object.assign(new Error("The operation was aborted."), {
-      name: "AbortError"
-    });
-  }
-}
-async function safeText(resp) {
-  try {
-    return await resp.text();
-  } catch {
-    return "<unreadable body>";
-  }
-}
-var OpenAICompatibleProvider, RETRYABLE_STATUS;
-var init_openai_compatible = __esm({
-  "lib/llm/openai-compatible.ts"() {
-    OpenAICompatibleProvider = class {
-      constructor(opts) {
-        this.name = opts.name;
-        this.baseUrl = opts.baseUrl.replace(/\/+$/, "");
-        this.apiKey = opts.apiKey;
-        this.defaultModel = opts.defaultModel;
-        this.extraHeaders = opts.extraHeaders ?? {};
-      }
-      async *stream(req, signal) {
-        const resp = await this.fetchWithRetry(req, signal);
-        if (!resp.body) {
-          throw new Error(`[${this.name}] empty response body`);
-        }
-        const reader = resp.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "";
-        try {
-          while (true) {
-            const { value, done } = await reader.read();
-            if (done) break;
-            buffer += decoder.decode(value, { stream: true });
-            let nl;
-            while ((nl = buffer.indexOf("\n")) !== -1) {
-              const line = buffer.slice(0, nl).trim();
-              buffer = buffer.slice(nl + 1);
-              if (!line.startsWith("data:")) continue;
-              const payload = line.slice(5).trim();
-              if (payload === "[DONE]") return;
-              try {
-                const json = JSON.parse(payload);
-                const delta = json?.choices?.[0]?.delta?.content;
-                if (delta) yield delta;
-              } catch {
-              }
-            }
-          }
-        } finally {
-          try {
-            await reader.cancel().catch(() => {
-            });
-            reader.releaseLock();
-          } catch {
-          }
-        }
-      }
-      /**
-       * POST the chat request; on 429/5xx (or a network error) back off and retry
-       * a bounded number of times. Resolves only with an `ok` response.
-       * 실패 시 던지는 에러 문구는 기존 형식 `[name] status statusText: body` 를 유지한다
-       * (/v2/ask 의 에러 처리 경로가 그 형식에 의존).
-       */
-      async fetchWithRetry(req, signal) {
-        const maxRetries = envInt("LLM_RETRY_MAX", 3, 0, 5);
-        const maxWaitMs = envInt("LLM_RETRY_MAX_WAIT_MS", 5e3, 0, 8e3);
-        const body = JSON.stringify({
-          model: req.model ?? this.defaultModel,
-          messages: req.messages,
-          stream: true,
-          temperature: req.temperature ?? 0.7,
-          max_tokens: req.maxTokens ?? envInt("LLM_MAX_TOKENS", 512, 1, 4096)
-        });
-        for (let attempt = 0; ; attempt++) {
-          let resp;
-          try {
-            resp = await fetch(`${this.baseUrl}/chat/completions`, {
-              method: "POST",
-              signal,
-              headers: {
-                "Content-Type": "application/json",
-                Authorization: `Bearer ${this.apiKey}`,
-                ...this.extraHeaders
-              },
-              body
-            });
-          } catch (err) {
-            if (signal?.aborted || isAbortError(err) || attempt >= maxRetries) {
-              throw err;
-            }
-            const wait = backoffMs(attempt);
-            console.warn(
-              `[${this.name}] network error \u2192 retry ${attempt + 1}/${maxRetries} in ${wait}ms`
-            );
-            await sleep2(wait, signal);
-            continue;
-          }
-          if (resp.ok) return resp;
-          const retryable = RETRYABLE_STATUS.has(resp.status);
-          if (retryable && attempt < maxRetries) {
-            const wait = parseRetryAfterMs(
-              resp.headers.get("retry-after"),
-              resp.headers.get("date")
-            ) ?? backoffMs(attempt);
-            if (wait <= maxWaitMs) {
-              void resp.body?.cancel().catch(() => {
-              });
-              console.warn(
-                `[${this.name}] ${resp.status} \u2192 retry ${attempt + 1}/${maxRetries} in ${wait}ms`
-              );
-              await sleep2(wait, signal);
-              continue;
-            }
-          }
-          const text = await safeText(resp);
-          throw new Error(
-            `[${this.name}] ${resp.status} ${resp.statusText}: ${text.slice(0, 300)}`
-          );
-        }
-      }
-    };
-    RETRYABLE_STATUS = /* @__PURE__ */ new Set([429, 500, 502, 503, 504]);
-  }
-});
-
-// lib/llm/key-manager/engine.ts
-var HealthAndCooldownEngine;
-var init_engine = __esm({
-  "lib/llm/key-manager/engine.ts"() {
-    HealthAndCooldownEngine = class {
-      static {
-        this.ALPHA_DECAY = 0.85;
-      }
-      static {
-        this.BASE_BACKOFF_MS = 2e3;
-      }
-      static {
-        this.MAX_BACKOFF_MS = 6e4;
-      }
-      /**
-       * Updates health score using Exponential Moving Average (EMA).
-       */
-      static updateHealthScore(current, outcome) {
-        let score = 1;
-        switch (outcome) {
-          case "SUCCESS":
-            score = 1;
-            break;
-          case "RATE_LIMIT":
-            score = 0.2;
-            break;
-          case "SERVER_ERROR":
-            score = 0.1;
-            break;
-          case "TIMEOUT":
-            score = 0;
-            break;
-        }
-        const safeCurrent = isNaN(current) ? 1 : Math.max(0, Math.min(1, current));
-        return Number((safeCurrent * this.ALPHA_DECAY + score * (1 - this.ALPHA_DECAY)).toFixed(4));
-      }
-      /**
-       * Distinguishes between key rate limits and upstream provider/model outages.
-       */
-      static isUpstreamProviderOutage(payload) {
-        if (payload?.error?.metadata?.provider_name) {
-          return { isOutage: true, provider: payload.error.metadata.provider_name };
-        }
-        const msg = (payload?.error?.message || "").toLowerCase();
-        if (msg.includes("provider returned") || msg.includes("upstream") || msg.includes("overloaded") || msg.includes("provider unavailable") || msg.includes("model is currently overloaded")) {
-          return { isOutage: true, provider: "UpstreamProvider" };
-        }
-        return { isOutage: false };
-      }
-      /**
-       * Evaluates response headers to determine accurate 429 cooldown with jitter buffer.
-       * Fully protected against NaN, malformed Date headers, and ISO 8601 strings.
-       */
-      static calculate429Cooldown(headers, consecutive429s, nowMs = Date.now()) {
-        const getHeader = (name) => {
-          if (!headers) return null;
-          if (typeof headers.get === "function") {
-            return headers.get(name);
-          }
-          const record = headers;
-          const lowerName = name.toLowerCase();
-          let val = record[name] ?? record[lowerName];
-          if (val === void 0) {
-            const matchingKey = Object.keys(record).find((k) => k.toLowerCase() === lowerName);
-            if (matchingKey) {
-              val = record[matchingKey];
-            }
-          }
-          if (Array.isArray(val)) return val[0] ?? null;
-          return val ?? null;
-        };
-        const now = nowMs;
-        const retryAfter = getHeader("retry-after");
-        if (retryAfter) {
-          const trimmed = retryAfter.trim();
-          if (/^\d+$/.test(trimmed)) {
-            const deltaSec = parseInt(trimmed, 10);
-            if (!isNaN(deltaSec) && deltaSec >= 0) {
-              return Math.max(1e3, deltaSec * 1e3 + this.getJitterMs(500, 1500));
-            }
-          }
-          const parsedDate = Date.parse(trimmed);
-          if (!isNaN(parsedDate)) {
-            const serverDateStr = getHeader("date");
-            let skew = 0;
-            if (serverDateStr) {
-              const parsedServerDate = Date.parse(serverDateStr);
-              if (!isNaN(parsedServerDate)) {
-                skew = parsedServerDate - now;
-              }
-            }
-            const diffMs = parsedDate - (now + skew);
-            if (!isNaN(diffMs) && diffMs > 0) {
-              return Math.max(1e3, diffMs + this.getJitterMs(500, 1500));
-            }
-          }
-        }
-        const resetHeader = getHeader("x-ratelimit-reset");
-        if (resetHeader) {
-          const trimmed = resetHeader.trim();
-          const isoParsed = Date.parse(trimmed);
-          if (!isNaN(isoParsed) && isNaN(Number(trimmed))) {
-            const diffMs = isoParsed - now;
-            return Math.max(1e3, (diffMs > 0 ? diffMs : 0) + this.getJitterMs(500, 1500));
-          }
-          const resetVal = parseFloat(trimmed);
-          if (!isNaN(resetVal) && resetVal >= 0) {
-            let diffMs = 0;
-            if (resetVal < 1e5) {
-              diffMs = resetVal * 1e3;
-            } else if (resetVal < 1e10) {
-              diffMs = resetVal * 1e3 - now;
-            } else {
-              diffMs = resetVal - now;
-            }
-            if (!isNaN(diffMs) && diffMs > 0) {
-              return Math.max(1e3, diffMs + this.getJitterMs(500, 1500));
-            }
-          }
-        }
-        const safeConsecutive = isNaN(consecutive429s) ? 1 : Math.max(1, Math.min(consecutive429s, 5));
-        const expCap = Math.min(this.MAX_BACKOFF_MS, this.BASE_BACKOFF_MS * Math.pow(2, safeConsecutive));
-        const cooldown = Math.floor(Math.random() * expCap) + 500;
-        return isNaN(cooldown) ? 2e3 : Math.max(1e3, cooldown);
-      }
-      static getJitterMs(min, max) {
-        return Math.floor(Math.random() * (max - min + 1)) + min;
-      }
-    };
-  }
-});
-
-// lib/llm/key-manager/executor.ts
-function createAttemptSignal(timeoutMs, clientSignal) {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => {
-    controller.abort(new Error("ATTEMPT_TIMEOUT"));
-  }, timeoutMs);
-  const onClientAbort = () => {
-    controller.abort(clientSignal?.reason || new Error("CLIENT_ABORTED"));
-  };
-  if (clientSignal) {
-    if (clientSignal.aborted) {
-      controller.abort(clientSignal.reason);
-    } else {
-      clientSignal.addEventListener("abort", onClientAbort, { once: true });
-    }
-  }
-  const cleanup = () => {
-    clearTimeout(timeoutId);
-    if (clientSignal) {
-      clientSignal.removeEventListener("abort", onClientAbort);
-    }
-  };
-  return { signal: controller.signal, cleanup };
-}
-async function executeWithResilientFailover(keyStore, keyConfigMap, requestFactory, maxAttempts = 3, clientSignal) {
-  const attemptedKeyIds = [];
-  const brokenAccountIds = /* @__PURE__ */ new Set();
-  let attempt = 0;
-  let lastStatusCode = null;
-  while (attempt < maxAttempts) {
-    if (clientSignal?.aborted) {
-      throw new KeyManagerError(
-        "CLIENT_ABORTED: Client disconnected before handshake completed.",
-        499,
-        void 0,
-        "CLIENT_ABORTED"
-      );
-    }
-    attempt++;
-    const reservation = await keyStore.reserveKey(attemptedKeyIds);
-    if (!reservation) {
-      const allStates2 = await keyStore.getAllStates().catch(() => []);
-      if (allStates2.length > 0 && allStates2.every((s) => s.status === "EXHAUSTED")) {
-        throw new AllAccountsExhaustedError();
-      }
-      throw new AllKeysRateLimitedError(5);
-    }
-    const { keyId, leaseToken } = reservation;
-    attemptedKeyIds.push(keyId);
-    const config = keyConfigMap.get(keyId);
-    if (!config) {
-      await keyStore.releaseKey(keyId, leaseToken, 500, 0, "Missing key configuration");
-      continue;
-    }
-    if (config.accountId && brokenAccountIds.has(config.accountId)) {
-      lastStatusCode = 402;
-      await keyStore.releaseKey(
-        keyId,
-        leaseToken,
-        402,
-        Infinity,
-        "Shared account balance exhausted"
-      );
-      continue;
-    }
-    const { signal: attemptSignal, cleanup: cleanupSignal } = createAttemptSignal(
-      6e3,
-      clientSignal
-    );
-    try {
-      const response = await requestFactory(config.apiKey, attemptSignal);
-      cleanupSignal();
-      if (response.ok) {
-        await keyStore.acknowledgeHandshake(keyId, leaseToken);
-        return { response, keyId, leaseToken };
-      }
-      const errJson = await response.clone().json().catch(() => ({}));
-      const errText = !errJson?.error ? await response.text().catch(() => "") : JSON.stringify(errJson);
-      const outageCheck = HealthAndCooldownEngine.isUpstreamProviderOutage(errJson);
-      if (outageCheck.isOutage && (response.status === 429 || response.status === 503)) {
-        await keyStore.releaseKey(
-          keyId,
-          leaseToken,
-          0,
-          0,
-          `Provider outage: ${outageCheck.provider}`
-        );
-        throw new UpstreamProviderOutageError(outageCheck.provider || "UpstreamProvider");
-      }
-      if (response.status === 402 || response.status === 401) {
-        lastStatusCode = response.status;
-        if (config.accountId) {
-          brokenAccountIds.add(config.accountId);
-        }
-        await keyStore.releaseKey(keyId, leaseToken, response.status, Infinity, errText);
-        continue;
-      }
-      if (response.status === 429) {
-        lastStatusCode = 429;
-        const states = await keyStore.getAllStates().catch(() => []);
-        const currentState = states.find((s) => s.id === keyId);
-        const consecutive429s = (currentState?.consecutive429s || 0) + 1;
-        const cooldownMs = HealthAndCooldownEngine.calculate429Cooldown(
-          response.headers,
-          consecutive429s
-        );
-        await keyStore.releaseKey(keyId, leaseToken, 429, cooldownMs, errText);
-        continue;
-      }
-      if (response.status >= 500) {
-        lastStatusCode = response.status;
-        await keyStore.releaseKey(keyId, leaseToken, response.status, 2500, errText);
-        continue;
-      }
-      await keyStore.releaseKey(keyId, leaseToken, response.status, 0, "Client error");
-      return { response, keyId, leaseToken };
-    } catch (networkErr) {
-      cleanupSignal();
-      const isClientAbort = clientSignal?.aborted;
-      if (isClientAbort) {
-        await keyStore.releaseKey(keyId, leaseToken, 499, 0, "Client stream aborted");
-        throw new KeyManagerError(
-          "CLIENT_ABORTED: Client disconnected during handshake.",
-          499,
-          void 0,
-          "CLIENT_ABORTED"
-        );
-      }
-      if (networkErr instanceof UpstreamProviderOutageError) {
-        throw networkErr;
-      }
-      const isTimeout = networkErr?.message === "ATTEMPT_TIMEOUT";
-      const status2 = isTimeout ? 504 : 0;
-      lastStatusCode = status2;
-      const cooldownMs = 2e3;
-      await keyStore.releaseKey(
-        keyId,
-        leaseToken,
-        status2,
-        cooldownMs,
-        networkErr?.message || "Handshake network error"
-      );
-      continue;
-    }
-  }
-  const allStates = await keyStore.getAllStates().catch(() => []);
-  const attemptedStates = allStates.filter((s) => attemptedKeyIds.includes(s.id));
-  if (allStates.length > 0 && allStates.every((s) => s.status === "EXHAUSTED") || attemptedStates.length > 0 && attemptedStates.every((s) => s.status === "EXHAUSTED")) {
-    throw new AllAccountsExhaustedError();
-  }
-  const allAttemptedRateLimited = attemptedStates.length > 0 && attemptedStates.every((s) => s.status === "RATE_LIMITED" || s.status === "EXHAUSTED");
-  if (allAttemptedRateLimited || lastStatusCode === 429) {
-    throw new AllKeysRateLimitedError(5);
-  }
-  throw new FailoverExhaustedError(attemptedKeyIds);
-}
-var KeyManagerError, AllKeysRateLimitedError, AllAccountsExhaustedError, UpstreamProviderOutageError, FailoverExhaustedError;
-var init_executor = __esm({
-  "lib/llm/key-manager/executor.ts"() {
-    init_engine();
-    KeyManagerError = class extends Error {
-      constructor(message, statusCode = 500, retryAfterSeconds, code) {
-        super(message);
-        this.statusCode = statusCode;
-        this.retryAfterSeconds = retryAfterSeconds;
-        this.name = "KeyManagerError";
-        this.code = code;
-      }
-    };
-    AllKeysRateLimitedError = class extends KeyManagerError {
-      constructor(retryAfterSeconds = 5) {
-        super(
-          "ALL_KEYS_RATE_LIMITED: All API channels are currently busy.",
-          429,
-          retryAfterSeconds,
-          "ALL_KEYS_RATE_LIMITED"
-        );
-        this.code = "ALL_KEYS_RATE_LIMITED";
-        this.name = "AllKeysRateLimitedError";
-      }
-    };
-    AllAccountsExhaustedError = class extends KeyManagerError {
-      constructor() {
-        super(
-          "ALL_ACCOUNTS_EXHAUSTED: Service temporarily unavailable due to upstream provider credit exhaustion.",
-          503,
-          void 0,
-          "ALL_ACCOUNTS_EXHAUSTED"
-        );
-        this.code = "ALL_ACCOUNTS_EXHAUSTED";
-        this.name = "AllAccountsExhaustedError";
-      }
-    };
-    UpstreamProviderOutageError = class extends KeyManagerError {
-      constructor(provider) {
-        super(
-          `UPSTREAM_MODEL_OUTAGE: ${provider} is experiencing an outage.`,
-          503,
-          void 0,
-          "UPSTREAM_MODEL_OUTAGE"
-        );
-        this.provider = provider;
-        this.code = "UPSTREAM_MODEL_OUTAGE";
-        this.name = "UpstreamProviderOutageError";
-      }
-    };
-    FailoverExhaustedError = class extends KeyManagerError {
-      constructor(attemptedKeyIds) {
-        super(
-          `FAILOVER_EXHAUSTED: Handshake failed across keys: [${attemptedKeyIds.join(", ")}]`,
-          503,
-          void 0,
-          "FAILOVER_EXHAUSTED"
-        );
-        this.attemptedKeyIds = attemptedKeyIds;
-        this.code = "FAILOVER_EXHAUSTED";
-        this.name = "FailoverExhaustedError";
-      }
-    };
-  }
-});
-
-// lib/llm/key-manager/stores/memory.ts
-var MemoryKeyStore;
-var init_memory = __esm({
-  "lib/llm/key-manager/stores/memory.ts"() {
-    MemoryKeyStore = class {
-      constructor(options) {
-        this.records = /* @__PURE__ */ new Map();
-        /** Simulates openrouter:key:<id>:leases ZSET (member: leaseToken -> score: expireAtEpochMs) */
-        this.leases = /* @__PURE__ */ new Map();
-        /** Simulates openrouter:account:<accountId>:keys */
-        this.accountKeys = /* @__PURE__ */ new Map();
-        /** Simulates openrouter:account:<accountId>:broken (accountId -> expireAtEpochMs) */
-        this.brokenAccounts = /* @__PURE__ */ new Map();
-        this.clock = options?.clock ?? (() => Date.now());
-        this.defaultMaxConcurrency = options?.defaultMaxConcurrency ?? 5;
-        this.leaseTimeoutMs = options?.leaseTimeoutMs ?? 45e3;
-      }
-      now() {
-        return this.clock();
-      }
-      /**
-       * Idempotent initialization: seeds keys, internal records, and account groups.
-       * Matches HSETNX semantics: updates static configuration without overwriting active runtime states.
-       */
-      async syncKeys(keys) {
-        for (const key of keys) {
-          if (!this.leases.has(key.id)) {
-            this.leases.set(key.id, /* @__PURE__ */ new Map());
-          }
-          const existing = this.records.get(key.id);
-          if (existing) {
-            existing.config = { ...key };
-          } else {
-            this.records.set(key.id, {
-              config: { ...key },
-              state: "ACTIVE",
-              cooldownUntil: 0,
-              lastUsedAt: 0,
-              totalRequests: 0,
-              consecutiveFailures: 0,
-              consecutive429s: 0,
-              lastStatusCode: null,
-              lastErrorMessage: null
-            });
-          }
-          if (key.accountId) {
-            let set = this.accountKeys.get(key.accountId);
-            if (!set) {
-              set = /* @__PURE__ */ new Set();
-              this.accountKeys.set(key.accountId, set);
-            }
-            set.add(key.id);
-          }
-        }
-      }
-      /**
-       * Atomically reserves the optimal key using the Weighted Least-In-Flight (WLIF) algorithm.
-       * Purges expired leases via simulated ZREMRANGEBYSCORE on every reservation.
-       */
-      async reserveKey(modelOrExclude, maybeExclude) {
-        let excludeKeyIds = [];
-        if (Array.isArray(modelOrExclude)) {
-          excludeKeyIds = modelOrExclude;
-        } else if (Array.isArray(maybeExclude)) {
-          excludeKeyIds = maybeExclude;
-        }
-        const excluded = new Set(excludeKeyIds.map((id) => id.trim()).filter(Boolean));
-        const now = this.now();
-        this.pruneAllExpiredLeases(now);
-        if (this.records.size === 0) {
-          return null;
-        }
-        let bestKey = null;
-        let lowestTier = 999;
-        let lowestLoadScore = 999999999;
-        let oldestUsed = 9999999999999;
-        for (const [keyId, record] of this.records.entries()) {
-          if (excluded.has(keyId)) continue;
-          const accountId = record.config.accountId || "";
-          const isAccountBroken = this.isAccountBroken(accountId, now);
-          if (isAccountBroken) continue;
-          if (record.state === "EXHAUSTED" || record.state === "DISABLED") continue;
-          const keyLeases2 = this.leases.get(keyId);
-          const inFlight = keyLeases2 ? keyLeases2.size : 0;
-          const maxConc = record.config.maxConcurrency || this.defaultMaxConcurrency;
-          const weight = Math.max(1, record.config.weight || 1);
-          const tier = record.config.tier ?? 0;
-          let eligible = false;
-          if (record.state === "ACTIVE") {
-            if (inFlight < maxConc) {
-              eligible = true;
-            }
-          } else if (record.state === "RATE_LIMITED" || record.state === "TRANSIENT_BACKOFF") {
-            if (now >= record.cooldownUntil) {
-              record.state = "WARMUP";
-              if (inFlight === 0) {
-                eligible = true;
-              }
-            }
-          } else if (record.state === "WARMUP") {
-            if (inFlight === 0) {
-              eligible = true;
-            }
-          }
-          if (eligible) {
-            const loadScore = Math.floor(inFlight * 1e3 / weight);
-            if (tier < lowestTier) {
-              lowestTier = tier;
-              lowestLoadScore = loadScore;
-              oldestUsed = record.lastUsedAt;
-              bestKey = keyId;
-            } else if (tier === lowestTier) {
-              if (loadScore < lowestLoadScore) {
-                lowestLoadScore = loadScore;
-                oldestUsed = record.lastUsedAt;
-                bestKey = keyId;
-              } else if (loadScore === lowestLoadScore) {
-                if (record.lastUsedAt < oldestUsed) {
-                  oldestUsed = record.lastUsedAt;
-                  bestKey = keyId;
-                }
-              }
-            }
-          }
-        }
-        if (!bestKey) {
-          return null;
-        }
-        const selectedRecord = this.records.get(bestKey);
-        let keyLeases = this.leases.get(bestKey);
-        if (!keyLeases) {
-          keyLeases = /* @__PURE__ */ new Map();
-          this.leases.set(bestKey, keyLeases);
-        }
-        const nonce = Math.floor(1e9 + Math.random() * 9e9);
-        const leaseToken = `${bestKey}:${now}:${nonce}`;
-        const leaseExpireAt = now + this.leaseTimeoutMs;
-        keyLeases.set(leaseToken, leaseExpireAt);
-        selectedRecord.totalRequests++;
-        selectedRecord.lastUsedAt = now;
-        if (selectedRecord.state === "WARMUP") {
-          selectedRecord.canaryToken = leaseToken;
-        }
-        return { keyId: bestKey, leaseToken };
-      }
-      /**
-       * Phase 1: Immediately graduates WARMUP keys to ACTIVE upon receiving HTTP 200 headers (<500ms).
-       * Unlocks full concurrency ceiling for subsequent requests.
-       */
-      async acknowledgeHandshake(keyId, leaseToken) {
-        const record = this.records.get(keyId);
-        if (!record) return false;
-        if (record.state === "WARMUP" && record.canaryToken === leaseToken) {
-          record.state = "ACTIVE";
-          record.consecutive429s = 0;
-          record.consecutiveFailures = 0;
-          record.canaryToken = void 0;
-          record.lastStatusCode = null;
-          record.lastErrorMessage = null;
-          return true;
-        }
-        return false;
-      }
-      /**
-       * Phase 2: Removes ZSET lease token, resolves state transitions, and enforces 402 bulk invalidation.
-       */
-      async releaseKey(keyId, leaseToken, outcomeOrStatus, cooldownMs, errorMessage) {
-        let statusCode;
-        let cooldown;
-        let errMsg;
-        if (typeof outcomeOrStatus === "object") {
-          statusCode = outcomeOrStatus.statusCode;
-          cooldown = outcomeOrStatus.cooldownMs ?? 0;
-          errMsg = outcomeOrStatus.errorMessage ?? "";
-        } else {
-          statusCode = outcomeOrStatus;
-          cooldown = cooldownMs ?? 0;
-          errMsg = errorMessage ?? "";
-        }
-        const now = this.now();
-        const keyLeases = this.leases.get(keyId);
-        const removed = keyLeases ? keyLeases.delete(leaseToken) : false;
-        if (!removed && (statusCode === 200 || statusCode === 499)) {
-          return;
-        }
-        const record = this.records.get(keyId);
-        if (!record) return;
-        if (statusCode === 200) {
-          if (record.state === "WARMUP" && record.canaryToken === leaseToken) {
-            record.state = "ACTIVE";
-            record.consecutive429s = 0;
-            record.consecutiveFailures = 0;
-            record.canaryToken = void 0;
-            record.lastStatusCode = null;
-            record.lastErrorMessage = null;
-          } else if (record.state === "ACTIVE") {
-            record.consecutiveFailures = 0;
-          }
-        } else if (statusCode === 429) {
-          if (record.state !== "EXHAUSTED") {
-            record.consecutive429s++;
-            record.state = "RATE_LIMITED";
-            record.cooldownUntil = now + cooldown;
-            record.lastStatusCode = 429;
-            record.lastErrorMessage = errMsg;
-          }
-        } else if (statusCode === 402 || statusCode === 401) {
-          record.state = "EXHAUSTED";
-          record.cooldownUntil = Infinity;
-          record.lastStatusCode = statusCode;
-          record.lastErrorMessage = errMsg;
-          const accountId = record.config.accountId;
-          if (accountId) {
-            this.brokenAccounts.set(accountId, now + 86400 * 1e3);
-            const linkedKeys = this.accountKeys.get(accountId);
-            if (linkedKeys) {
-              for (const linkedId of linkedKeys) {
-                const linkedRecord = this.records.get(linkedId);
-                if (linkedRecord) {
-                  linkedRecord.state = "EXHAUSTED";
-                  linkedRecord.cooldownUntil = Infinity;
-                  linkedRecord.lastStatusCode = statusCode;
-                  linkedRecord.lastErrorMessage = "Account credit balance exhausted";
-                }
-              }
-            }
-          }
-        } else if (statusCode >= 500 || statusCode === 0 && cooldown > 0 || statusCode === 408) {
-          record.consecutiveFailures++;
-          if (record.consecutiveFailures >= 3 && record.state === "ACTIVE") {
-            record.state = "TRANSIENT_BACKOFF";
-            record.cooldownUntil = now + 2500;
-          }
-          record.lastStatusCode = statusCode;
-          record.lastErrorMessage = errMsg;
-        } else if (statusCode === 0 && cooldown === 0) {
-          record.lastStatusCode = 0;
-          record.lastErrorMessage = errMsg;
-        } else if (statusCode === 499) {
-          record.lastStatusCode = 499;
-          record.lastErrorMessage = "Client stream aborted";
-        }
-      }
-      /**
-       * Retrieves active in-flight lease count after pruning expired leases.
-       */
-      async getActiveLeaseCount(keyId) {
-        this.pruneKeyLeases(keyId, this.now());
-        return this.leases.get(keyId)?.size ?? 0;
-      }
-      /**
-       * Retrieves operational metrics for a specific key.
-       */
-      async getKeyMetrics(keyId) {
-        const now = this.now();
-        this.pruneKeyLeases(keyId, now);
-        const record = this.records.get(keyId);
-        const inFlight = this.leases.get(keyId)?.size ?? 0;
-        if (!record) {
-          return {
-            keyId,
-            inFlightRequests: inFlight,
-            totalRequests: 0,
-            consecutiveFailures: 0,
-            consecutive429s: 0,
-            lastUsedAt: 0,
-            cooldownUntil: 0,
-            state: "DISABLED"
-          };
-        }
-        return {
-          keyId,
-          inFlightRequests: inFlight,
-          totalRequests: record.totalRequests,
-          consecutiveFailures: record.consecutiveFailures,
-          consecutive429s: record.consecutive429s,
-          lastUsedAt: record.lastUsedAt,
-          cooldownUntil: record.cooldownUntil,
-          state: record.state
-        };
-      }
-      /**
-       * Retrieves all runtime states for monitoring and telemetry (L1 0.02ms fast telemetry).
-       */
-      async getAllStates() {
-        const now = this.now();
-        this.pruneAllExpiredLeases(now);
-        const states = [];
-        for (const [keyId, record] of this.records.entries()) {
-          const inFlight = this.leases.get(keyId)?.size ?? 0;
-          states.push({
-            id: keyId,
-            accountId: record.config.accountId,
-            status: record.state,
-            circuitState: record.state === "ACTIVE" || record.state === "WARMUP" ? "CLOSED" : "OPEN",
-            inFlightRequests: inFlight,
-            consecutiveFailures: record.consecutiveFailures,
-            consecutive429s: record.consecutive429s,
-            cooldownUntil: record.cooldownUntil,
-            lastUsedAt: record.lastUsedAt,
-            healthScore: Math.max(0, 1 - record.consecutiveFailures * 0.2 - record.consecutive429s * 0.3),
-            lastStatusCode: record.lastStatusCode,
-            lastErrorMessage: record.lastErrorMessage,
-            canaryToken: record.canaryToken,
-            totalRequests: record.totalRequests
-          });
-        }
-        return states;
-      }
-      /**
-       * Manually resets an exhausted or rate-limited key back to active state.
-       */
-      async resetKeyToActive(keyId) {
-        const record = this.records.get(keyId);
-        if (record) {
-          record.state = "ACTIVE";
-          record.cooldownUntil = 0;
-          record.consecutiveFailures = 0;
-          record.consecutive429s = 0;
-          record.canaryToken = void 0;
-          record.lastStatusCode = null;
-          record.lastErrorMessage = null;
-        }
-      }
-      // --- Internal Utilities ---
-      pruneAllExpiredLeases(now) {
-        for (const [keyId] of this.records.keys()) {
-          this.pruneKeyLeases(keyId, now);
-        }
-      }
-      pruneKeyLeases(keyId, now) {
-        const leaseMap = this.leases.get(keyId);
-        if (!leaseMap) return;
-        for (const [token, expireAt] of leaseMap.entries()) {
-          if (now >= expireAt) {
-            leaseMap.delete(token);
-          }
-        }
-      }
-      isAccountBroken(accountId, now) {
-        if (!accountId) return false;
-        const brokenUntil = this.brokenAccounts.get(accountId);
-        if (!brokenUntil) return false;
-        if (now >= brokenUntil) {
-          this.brokenAccounts.delete(accountId);
-          return false;
-        }
-        return true;
-      }
-    };
-  }
-});
-
-// lib/llm/rotating-provider.ts
-var RotatingLLMProvider;
-var init_rotating_provider = __esm({
-  "lib/llm/rotating-provider.ts"() {
-    init_executor();
-    init_memory();
-    RotatingLLMProvider = class {
-      constructor(keyStore, keyConfigMap, options) {
-        this.name = "openrouter-rotating";
-        this.syncPromise = null;
-        this.keyStore = keyStore;
-        this.keyConfigMap = keyConfigMap;
-        this.defaultModel = options?.defaultModel ?? "openai/gpt-4o-mini";
-        this.extraHeaders = options?.extraHeaders ?? {
-          "HTTP-Referer": "https://tokki.app",
-          "X-Title": "Tokki AI"
-        };
-        this.maxAttempts = options?.maxAttempts ?? 3;
-        this.perAttemptTimeoutMs = options?.perAttemptTimeoutMs ?? 6e3;
-      }
-      /**
-       * Idempotently seeds keys, weights, and account metadata in the store.
-       * Cached to run only once per provider instance across warm serverless requests.
-       */
-      async ensureSynced() {
-        if (!this.syncPromise) {
-          this.syncPromise = this.keyStore.syncKeys(
-            Array.from(this.keyConfigMap.values())
-          );
-        }
-        await this.syncPromise;
-      }
-      /**
-       * Phase 1: Pre-Stream Handshake
-       * Executes multi-attempt key selection and HTTP handshake with upstream OpenRouter.
-       * 
-       * On HTTP 200 OK headers from upstream:
-       *   - Acknowledges handshake (<500ms), graduating WARMUP keys to ACTIVE.
-       *   - Returns HandshakeResult containing the live response body and lease credentials.
-       * On failure (all keys rate-limited or exhausted):
-       *   - Throws typed KeyManagerError before any response is committed to the client.
-       */
-      async preStreamHandshake(req, clientSignal) {
-        await this.ensureSynced();
-        return executeWithResilientFailover(
-          this.keyStore,
-          this.keyConfigMap,
-          async (apiKey, attemptSignal) => {
-            const primaryModel = req.model || this.defaultModel;
-            return fetch("https://openrouter.ai/api/v1/chat/completions", {
-              method: "POST",
-              headers: {
-                Authorization: `Bearer ${apiKey}`,
-                "Content-Type": "application/json",
-                ...this.extraHeaders
-              },
-              body: JSON.stringify({
-                model: primaryModel,
-                models: [primaryModel, "openai/gpt-4o-mini"],
-                messages: req.messages,
-                max_tokens: req.maxTokens ?? 512,
-                temperature: req.temperature ?? 0.7,
-                stream: true
-              }),
-              signal: attemptSignal
-            });
-          },
-          this.maxAttempts,
-          clientSignal
-        );
-      }
-      /**
-       * Phase 2: Stream Consumption
-       * Consumes SSE chunks from an established upstream HandshakeResult.
-       * Guarantees that the concurrency lease is released in the finally block.
-       */
-      async *streamFromHandshake(handshake, clientSignal) {
-        const { response, keyId, leaseToken } = handshake;
-        if (!response.body) {
-          await this.safeRelease(keyId, leaseToken, 500, 2e3, "Empty response body");
-          throw new Error("STREAM_ERROR: Response body is null.");
-        }
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "";
-        let streamStatusCode = 200;
-        let streamErrorMessage = "";
-        const onAbort = () => {
-          streamStatusCode = 499;
-          streamErrorMessage = "Client disconnected";
-          void reader.cancel().catch(() => {
-          });
-        };
-        if (clientSignal) {
-          if (clientSignal.aborted) {
-            onAbort();
-          } else {
-            clientSignal.addEventListener("abort", onAbort, { once: true });
-          }
-        }
-        try {
-          while (true) {
-            if (clientSignal?.aborted) {
-              streamStatusCode = 499;
-              streamErrorMessage = "Client disconnected";
-              break;
-            }
-            const { done, value } = await reader.read();
-            if (done) break;
-            buffer += decoder.decode(value, { stream: true });
-            let nl;
-            while ((nl = buffer.indexOf("\n")) !== -1) {
-              const line = buffer.slice(0, nl).trim();
-              buffer = buffer.slice(nl + 1);
-              if (!line || line.startsWith(":")) continue;
-              if (line === "data: [DONE]") return;
-              if (line.startsWith("data: ")) {
-                try {
-                  const json = JSON.parse(line.slice(6));
-                  const token = json?.choices?.[0]?.delta?.content;
-                  if (token) yield token;
-                } catch {
-                }
-              }
-            }
-          }
-        } catch (streamErr) {
-          if (clientSignal?.aborted || streamStatusCode === 499) {
-            streamStatusCode = 499;
-            streamErrorMessage = "Client disconnected";
-          } else {
-            streamStatusCode = 500;
-            streamErrorMessage = streamErr?.message || "Stream read error";
-            throw streamErr;
-          }
-        } finally {
-          if (clientSignal) {
-            clientSignal.removeEventListener("abort", onAbort);
-          }
-          try {
-            reader.releaseLock();
-          } catch {
-          }
-          void response.body.cancel().catch(() => {
-          });
-          await this.safeRelease(
-            keyId,
-            leaseToken,
-            streamStatusCode,
-            streamStatusCode === 200 || streamStatusCode === 499 ? 0 : 2e3,
-            streamErrorMessage
-          );
-        }
-      }
-      /**
-       * Drop-in LLMProvider stream interface.
-       * Chains preStreamHandshake and streamFromHandshake seamlessly.
-       */
-      async *stream(req, clientSignal) {
-        const handshake = await this.preStreamHandshake(req, clientSignal);
-        yield* this.streamFromHandshake(handshake, clientSignal);
-      }
-      /**
-       * Polymorphic helper supporting both positional arguments and KeyReleaseOutcome objects.
-       */
-      async safeRelease(keyId, leaseToken, statusCode, cooldownMs, errorMessage) {
-        const store = this.keyStore;
-        try {
-          if (typeof store.releaseKey === "function") {
-            await store.releaseKey(keyId, leaseToken, {
-              statusCode,
-              cooldownMs,
-              errorMessage: errorMessage || ""
-            });
-          }
-        } catch {
-          await store.releaseKey(keyId, leaseToken, statusCode, cooldownMs, errorMessage);
-        }
-      }
-    };
-  }
-});
-
-// lib/llm/key-manager/lua/scripts.ts
-var RESERVE_KEY_LUA, ACKNOWLEDGE_HANDSHAKE_LUA, RELEASE_KEY_LUA;
-var init_scripts = __esm({
-  "lib/llm/key-manager/lua/scripts.ts"() {
-    RESERVE_KEY_LUA = `
-local keys_set = KEYS[1]
-local default_max_conc = tonumber(ARGV[1]) or 5
-local lease_timeout_ms = tonumber(ARGV[2]) or 45000
-local exclude_raw = ARGV[3] or ""
-local client_nonce = ARGV[4]
-
--- Parse exclusion set with whitespace trimming
-local excluded = {}
-for id in string.gmatch(exclude_raw, "([^,]+)") do
-    local trimmed = string.match(id, "^%s*(.-)%s*$")
-    if trimmed and #trimmed > 0 then
-        excluded[trimmed] = true
-    end
-end
-
--- Monotonic Redis server time (eliminates microVM clock skew)
-local rtime = redis.call('TIME')
-local now = tonumber(rtime[1]) * 1000 + math.floor(tonumber(rtime[2]) / 1000)
-
-local key_ids = redis.call('SMEMBERS', keys_set)
-if not key_ids or #key_ids == 0 then
-    return { nil, "ERR_NO_KEYS_CONFIGURED" }
-end
-
-local best_key = nil
-local lowest_tier = 999
-local lowest_load_score = 999999999
-local oldest_used = 9999999999999
-
-for _, key_id in ipairs(key_ids) do
-    if not excluded[key_id] then
-        local hash = "openrouter:key:" .. key_id
-        local leases_zset = "openrouter:key:" .. key_id .. ":leases"
-        
-        -- 1. Self-Pruning: Purge all expired leases atomically
-        redis.call('ZREMRANGEBYSCORE', leases_zset, '-inf', now)
-        local in_flight = tonumber(redis.call('ZCARD', leases_zset)) or 0
-
-        local data = redis.call('HMGET', hash, 'state', 'tier', 'cooldown_until', 'max_concurrency', 'weight', 'last_used_at', 'account_id')
-        local state = data[1] or 'ACTIVE'
-        local tier = tonumber(data[2]) or 0
-        local cooldown_until = tonumber(data[3]) or 0
-        local max_conc = tonumber(data[4]) or default_max_conc
-        local weight = tonumber(data[5]) or 1
-        if weight <= 0 then weight = 1 end
-        local last_used = tonumber(data[6]) or 0
-        local account_id = data[7] or ""
-
-        -- Check account-wide breaker
-        local account_broken = false
-        if account_id ~= "" then
-            if redis.call('EXISTS', "openrouter:account:" .. account_id .. ":broken") == 1 then
-                account_broken = true
-            end
-        end
-
-        local eligible = false
-
-        if not account_broken and state ~= 'EXHAUSTED' and state ~= 'DISABLED' then
-            if state == 'ACTIVE' then
-                if in_flight < max_conc then
-                    eligible = true
-                end
-            elseif state == 'RATE_LIMITED' or state == 'TRANSIENT_BACKOFF' then
-                if now >= cooldown_until then
-                    -- Cooldown elapsed: promote to WARMUP
-                    redis.call('HSET', hash, 'state', 'WARMUP')
-                    state = 'WARMUP'
-                    if in_flight == 0 then
-                        eligible = true
-                    end
-                end
-            elseif state == 'WARMUP' then
-                -- Strict canary lock: exactly 1 in-flight permitted
-                if in_flight == 0 then
-                    eligible = true
-                end
-            end
-        end
-
-        if eligible then
-            -- Weighted Least-In-Flight Load Score (scaled by 1000 for integer precision)
-            local load_score = math.floor((in_flight * 1000) / weight)
-
-            if tier < lowest_tier then
-                lowest_tier = tier
-                lowest_load_score = load_score
-                oldest_used = last_used
-                best_key = key_id
-            elseif tier == lowest_tier then
-                if load_score < lowest_load_score then
-                    lowest_load_score = load_score
-                    oldest_used = last_used
-                    best_key = key_id
-                elseif load_score == lowest_load_score then
-                    if last_used < oldest_used then
-                        oldest_used = last_used
-                        best_key = key_id
-                    end
-                end
-            end
-        end
-    end
-end
-
-if best_key then
-    local selected_hash = "openrouter:key:" .. best_key
-    local selected_leases = "openrouter:key:" .. best_key .. ":leases"
-    
-    local nonce = (client_nonce and client_nonce ~= "") and client_nonce or tostring(math.random(10000, 99999))
-    local lease_token = best_key .. ":" .. now .. ":" .. nonce
-    local lease_expire_at = now + lease_timeout_ms
-
-    -- Register lease in ZSET
-    redis.call('ZADD', selected_leases, lease_expire_at, lease_token)
-    redis.call('HINCRBY', selected_hash, 'total_requests', 1)
-    redis.call('HSET', selected_hash, 'last_used_at', now)
-
-    -- If key is in WARMUP, bind this specific lease token as the authorized canary
-    local current_state = redis.call('HGET', selected_hash, 'state')
-    if current_state == 'WARMUP' then
-        redis.call('HSET', selected_hash, 'canary_token', lease_token)
-    end
-
-    return { best_key, lease_token }
-else
-    return { nil, "ERR_NO_ELIGIBLE_KEYS" }
-end
-`;
-    ACKNOWLEDGE_HANDSHAKE_LUA = `
-local hash = KEYS[1]
-if string.sub(hash, 1, 15) ~= "openrouter:key:" then
-    hash = "openrouter:key:" .. hash
-end
-local lease_token = ARGV[1]
-
-local state = redis.call('HGET', hash, 'state') or 'ACTIVE'
-local canary_token = redis.call('HGET', hash, 'canary_token') or ''
-
-if state == 'WARMUP' and lease_token == canary_token then
-    -- Canary test passed on handshake! Graduate immediately to ACTIVE
-    redis.call('HSET', hash, 'state', 'ACTIVE')
-    redis.call('HSET', hash, 'consecutive_429s', 0)
-    redis.call('HSET', hash, 'consecutive_failures', 0)
-    redis.call('HDEL', hash, 'last_error_code', 'last_error_message', 'canary_token')
-    return "GRADUATED_ACTIVE"
-end
-
-return "OK"
-`;
-    RELEASE_KEY_LUA = `
-local hash = KEYS[1]
-local key_id
-if string.sub(hash, 1, 15) == "openrouter:key:" then
-    key_id = string.sub(hash, 16)
-else
-    key_id = hash
-    hash = "openrouter:key:" .. key_id
-end
-
-local lease_token = ARGV[1]
-local status = tonumber(ARGV[2]) or 0
-local cooldown_ms = tonumber(ARGV[3]) or 0
-local err_msg = ARGV[4] or ""
-
-local leases_zset = "openrouter:key:" .. key_id .. ":leases"
-
--- Monotonic Redis server time
-local rtime = redis.call('TIME')
-local now = tonumber(rtime[1]) * 1000 + math.floor(tonumber(rtime[2]) / 1000)
-
--- 1. Idempotently remove lease from ZSET
-local removed = redis.call('ZREM', leases_zset, lease_token)
-if removed == 0 then
-    -- Lease already expired or released; do not double-process state unless failure
-    if status == 200 or status == 499 then
-        return "ALREADY_RELEASED"
-    end
-end
-
-local data = redis.call('HMGET', hash, 'state', 'account_id', 'canary_token')
-local current_state = data[1] or 'ACTIVE'
-local account_id = data[2] or ""
-local canary_token = data[3] or ""
-
--- 2. State transitions
-if status == 200 then
-    if current_state == 'WARMUP' and lease_token == canary_token then
-        redis.call('HSET', hash, 'state', 'ACTIVE')
-        redis.call('HSET', hash, 'consecutive_429s', 0)
-        redis.call('HSET', hash, 'consecutive_failures', 0)
-        redis.call('HDEL', hash, 'last_error_code', 'last_error_message', 'canary_token')
-    elseif current_state == 'ACTIVE' then
-        redis.call('HSET', hash, 'consecutive_failures', 0)
-    end
-
-elseif status == 429 then
-    -- CRITICAL SAFETY GUARD: NEVER overwrite permanent EXHAUSTED with temporary RATE_LIMITED!
-    if current_state ~= 'EXHAUSTED' then
-        redis.call('HINCRBY', hash, 'consecutive_429s', 1)
-        redis.call('HSET', hash, 'state', 'RATE_LIMITED')
-        redis.call('HSET', hash, 'cooldown_until', now + cooldown_ms)
-        redis.call('HSET', hash, 'last_error_code', 429)
-        redis.call('HSET', hash, 'last_error_message', err_msg)
-    end
-
-elseif status == 402 or status == 401 then
-    -- Permanent Financial / Auth Exhaustion
-    redis.call('HSET', hash, 'state', 'EXHAUSTED')
-    redis.call('HSET', hash, 'last_error_code', status)
-    redis.call('HSET', hash, 'last_error_message', err_msg)
-
-    -- Bulk-invalidate all keys sharing the same account in <5ms
-    if account_id ~= "" then
-        redis.call('SET', "openrouter:account:" .. account_id .. ":broken", 1, 'EX', 86400)
-        local linked_keys = redis.call('SMEMBERS', "openrouter:account:" .. account_id .. ":keys")
-        if linked_keys then
-            for _, linked_id in ipairs(linked_keys) do
-                local lhash = "openrouter:key:" .. linked_id
-                redis.call('HSET', lhash, 'state', 'EXHAUSTED')
-                redis.call('HSET', lhash, 'last_error_code', status)
-                redis.call('HSET', lhash, 'last_error_message', "Account credit balance exhausted")
-            end
-        end
-    end
-
-elseif status >= 500 or (status == 0 and cooldown_ms > 0) or status == 408 then
-    -- Transient network drop, timeout, or upstream 5xx
-    local fails = redis.call('HINCRBY', hash, 'consecutive_failures', 1)
-    if fails >= 3 and current_state == 'ACTIVE' then
-        redis.call('HSET', hash, 'state', 'TRANSIENT_BACKOFF')
-        redis.call('HSET', hash, 'cooldown_until', now + 2500)
-    end
-    redis.call('HSET', hash, 'last_error_code', status)
-    redis.call('HSET', hash, 'last_error_message', err_msg)
-
-elseif status == 0 and cooldown_ms == 0 then
-    -- Provider outage or zero-cooldown bypass: zero failure penalty
-    redis.call('HSET', hash, 'last_error_code', 0)
-    redis.call('HSET', hash, 'last_error_message', err_msg)
-
-elseif status == 499 then
-    -- Client stream abort: slot already reclaimed by ZREM, no error penalty applied
-    redis.call('HSET', hash, 'last_error_code', 499)
-    redis.call('HSET', hash, 'last_error_message', "Client stream aborted")
-end
-
-return "OK"
-`;
-  }
-});
-
-// lib/llm/key-manager/stores/upstash-redis.ts
-var UpstashRedisKeyStore;
-var init_upstash_redis = __esm({
-  "lib/llm/key-manager/stores/upstash-redis.ts"() {
-    init_memory();
-    init_scripts();
-    UpstashRedisKeyStore = class {
-      constructor(urlOrConfig, token, options) {
-        // Storage circuit breaker state
-        this.redisConsecutiveFailures = 0;
-        this.storageBreakerOpenUntil = 0;
-        if (typeof urlOrConfig === "object") {
-          this.restUrl = urlOrConfig.restUrl.replace(/\/$/, "");
-          this.restToken = urlOrConfig.restToken;
-          this.memoryFallback = urlOrConfig.memoryFallback ?? new MemoryKeyStore();
-          this.timeoutMs = urlOrConfig.timeoutMs ?? 500;
-          this.breakerDurationMs = urlOrConfig.breakerDurationMs ?? 3e4;
-        } else {
-          this.restUrl = urlOrConfig.replace(/\/$/, "");
-          this.restToken = token ?? "";
-          this.memoryFallback = options?.memoryFallback ?? new MemoryKeyStore();
-          this.timeoutMs = options?.timeoutMs ?? 500;
-          this.breakerDurationMs = options?.breakerDurationMs ?? 3e4;
-        }
-      }
-      /**
-       * Idempotent initialization: seeds keys, hashes, and account groups in Redis.
-       */
-      async syncKeys(keys) {
-        await this.memoryFallback.syncKeys(keys);
-        try {
-          const pipeline = [];
-          const keyIds = keys.map((k) => k.id);
-          pipeline.push(["SADD", "openrouter:keys:list", ...keyIds]);
-          for (const k of keys) {
-            pipeline.push([
-              "HSETNX",
-              `openrouter:key:${k.id}`,
-              "tier",
-              k.tier.toString(),
-              "weight",
-              k.weight.toString(),
-              "max_concurrency",
-              k.maxConcurrency.toString(),
-              "account_id",
-              k.accountId || "",
-              "state",
-              "ACTIVE",
-              "total_requests",
-              "0"
-            ]);
-            if (k.accountId) {
-              pipeline.push(["SADD", `openrouter:account:${k.accountId}:keys`, k.id]);
-            }
-          }
-          await this.execPipeline(pipeline);
-        } catch (err) {
-          console.warn("[KeyStore:Upstash] Redis syncKeys degraded to in-memory:", err?.message || err);
-        }
-      }
-      /**
-       * Atomically reserves the optimal key using RESERVE_KEY_LUA in Redis.
-       * On failure or breaker-open, fails open to MemoryKeyStore.
-       */
-      async reserveKey(modelOrExclude, maybeExclude) {
-        let excludeKeyIds = [];
-        if (Array.isArray(modelOrExclude)) {
-          excludeKeyIds = modelOrExclude;
-        } else if (Array.isArray(maybeExclude)) {
-          excludeKeyIds = maybeExclude;
-        }
-        if (this.isStorageBreakerOpen()) {
-          return this.memoryFallback.reserveKey(modelOrExclude, maybeExclude);
-        }
-        try {
-          const clientNonce = typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : "";
-          const result = await this.evalLua(
-            RESERVE_KEY_LUA,
-            ["openrouter:keys:list"],
-            [5, 45e3, excludeKeyIds.join(","), clientNonce]
-          );
-          this.recordSuccess();
-          if (!result || !result[0]) {
-            return null;
-          }
-          const keyId = result[0];
-          const leaseToken = result[1];
-          return { keyId, leaseToken };
-        } catch (err) {
-          this.recordFailure(err);
-          return this.memoryFallback.reserveKey(modelOrExclude, maybeExclude);
-        }
-      }
-      /**
-       * Phase 1: Immediately graduates WARMUP keys to ACTIVE upon receiving HTTP 200 headers (<500ms).
-       */
-      async acknowledgeHandshake(keyId, leaseToken) {
-        if (this.isStorageBreakerOpen()) {
-          return this.memoryFallback.acknowledgeHandshake(keyId, leaseToken);
-        }
-        try {
-          const res = await this.evalLua(
-            ACKNOWLEDGE_HANDSHAKE_LUA,
-            [`openrouter:key:${keyId}`],
-            [leaseToken]
-          );
-          this.recordSuccess();
-          await this.memoryFallback.acknowledgeHandshake(keyId, leaseToken);
-          return res === "GRADUATED_ACTIVE";
-        } catch (err) {
-          this.recordFailure(err);
-          return this.memoryFallback.acknowledgeHandshake(keyId, leaseToken);
-        }
-      }
-      /**
-       * Phase 2: Finalizes lease release on stream end, client abort (499), or error.
-       */
-      async releaseKey(keyId, leaseToken, outcomeOrStatus, cooldownMs, errorMessage) {
-        let statusCode;
-        let cooldown;
-        let errMsg;
-        if (typeof outcomeOrStatus === "object") {
-          statusCode = outcomeOrStatus.statusCode;
-          cooldown = outcomeOrStatus.cooldownMs ?? 0;
-          errMsg = outcomeOrStatus.errorMessage ?? "";
-        } else {
-          statusCode = outcomeOrStatus;
-          cooldown = cooldownMs ?? 0;
-          errMsg = errorMessage ?? "";
-        }
-        if (this.isStorageBreakerOpen()) {
-          return this.memoryFallback.releaseKey(keyId, leaseToken, statusCode, cooldown, errMsg);
-        }
-        try {
-          await this.evalLua(
-            RELEASE_KEY_LUA,
-            [`openrouter:key:${keyId}`],
-            [leaseToken, statusCode, cooldown, errMsg.slice(0, 200)]
-          );
-          this.recordSuccess();
-          await this.memoryFallback.releaseKey(keyId, leaseToken, statusCode, cooldown, errMsg);
-        } catch (err) {
-          this.recordFailure(err);
-          await this.memoryFallback.releaseKey(keyId, leaseToken, statusCode, cooldown, errMsg);
-        }
-      }
-      /**
-       * Retrieves live active in-flight lease count from Redis via ZCARD.
-       */
-      async getActiveLeaseCount(keyId) {
-        if (this.isStorageBreakerOpen()) {
-          return this.memoryFallback.getActiveLeaseCount(keyId);
-        }
-        try {
-          const now = Date.now();
-          const zsetKey = `openrouter:key:${keyId}:leases`;
-          const pipeline = [
-            ["ZREMRANGEBYSCORE", zsetKey, "-inf", now.toString()],
-            ["ZCARD", zsetKey]
-          ];
-          const res = await this.execPipeline(pipeline);
-          this.recordSuccess();
-          return typeof res[1]?.result === "number" ? res[1].result : 0;
-        } catch (err) {
-          this.recordFailure(err);
-          return this.memoryFallback.getActiveLeaseCount(keyId);
-        }
-      }
-      /**
-       * Retrieves operational metrics for a key.
-       */
-      async getKeyMetrics(keyId) {
-        if (this.isStorageBreakerOpen()) {
-          return this.memoryFallback.getKeyMetrics(keyId);
-        }
-        try {
-          const now = Date.now();
-          const hashKey = `openrouter:key:${keyId}`;
-          const zsetKey = `openrouter:key:${keyId}:leases`;
-          const pipeline = [
-            ["ZREMRANGEBYSCORE", zsetKey, "-inf", now.toString()],
-            ["ZCARD", zsetKey],
-            ["HMGET", hashKey, "state", "total_requests", "consecutive_failures", "consecutive_429s", "last_used_at", "cooldown_until"]
-          ];
-          const res = await this.execPipeline(pipeline);
-          this.recordSuccess();
-          const inFlight = typeof res[1]?.result === "number" ? res[1].result : 0;
-          const hmData = res[2]?.result || [];
-          return {
-            keyId,
-            inFlightRequests: inFlight,
-            totalRequests: parseInt(hmData[1] || "0", 10),
-            consecutiveFailures: parseInt(hmData[2] || "0", 10),
-            consecutive429s: parseInt(hmData[3] || "0", 10),
-            lastUsedAt: parseInt(hmData[4] || "0", 10),
-            cooldownUntil: parseInt(hmData[5] || "0", 10),
-            state: hmData[0] || "ACTIVE"
-          };
-        } catch (err) {
-          this.recordFailure(err);
-          return this.memoryFallback.getKeyMetrics(keyId);
-        }
-      }
-      /**
-       * Fast telemetry (0.02ms) via local memory fallback state.
-       */
-      async getAllStates() {
-        return this.memoryFallback.getAllStates();
-      }
-      /**
-       * Manually resets an exhausted or rate-limited key back to active.
-       */
-      async resetKeyToActive(keyId) {
-        await this.memoryFallback.resetKeyToActive(keyId);
-        if (this.isStorageBreakerOpen()) return;
-        try {
-          await this.execCommand(
-            "HSET",
-            `openrouter:key:${keyId}`,
-            "state",
-            "ACTIVE",
-            "consecutive_429s",
-            "0",
-            "consecutive_failures",
-            "0"
-          );
-          this.recordSuccess();
-        } catch (err) {
-          this.recordFailure(err);
-        }
-      }
-      // --- Internal Fail-Open Circuit Breaker & HTTP Transport ---
-      isStorageBreakerOpen() {
-        return Date.now() < this.storageBreakerOpenUntil;
-      }
-      recordSuccess() {
-        this.redisConsecutiveFailures = 0;
-      }
-      recordFailure(err) {
-        this.redisConsecutiveFailures++;
-        console.warn(`[KeyStore:Upstash] Request failed (${this.redisConsecutiveFailures}/3):`, err?.message || err);
-        if (this.redisConsecutiveFailures >= 3) {
-          this.storageBreakerOpenUntil = Date.now() + this.breakerDurationMs;
-          console.error(
-            `[KeyStore:StorageBreaker] TRIPPED OPEN. Failing open to MemoryKeyStore for ${this.breakerDurationMs / 1e3}s.`
-          );
-        }
-      }
-      async evalLua(script, keys, args) {
-        const res = await fetch(`${this.restUrl}/eval`, {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${this.restToken}`,
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify([script, keys.length, ...keys, ...args]),
-          signal: AbortSignal.timeout(this.timeoutMs)
-        });
-        if (!res.ok) {
-          throw new Error(`Upstash HTTP ${res.status}: ${res.statusText}`);
-        }
-        const data = await res.json();
-        if (data.error) {
-          throw new Error(`Upstash Lua Error: ${data.error}`);
-        }
-        return data.result;
-      }
-      async execCommand(...cmd) {
-        const res = await fetch(`${this.restUrl}`, {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${this.restToken}`,
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify(cmd),
-          signal: AbortSignal.timeout(this.timeoutMs)
-        });
-        if (!res.ok) {
-          throw new Error(`Upstash HTTP ${res.status}: ${res.statusText}`);
-        }
-        const data = await res.json();
-        if (data.error) {
-          throw new Error(`Upstash Command Error: ${data.error}`);
-        }
-        return data.result;
-      }
-      async execPipeline(commands) {
-        const res = await fetch(`${this.restUrl}/pipeline`, {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${this.restToken}`,
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify(commands),
-          signal: AbortSignal.timeout(1e3)
-        });
-        if (!res.ok) {
-          throw new Error(`Upstash HTTP ${res.status}: ${res.statusText}`);
-        }
-        const data = await res.json();
-        return data;
-      }
-    };
-  }
-});
-
-// lib/llm/factory.ts
-var factory_exports = {};
-__export(factory_exports, {
-  createLLMProvider: () => createLLMProvider,
-  createRotatingOrConfiguredProvider: () => createRotatingOrConfiguredProvider,
-  getKeyStore: () => getKeyStore,
-  parseKeyConfigsFromEnv: () => parseKeyConfigsFromEnv,
-  resetCachedProviderForTesting: () => resetCachedProviderForTesting
-});
-function getKeyStore() {
-  if (cachedKeyStore) return cachedKeyStore;
-  const redisUrl = process.env.UPSTASH_REDIS_REST_URL?.trim();
-  const redisToken = process.env.UPSTASH_REDIS_REST_TOKEN?.trim();
-  if (redisUrl && redisToken) {
-    cachedKeyStore = new UpstashRedisKeyStore(redisUrl, redisToken, {
-      timeoutMs: 500
-    });
-  } else {
-    cachedKeyStore = new MemoryKeyStore();
-  }
-  return cachedKeyStore;
-}
-function resetCachedProviderForTesting() {
-  cachedRotatingProvider = null;
-  cachedRotatingSignature = null;
-  cachedKeyStore = null;
-}
-function parseKeyConfigsFromEnv() {
-  const rawOpenRouterKeys = process.env.OPENROUTER_API_KEYS?.trim() || process.env.LLM_API_KEYS?.trim();
-  const rawSingleKey = process.env.LLM_API_KEY?.trim();
-  const defaultMaxConcurrency = Number(process.env.DEFAULT_KEY_MAX_CONCURRENCY || 5);
-  const configs = [];
-  if (rawOpenRouterKeys) {
-    if (rawOpenRouterKeys.startsWith("[") && rawOpenRouterKeys.endsWith("]")) {
-      try {
-        const parsed = JSON.parse(rawOpenRouterKeys);
-        if (Array.isArray(parsed)) {
-          parsed.forEach((item, idx) => {
-            if (typeof item === "string" && item.trim()) {
-              configs.push({
-                id: `openrouter-key-${idx + 1}`,
-                apiKey: item.trim(),
-                tier: idx === 0 ? 0 : 1,
-                weight: 10,
-                maxConcurrency: defaultMaxConcurrency
-              });
-            } else if (typeof item === "object" && item !== null && item.apiKey) {
-              configs.push({
-                id: item.id || `openrouter-key-${idx + 1}`,
-                apiKey: item.apiKey,
-                accountId: item.accountId,
-                tier: typeof item.tier === "number" ? item.tier : idx === 0 ? 0 : 1,
-                weight: typeof item.weight === "number" ? item.weight : 10,
-                maxConcurrency: typeof item.maxConcurrency === "number" ? item.maxConcurrency : defaultMaxConcurrency
-              });
-            }
-          });
-        }
-      } catch (err) {
-        console.warn(
-          "[factory] Failed to parse JSON in OPENROUTER_API_KEYS, falling back to CSV parsing:",
-          err
-        );
-      }
-    }
-    if (configs.length === 0) {
-      const tokens = rawOpenRouterKeys.split(/[,\n]/).map((s) => s.trim()).filter(Boolean);
-      tokens.forEach((key, idx) => {
-        configs.push({
-          id: `openrouter-key-${idx + 1}`,
-          apiKey: key,
-          tier: idx === 0 ? 0 : 1,
-          weight: 10,
-          maxConcurrency: defaultMaxConcurrency
-        });
-      });
-    }
-  }
-  if (configs.length === 0 && rawSingleKey && rawSingleKey.includes(",")) {
-    const tokens = rawSingleKey.split(",").map((s) => s.trim()).filter(Boolean);
-    tokens.forEach((key, idx) => {
-      configs.push({
-        id: `openrouter-key-${idx + 1}`,
-        apiKey: key,
-        tier: idx === 0 ? 0 : 1,
-        weight: 10,
-        maxConcurrency: defaultMaxConcurrency
-      });
-    });
-  }
-  return configs;
-}
-function createLLMProvider() {
-  return createRotatingOrConfiguredProvider();
-}
-function createRotatingOrConfiguredProvider() {
-  const providerName = (process.env.LLM_PROVIDER ?? "openrouter").trim().toLowerCase();
-  const hasExplicitOpenRouterPool = Boolean(process.env.OPENROUTER_API_KEYS?.trim());
-  if (providerName === "openrouter" || hasExplicitOpenRouterPool) {
-    const configs = parseKeyConfigsFromEnv();
-    if (configs.length > 1 || configs.length === 1 && hasExplicitOpenRouterPool) {
-      const defaultModel = process.env.LLM_MODEL?.trim() || "openai/gpt-4o-mini";
-      const referer = process.env.LLM_REFERER ?? "https://tokki.app";
-      const title = process.env.LLM_TITLE ?? "Tokki AI";
-      const sig = JSON.stringify([
-        process.env.OPENROUTER_API_KEYS ?? "",
-        process.env.LLM_API_KEYS ?? "",
-        hasExplicitOpenRouterPool ? "" : process.env.LLM_API_KEY ?? "",
-        defaultModel,
-        referer,
-        title
-      ]);
-      if (!cachedRotatingProvider || cachedRotatingSignature !== sig) {
-        const store = getKeyStore();
-        const configMap = new Map(configs.map((c) => [c.id, c]));
-        cachedRotatingProvider = new RotatingLLMProvider(store, configMap, {
-          defaultModel,
-          extraHeaders: {
-            "HTTP-Referer": referer,
-            "X-Title": title
-          }
-        });
-        cachedRotatingSignature = sig;
-      }
-      return cachedRotatingProvider;
-    }
-    if (providerName === "openrouter") {
-      const singleKey2 = process.env.LLM_API_KEY?.trim();
-      if (!singleKey2) return null;
-      const preset2 = PRESETS.openrouter;
-      return new OpenAICompatibleProvider({
-        name: "openrouter",
-        baseUrl: process.env.LLM_BASE_URL?.trim() || preset2.baseUrl,
-        apiKey: singleKey2,
-        defaultModel: process.env.LLM_MODEL?.trim() || preset2.defaultModel,
-        extraHeaders: preset2.extraHeaders?.()
-      });
-    }
-  }
-  if (providerName === "custom") {
-    const singleKey2 = process.env.LLM_API_KEY?.trim();
-    if (!singleKey2) return null;
-    const baseUrl = process.env.LLM_BASE_URL?.trim();
-    if (!baseUrl) {
-      throw new Error(
-        "[llm] LLM_PROVIDER=custom requires LLM_BASE_URL to be set"
-      );
-    }
-    return new OpenAICompatibleProvider({
-      name: "custom",
-      baseUrl,
-      apiKey: singleKey2,
-      defaultModel: process.env.LLM_MODEL ?? "gpt-4o-mini"
-    });
-  }
-  const singleKey = process.env.LLM_API_KEY?.trim();
-  if (!singleKey) return null;
-  const preset = PRESETS[providerName];
-  if (!preset) {
-    throw new Error(
-      `[llm] unknown LLM_PROVIDER="${providerName}". Pick one of: ${Object.keys(PRESETS).join(", ")}, custom`
-    );
-  }
-  return new OpenAICompatibleProvider({
-    name: providerName,
-    baseUrl: process.env.LLM_BASE_URL?.trim() || preset.baseUrl,
-    apiKey: singleKey,
-    defaultModel: process.env.LLM_MODEL?.trim() || preset.defaultModel,
-    extraHeaders: preset.extraHeaders?.()
-  });
-}
-var PRESETS, cachedRotatingProvider, cachedRotatingSignature, cachedKeyStore;
-var init_factory = __esm({
-  "lib/llm/factory.ts"() {
-    init_openai_compatible();
-    init_rotating_provider();
-    init_upstash_redis();
-    init_memory();
-    PRESETS = {
-      openrouter: {
-        baseUrl: "https://openrouter.ai/api/v1",
-        defaultModel: "openai/gpt-4o-mini",
-        extraHeaders: () => ({
-          // OpenRouter uses these to attribute traffic on its leaderboard.
-          "HTTP-Referer": process.env.LLM_REFERER ?? "https://tokki.app",
-          "X-Title": process.env.LLM_TITLE ?? "Tokki AI"
-        })
-      },
-      openai: {
-        baseUrl: "https://api.openai.com/v1",
-        defaultModel: "gpt-4o-mini"
-      },
-      groq: {
-        baseUrl: "https://api.groq.com/openai/v1",
-        defaultModel: "llama-3.1-70b-versatile"
-      },
-      together: {
-        baseUrl: "https://api.together.xyz/v1",
-        defaultModel: "meta-llama/Llama-3.1-70B-Instruct-Turbo"
-      },
-      deepseek: {
-        baseUrl: "https://api.deepseek.com",
-        defaultModel: "deepseek-chat"
-      },
-      mistral: {
-        baseUrl: "https://api.mistral.ai/v1",
-        defaultModel: "mistral-small-latest"
-      },
-      fireworks: {
-        baseUrl: "https://api.fireworks.ai/inference/v1",
-        defaultModel: "accounts/fireworks/models/llama-v3p1-70b-instruct"
-      },
-      /**
-       * Google Gemini via its **OpenAI-compatible** endpoint.
-       */
-      gemini: {
-        baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
-        defaultModel: "gemini-3.5-flash-lite"
-      }
-    };
-    cachedRotatingProvider = null;
-    cachedRotatingSignature = null;
-    cachedKeyStore = null;
-  }
-});
-
 // node_modules/nodemailer/lib/fetch/cookies.js
 var require_cookies = __commonJS({
   "node_modules/nodemailer/lib/fetch/cookies.js"(exports2, module2) {
@@ -713205,9 +711332,1816 @@ var supabaseClient = new Proxy({}, {
 });
 var supabaseUntyped = supabaseClient;
 
-// lib/llm/index.ts
-init_factory();
-init_openai_compatible();
+// lib/llm/openai-compatible.ts
+var OpenAICompatibleProvider = class {
+  constructor(opts) {
+    this.name = opts.name;
+    this.baseUrl = opts.baseUrl.replace(/\/+$/, "");
+    this.apiKey = opts.apiKey;
+    this.defaultModel = opts.defaultModel;
+    this.extraHeaders = opts.extraHeaders ?? {};
+  }
+  async *stream(req, signal) {
+    const resp = await this.fetchWithRetry(req, signal);
+    if (!resp.body) {
+      throw new Error(`[${this.name}] empty response body`);
+    }
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let nl;
+        while ((nl = buffer.indexOf("\n")) !== -1) {
+          const line = buffer.slice(0, nl).trim();
+          buffer = buffer.slice(nl + 1);
+          if (!line.startsWith("data:")) continue;
+          const payload = line.slice(5).trim();
+          if (payload === "[DONE]") return;
+          try {
+            const json = JSON.parse(payload);
+            const delta = json?.choices?.[0]?.delta?.content;
+            if (delta) yield delta;
+          } catch {
+          }
+        }
+      }
+    } finally {
+      try {
+        await reader.cancel().catch(() => {
+        });
+        reader.releaseLock();
+      } catch {
+      }
+    }
+  }
+  /**
+   * POST the chat request; on 429/5xx (or a network error) back off and retry
+   * a bounded number of times. Resolves only with an `ok` response.
+   * 실패 시 던지는 에러 문구는 기존 형식 `[name] status statusText: body` 를 유지한다
+   * (/v2/ask 의 에러 처리 경로가 그 형식에 의존).
+   */
+  async fetchWithRetry(req, signal) {
+    const maxRetries = envInt("LLM_RETRY_MAX", 3, 0, 5);
+    const maxWaitMs = envInt("LLM_RETRY_MAX_WAIT_MS", 5e3, 0, 8e3);
+    const body = JSON.stringify({
+      model: req.model ?? this.defaultModel,
+      messages: req.messages,
+      stream: true,
+      temperature: req.temperature ?? 0.7,
+      max_tokens: req.maxTokens ?? envInt("LLM_MAX_TOKENS", 512, 1, 4096)
+    });
+    for (let attempt = 0; ; attempt++) {
+      let resp;
+      try {
+        resp = await fetch(`${this.baseUrl}/chat/completions`, {
+          method: "POST",
+          signal,
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${this.apiKey}`,
+            ...this.extraHeaders
+          },
+          body
+        });
+      } catch (err) {
+        if (signal?.aborted || isAbortError(err) || attempt >= maxRetries) {
+          throw err;
+        }
+        const wait = backoffMs(attempt);
+        console.warn(
+          `[${this.name}] network error \u2192 retry ${attempt + 1}/${maxRetries} in ${wait}ms`
+        );
+        await sleep2(wait, signal);
+        continue;
+      }
+      if (resp.ok) return resp;
+      const retryable = RETRYABLE_STATUS.has(resp.status);
+      if (retryable && attempt < maxRetries) {
+        const wait = parseRetryAfterMs(
+          resp.headers.get("retry-after"),
+          resp.headers.get("date")
+        ) ?? backoffMs(attempt);
+        if (wait <= maxWaitMs) {
+          void resp.body?.cancel().catch(() => {
+          });
+          console.warn(
+            `[${this.name}] ${resp.status} \u2192 retry ${attempt + 1}/${maxRetries} in ${wait}ms`
+          );
+          await sleep2(wait, signal);
+          continue;
+        }
+      }
+      const text = await safeText(resp);
+      throw new Error(
+        `[${this.name}] ${resp.status} ${resp.statusText}: ${text.slice(0, 300)}`
+      );
+    }
+  }
+};
+var RETRYABLE_STATUS = /* @__PURE__ */ new Set([429, 500, 502, 503, 504]);
+function backoffMs(attempt) {
+  const base = Math.min(500 * 2 ** attempt, 2e3);
+  return Math.round(base * (0.8 + Math.random() * 0.4));
+}
+function parseRetryAfterMs(header, dateHeader) {
+  if (!header) return void 0;
+  const v = header.trim();
+  if (!v) return void 0;
+  if (/^(?:\d+(?:\.\d*)?|\.\d+)s?$/i.test(v)) {
+    const sec = parseFloat(v);
+    if (!Number.isNaN(sec) && Number.isFinite(sec) && sec >= 0) {
+      const baseMs = sec * 1e3;
+      if (baseMs === 0) return 0;
+      const jitter = 0.8 + Math.random() * 0.4;
+      return Math.max(0, Math.round(baseMs * jitter));
+    }
+    return void 0;
+  }
+  if (!Number.isNaN(Number(v))) {
+    return void 0;
+  }
+  const at = Date.parse(v);
+  if (!Number.isNaN(at)) {
+    let skew = 0;
+    if (dateHeader) {
+      const serverTime = Date.parse(dateHeader);
+      if (!Number.isNaN(serverTime)) {
+        skew = serverTime - Date.now();
+      }
+    }
+    const diff = at - (Date.now() + skew);
+    if (diff <= 0) return 0;
+    const jitter = 0.8 + Math.random() * 0.4;
+    return Math.max(0, Math.round(diff * jitter));
+  }
+  return void 0;
+}
+function envInt(name, fallback, min, max) {
+  const raw = process.env[name]?.trim();
+  if (!raw) return fallback;
+  const n = Number(raw);
+  if (!Number.isInteger(n)) return fallback;
+  return Math.min(max, Math.max(min, n));
+}
+function isAbortError(err) {
+  return typeof err === "object" && err !== null && err.name === "AbortError";
+}
+function sleep2(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(abortError());
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(abortError());
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+function abortError() {
+  try {
+    return new DOMException("The operation was aborted.", "AbortError");
+  } catch {
+    return Object.assign(new Error("The operation was aborted."), {
+      name: "AbortError"
+    });
+  }
+}
+async function safeText(resp) {
+  try {
+    return await resp.text();
+  } catch {
+    return "<unreadable body>";
+  }
+}
+
+// lib/llm/key-manager/engine.ts
+var HealthAndCooldownEngine = class {
+  static {
+    this.ALPHA_DECAY = 0.85;
+  }
+  static {
+    this.BASE_BACKOFF_MS = 2e3;
+  }
+  static {
+    this.MAX_BACKOFF_MS = 6e4;
+  }
+  /**
+   * Updates health score using Exponential Moving Average (EMA).
+   */
+  static updateHealthScore(current, outcome) {
+    let score = 1;
+    switch (outcome) {
+      case "SUCCESS":
+        score = 1;
+        break;
+      case "RATE_LIMIT":
+        score = 0.2;
+        break;
+      case "SERVER_ERROR":
+        score = 0.1;
+        break;
+      case "TIMEOUT":
+        score = 0;
+        break;
+    }
+    const safeCurrent = isNaN(current) ? 1 : Math.max(0, Math.min(1, current));
+    return Number((safeCurrent * this.ALPHA_DECAY + score * (1 - this.ALPHA_DECAY)).toFixed(4));
+  }
+  /**
+   * Distinguishes between key rate limits and upstream provider/model outages.
+   */
+  static isUpstreamProviderOutage(payload) {
+    if (payload?.error?.metadata?.provider_name) {
+      return { isOutage: true, provider: payload.error.metadata.provider_name };
+    }
+    const msg = (payload?.error?.message || "").toLowerCase();
+    if (msg.includes("provider returned") || msg.includes("upstream") || msg.includes("overloaded") || msg.includes("provider unavailable") || msg.includes("model is currently overloaded")) {
+      return { isOutage: true, provider: "UpstreamProvider" };
+    }
+    return { isOutage: false };
+  }
+  /**
+   * Evaluates response headers to determine accurate 429 cooldown with jitter buffer.
+   * Fully protected against NaN, malformed Date headers, and ISO 8601 strings.
+   */
+  static calculate429Cooldown(headers, consecutive429s, nowMs = Date.now()) {
+    const getHeader = (name) => {
+      if (!headers) return null;
+      if (typeof headers.get === "function") {
+        return headers.get(name);
+      }
+      const record = headers;
+      const lowerName = name.toLowerCase();
+      let val = record[name] ?? record[lowerName];
+      if (val === void 0) {
+        const matchingKey = Object.keys(record).find((k) => k.toLowerCase() === lowerName);
+        if (matchingKey) {
+          val = record[matchingKey];
+        }
+      }
+      if (Array.isArray(val)) return val[0] ?? null;
+      return val ?? null;
+    };
+    const now = nowMs;
+    const retryAfter = getHeader("retry-after");
+    if (retryAfter) {
+      const trimmed = retryAfter.trim();
+      if (/^\d+$/.test(trimmed)) {
+        const deltaSec = parseInt(trimmed, 10);
+        if (!isNaN(deltaSec) && deltaSec >= 0) {
+          return Math.max(1e3, deltaSec * 1e3 + this.getJitterMs(500, 1500));
+        }
+      }
+      const parsedDate = Date.parse(trimmed);
+      if (!isNaN(parsedDate)) {
+        const serverDateStr = getHeader("date");
+        let skew = 0;
+        if (serverDateStr) {
+          const parsedServerDate = Date.parse(serverDateStr);
+          if (!isNaN(parsedServerDate)) {
+            skew = parsedServerDate - now;
+          }
+        }
+        const diffMs = parsedDate - (now + skew);
+        if (!isNaN(diffMs) && diffMs > 0) {
+          return Math.max(1e3, diffMs + this.getJitterMs(500, 1500));
+        }
+      }
+    }
+    const resetHeader = getHeader("x-ratelimit-reset");
+    if (resetHeader) {
+      const trimmed = resetHeader.trim();
+      const isoParsed = Date.parse(trimmed);
+      if (!isNaN(isoParsed) && isNaN(Number(trimmed))) {
+        const diffMs = isoParsed - now;
+        return Math.max(1e3, (diffMs > 0 ? diffMs : 0) + this.getJitterMs(500, 1500));
+      }
+      const resetVal = parseFloat(trimmed);
+      if (!isNaN(resetVal) && resetVal >= 0) {
+        let diffMs = 0;
+        if (resetVal < 1e5) {
+          diffMs = resetVal * 1e3;
+        } else if (resetVal < 1e10) {
+          diffMs = resetVal * 1e3 - now;
+        } else {
+          diffMs = resetVal - now;
+        }
+        if (!isNaN(diffMs) && diffMs > 0) {
+          return Math.max(1e3, diffMs + this.getJitterMs(500, 1500));
+        }
+      }
+    }
+    const safeConsecutive = isNaN(consecutive429s) ? 1 : Math.max(1, Math.min(consecutive429s, 5));
+    const expCap = Math.min(this.MAX_BACKOFF_MS, this.BASE_BACKOFF_MS * Math.pow(2, safeConsecutive));
+    const cooldown = Math.floor(Math.random() * expCap) + 500;
+    return isNaN(cooldown) ? 2e3 : Math.max(1e3, cooldown);
+  }
+  static getJitterMs(min, max) {
+    return Math.floor(Math.random() * (max - min + 1)) + min;
+  }
+};
+
+// lib/llm/key-manager/executor.ts
+var KeyManagerError = class extends Error {
+  constructor(message, statusCode = 500, retryAfterSeconds, code) {
+    super(message);
+    this.statusCode = statusCode;
+    this.retryAfterSeconds = retryAfterSeconds;
+    this.name = "KeyManagerError";
+    this.code = code;
+  }
+};
+var AllKeysRateLimitedError = class extends KeyManagerError {
+  constructor(retryAfterSeconds = 5) {
+    super(
+      "ALL_KEYS_RATE_LIMITED: All API channels are currently busy.",
+      429,
+      retryAfterSeconds,
+      "ALL_KEYS_RATE_LIMITED"
+    );
+    this.code = "ALL_KEYS_RATE_LIMITED";
+    this.name = "AllKeysRateLimitedError";
+  }
+};
+var AllAccountsExhaustedError = class extends KeyManagerError {
+  constructor() {
+    super(
+      "ALL_ACCOUNTS_EXHAUSTED: Service temporarily unavailable due to upstream provider credit exhaustion.",
+      503,
+      void 0,
+      "ALL_ACCOUNTS_EXHAUSTED"
+    );
+    this.code = "ALL_ACCOUNTS_EXHAUSTED";
+    this.name = "AllAccountsExhaustedError";
+  }
+};
+var UpstreamProviderOutageError = class extends KeyManagerError {
+  constructor(provider) {
+    super(
+      `UPSTREAM_MODEL_OUTAGE: ${provider} is experiencing an outage.`,
+      503,
+      void 0,
+      "UPSTREAM_MODEL_OUTAGE"
+    );
+    this.provider = provider;
+    this.code = "UPSTREAM_MODEL_OUTAGE";
+    this.name = "UpstreamProviderOutageError";
+  }
+};
+var FailoverExhaustedError = class extends KeyManagerError {
+  constructor(attemptedKeyIds) {
+    super(
+      `FAILOVER_EXHAUSTED: Handshake failed across keys: [${attemptedKeyIds.join(", ")}]`,
+      503,
+      void 0,
+      "FAILOVER_EXHAUSTED"
+    );
+    this.attemptedKeyIds = attemptedKeyIds;
+    this.code = "FAILOVER_EXHAUSTED";
+    this.name = "FailoverExhaustedError";
+  }
+};
+function createAttemptSignal(timeoutMs, clientSignal) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => {
+    controller.abort(new Error("ATTEMPT_TIMEOUT"));
+  }, timeoutMs);
+  const onClientAbort = () => {
+    controller.abort(clientSignal?.reason || new Error("CLIENT_ABORTED"));
+  };
+  if (clientSignal) {
+    if (clientSignal.aborted) {
+      controller.abort(clientSignal.reason);
+    } else {
+      clientSignal.addEventListener("abort", onClientAbort, { once: true });
+    }
+  }
+  const cleanup = () => {
+    clearTimeout(timeoutId);
+    if (clientSignal) {
+      clientSignal.removeEventListener("abort", onClientAbort);
+    }
+  };
+  return { signal: controller.signal, cleanup };
+}
+async function executeWithResilientFailover(keyStore, keyConfigMap, requestFactory, maxAttempts = 3, clientSignal) {
+  const attemptedKeyIds = [];
+  const brokenAccountIds = /* @__PURE__ */ new Set();
+  let attempt = 0;
+  let lastStatusCode = null;
+  while (attempt < maxAttempts) {
+    if (clientSignal?.aborted) {
+      throw new KeyManagerError(
+        "CLIENT_ABORTED: Client disconnected before handshake completed.",
+        499,
+        void 0,
+        "CLIENT_ABORTED"
+      );
+    }
+    attempt++;
+    const reservation = await keyStore.reserveKey(attemptedKeyIds);
+    if (!reservation) {
+      const allStates2 = await keyStore.getAllStates().catch(() => []);
+      if (allStates2.length > 0 && allStates2.every((s) => s.status === "EXHAUSTED")) {
+        throw new AllAccountsExhaustedError();
+      }
+      throw new AllKeysRateLimitedError(5);
+    }
+    const { keyId, leaseToken } = reservation;
+    attemptedKeyIds.push(keyId);
+    const config = keyConfigMap.get(keyId);
+    if (!config) {
+      await keyStore.releaseKey(keyId, leaseToken, 500, 0, "Missing key configuration");
+      continue;
+    }
+    if (config.accountId && brokenAccountIds.has(config.accountId)) {
+      lastStatusCode = 402;
+      await keyStore.releaseKey(
+        keyId,
+        leaseToken,
+        402,
+        Infinity,
+        "Shared account balance exhausted"
+      );
+      continue;
+    }
+    const { signal: attemptSignal, cleanup: cleanupSignal } = createAttemptSignal(
+      6e3,
+      clientSignal
+    );
+    try {
+      const response = await requestFactory(config.apiKey, attemptSignal);
+      cleanupSignal();
+      if (response.ok) {
+        await keyStore.acknowledgeHandshake(keyId, leaseToken);
+        return { response, keyId, leaseToken };
+      }
+      const errJson = await response.clone().json().catch(() => ({}));
+      const errText = !errJson?.error ? await response.text().catch(() => "") : JSON.stringify(errJson);
+      const outageCheck = HealthAndCooldownEngine.isUpstreamProviderOutage(errJson);
+      if (outageCheck.isOutage && (response.status === 429 || response.status === 503)) {
+        await keyStore.releaseKey(
+          keyId,
+          leaseToken,
+          0,
+          0,
+          `Provider outage: ${outageCheck.provider}`
+        );
+        throw new UpstreamProviderOutageError(outageCheck.provider || "UpstreamProvider");
+      }
+      if (response.status === 402 || response.status === 401) {
+        lastStatusCode = response.status;
+        if (config.accountId) {
+          brokenAccountIds.add(config.accountId);
+        }
+        await keyStore.releaseKey(keyId, leaseToken, response.status, Infinity, errText);
+        continue;
+      }
+      if (response.status === 429) {
+        lastStatusCode = 429;
+        const states = await keyStore.getAllStates().catch(() => []);
+        const currentState = states.find((s) => s.id === keyId);
+        const consecutive429s = (currentState?.consecutive429s || 0) + 1;
+        const cooldownMs = HealthAndCooldownEngine.calculate429Cooldown(
+          response.headers,
+          consecutive429s
+        );
+        await keyStore.releaseKey(keyId, leaseToken, 429, cooldownMs, errText);
+        continue;
+      }
+      if (response.status >= 500) {
+        lastStatusCode = response.status;
+        await keyStore.releaseKey(keyId, leaseToken, response.status, 2500, errText);
+        continue;
+      }
+      await keyStore.releaseKey(keyId, leaseToken, response.status, 0, "Client error");
+      return { response, keyId, leaseToken };
+    } catch (networkErr) {
+      cleanupSignal();
+      const isClientAbort = clientSignal?.aborted;
+      if (isClientAbort) {
+        await keyStore.releaseKey(keyId, leaseToken, 499, 0, "Client stream aborted");
+        throw new KeyManagerError(
+          "CLIENT_ABORTED: Client disconnected during handshake.",
+          499,
+          void 0,
+          "CLIENT_ABORTED"
+        );
+      }
+      if (networkErr instanceof UpstreamProviderOutageError) {
+        throw networkErr;
+      }
+      const isTimeout = networkErr?.message === "ATTEMPT_TIMEOUT";
+      const status2 = isTimeout ? 504 : 0;
+      lastStatusCode = status2;
+      const cooldownMs = 2e3;
+      await keyStore.releaseKey(
+        keyId,
+        leaseToken,
+        status2,
+        cooldownMs,
+        networkErr?.message || "Handshake network error"
+      );
+      continue;
+    }
+  }
+  const allStates = await keyStore.getAllStates().catch(() => []);
+  const attemptedStates = allStates.filter((s) => attemptedKeyIds.includes(s.id));
+  if (allStates.length > 0 && allStates.every((s) => s.status === "EXHAUSTED") || attemptedStates.length > 0 && attemptedStates.every((s) => s.status === "EXHAUSTED")) {
+    throw new AllAccountsExhaustedError();
+  }
+  const allAttemptedRateLimited = attemptedStates.length > 0 && attemptedStates.every((s) => s.status === "RATE_LIMITED" || s.status === "EXHAUSTED");
+  if (allAttemptedRateLimited || lastStatusCode === 429) {
+    throw new AllKeysRateLimitedError(5);
+  }
+  throw new FailoverExhaustedError(attemptedKeyIds);
+}
+
+// lib/llm/key-manager/stores/memory.ts
+var MemoryKeyStore = class {
+  constructor(options) {
+    this.records = /* @__PURE__ */ new Map();
+    /** Simulates openrouter:key:<id>:leases ZSET (member: leaseToken -> score: expireAtEpochMs) */
+    this.leases = /* @__PURE__ */ new Map();
+    /** Simulates openrouter:account:<accountId>:keys */
+    this.accountKeys = /* @__PURE__ */ new Map();
+    /** Simulates openrouter:account:<accountId>:broken (accountId -> expireAtEpochMs) */
+    this.brokenAccounts = /* @__PURE__ */ new Map();
+    this.clock = options?.clock ?? (() => Date.now());
+    this.defaultMaxConcurrency = options?.defaultMaxConcurrency ?? 5;
+    this.leaseTimeoutMs = options?.leaseTimeoutMs ?? 45e3;
+  }
+  now() {
+    return this.clock();
+  }
+  /**
+   * Idempotent initialization: seeds keys, internal records, and account groups.
+   * Matches HSETNX semantics: updates static configuration without overwriting active runtime states.
+   */
+  async syncKeys(keys) {
+    for (const key of keys) {
+      if (!this.leases.has(key.id)) {
+        this.leases.set(key.id, /* @__PURE__ */ new Map());
+      }
+      const existing = this.records.get(key.id);
+      if (existing) {
+        existing.config = { ...key };
+      } else {
+        this.records.set(key.id, {
+          config: { ...key },
+          state: "ACTIVE",
+          cooldownUntil: 0,
+          lastUsedAt: 0,
+          totalRequests: 0,
+          consecutiveFailures: 0,
+          consecutive429s: 0,
+          lastStatusCode: null,
+          lastErrorMessage: null
+        });
+      }
+      if (key.accountId) {
+        let set = this.accountKeys.get(key.accountId);
+        if (!set) {
+          set = /* @__PURE__ */ new Set();
+          this.accountKeys.set(key.accountId, set);
+        }
+        set.add(key.id);
+      }
+    }
+  }
+  /**
+   * Atomically reserves the optimal key using the Weighted Least-In-Flight (WLIF) algorithm.
+   * Purges expired leases via simulated ZREMRANGEBYSCORE on every reservation.
+   */
+  async reserveKey(modelOrExclude, maybeExclude) {
+    let excludeKeyIds = [];
+    if (Array.isArray(modelOrExclude)) {
+      excludeKeyIds = modelOrExclude;
+    } else if (Array.isArray(maybeExclude)) {
+      excludeKeyIds = maybeExclude;
+    }
+    const excluded = new Set(excludeKeyIds.map((id) => id.trim()).filter(Boolean));
+    const now = this.now();
+    this.pruneAllExpiredLeases(now);
+    if (this.records.size === 0) {
+      return null;
+    }
+    let bestKey = null;
+    let lowestTier = 999;
+    let lowestLoadScore = 999999999;
+    let oldestUsed = 9999999999999;
+    for (const [keyId, record] of this.records.entries()) {
+      if (excluded.has(keyId)) continue;
+      const accountId = record.config.accountId || "";
+      const isAccountBroken = this.isAccountBroken(accountId, now);
+      if (isAccountBroken) continue;
+      if (record.state === "EXHAUSTED" || record.state === "DISABLED") continue;
+      const keyLeases2 = this.leases.get(keyId);
+      const inFlight = keyLeases2 ? keyLeases2.size : 0;
+      const maxConc = record.config.maxConcurrency || this.defaultMaxConcurrency;
+      const weight = Math.max(1, record.config.weight || 1);
+      const tier = record.config.tier ?? 0;
+      let eligible = false;
+      if (record.state === "ACTIVE") {
+        if (inFlight < maxConc) {
+          eligible = true;
+        }
+      } else if (record.state === "RATE_LIMITED" || record.state === "TRANSIENT_BACKOFF") {
+        if (now >= record.cooldownUntil) {
+          record.state = "WARMUP";
+          if (inFlight === 0) {
+            eligible = true;
+          }
+        }
+      } else if (record.state === "WARMUP") {
+        if (inFlight === 0) {
+          eligible = true;
+        }
+      }
+      if (eligible) {
+        const loadScore = Math.floor(inFlight * 1e3 / weight);
+        if (tier < lowestTier) {
+          lowestTier = tier;
+          lowestLoadScore = loadScore;
+          oldestUsed = record.lastUsedAt;
+          bestKey = keyId;
+        } else if (tier === lowestTier) {
+          if (loadScore < lowestLoadScore) {
+            lowestLoadScore = loadScore;
+            oldestUsed = record.lastUsedAt;
+            bestKey = keyId;
+          } else if (loadScore === lowestLoadScore) {
+            if (record.lastUsedAt < oldestUsed) {
+              oldestUsed = record.lastUsedAt;
+              bestKey = keyId;
+            }
+          }
+        }
+      }
+    }
+    if (!bestKey) {
+      return null;
+    }
+    const selectedRecord = this.records.get(bestKey);
+    let keyLeases = this.leases.get(bestKey);
+    if (!keyLeases) {
+      keyLeases = /* @__PURE__ */ new Map();
+      this.leases.set(bestKey, keyLeases);
+    }
+    const nonce = Math.floor(1e9 + Math.random() * 9e9);
+    const leaseToken = `${bestKey}:${now}:${nonce}`;
+    const leaseExpireAt = now + this.leaseTimeoutMs;
+    keyLeases.set(leaseToken, leaseExpireAt);
+    selectedRecord.totalRequests++;
+    selectedRecord.lastUsedAt = now;
+    if (selectedRecord.state === "WARMUP") {
+      selectedRecord.canaryToken = leaseToken;
+    }
+    return { keyId: bestKey, leaseToken };
+  }
+  /**
+   * Phase 1: Immediately graduates WARMUP keys to ACTIVE upon receiving HTTP 200 headers (<500ms).
+   * Unlocks full concurrency ceiling for subsequent requests.
+   */
+  async acknowledgeHandshake(keyId, leaseToken) {
+    const record = this.records.get(keyId);
+    if (!record) return false;
+    if (record.state === "WARMUP" && record.canaryToken === leaseToken) {
+      record.state = "ACTIVE";
+      record.consecutive429s = 0;
+      record.consecutiveFailures = 0;
+      record.canaryToken = void 0;
+      record.lastStatusCode = null;
+      record.lastErrorMessage = null;
+      return true;
+    }
+    return false;
+  }
+  /**
+   * Phase 2: Removes ZSET lease token, resolves state transitions, and enforces 402 bulk invalidation.
+   */
+  async releaseKey(keyId, leaseToken, outcomeOrStatus, cooldownMs, errorMessage) {
+    let statusCode;
+    let cooldown;
+    let errMsg;
+    if (typeof outcomeOrStatus === "object") {
+      statusCode = outcomeOrStatus.statusCode;
+      cooldown = outcomeOrStatus.cooldownMs ?? 0;
+      errMsg = outcomeOrStatus.errorMessage ?? "";
+    } else {
+      statusCode = outcomeOrStatus;
+      cooldown = cooldownMs ?? 0;
+      errMsg = errorMessage ?? "";
+    }
+    const now = this.now();
+    const keyLeases = this.leases.get(keyId);
+    const removed = keyLeases ? keyLeases.delete(leaseToken) : false;
+    if (!removed && (statusCode === 200 || statusCode === 499)) {
+      return;
+    }
+    const record = this.records.get(keyId);
+    if (!record) return;
+    if (statusCode === 200) {
+      if (record.state === "WARMUP" && record.canaryToken === leaseToken) {
+        record.state = "ACTIVE";
+        record.consecutive429s = 0;
+        record.consecutiveFailures = 0;
+        record.canaryToken = void 0;
+        record.lastStatusCode = null;
+        record.lastErrorMessage = null;
+      } else if (record.state === "ACTIVE") {
+        record.consecutiveFailures = 0;
+      }
+    } else if (statusCode === 429) {
+      if (record.state !== "EXHAUSTED") {
+        record.consecutive429s++;
+        record.state = "RATE_LIMITED";
+        record.cooldownUntil = now + cooldown;
+        record.lastStatusCode = 429;
+        record.lastErrorMessage = errMsg;
+      }
+    } else if (statusCode === 402 || statusCode === 401) {
+      record.state = "EXHAUSTED";
+      record.cooldownUntil = Infinity;
+      record.lastStatusCode = statusCode;
+      record.lastErrorMessage = errMsg;
+      const accountId = record.config.accountId;
+      if (accountId) {
+        this.brokenAccounts.set(accountId, now + 86400 * 1e3);
+        const linkedKeys = this.accountKeys.get(accountId);
+        if (linkedKeys) {
+          for (const linkedId of linkedKeys) {
+            const linkedRecord = this.records.get(linkedId);
+            if (linkedRecord) {
+              linkedRecord.state = "EXHAUSTED";
+              linkedRecord.cooldownUntil = Infinity;
+              linkedRecord.lastStatusCode = statusCode;
+              linkedRecord.lastErrorMessage = "Account credit balance exhausted";
+            }
+          }
+        }
+      }
+    } else if (statusCode >= 500 || statusCode === 0 && cooldown > 0 || statusCode === 408) {
+      record.consecutiveFailures++;
+      if (record.consecutiveFailures >= 3 && record.state === "ACTIVE") {
+        record.state = "TRANSIENT_BACKOFF";
+        record.cooldownUntil = now + 2500;
+      }
+      record.lastStatusCode = statusCode;
+      record.lastErrorMessage = errMsg;
+    } else if (statusCode === 0 && cooldown === 0) {
+      record.lastStatusCode = 0;
+      record.lastErrorMessage = errMsg;
+    } else if (statusCode === 499) {
+      record.lastStatusCode = 499;
+      record.lastErrorMessage = "Client stream aborted";
+    }
+  }
+  /**
+   * Retrieves active in-flight lease count after pruning expired leases.
+   */
+  async getActiveLeaseCount(keyId) {
+    this.pruneKeyLeases(keyId, this.now());
+    return this.leases.get(keyId)?.size ?? 0;
+  }
+  /**
+   * Retrieves operational metrics for a specific key.
+   */
+  async getKeyMetrics(keyId) {
+    const now = this.now();
+    this.pruneKeyLeases(keyId, now);
+    const record = this.records.get(keyId);
+    const inFlight = this.leases.get(keyId)?.size ?? 0;
+    if (!record) {
+      return {
+        keyId,
+        inFlightRequests: inFlight,
+        totalRequests: 0,
+        consecutiveFailures: 0,
+        consecutive429s: 0,
+        lastUsedAt: 0,
+        cooldownUntil: 0,
+        state: "DISABLED"
+      };
+    }
+    return {
+      keyId,
+      inFlightRequests: inFlight,
+      totalRequests: record.totalRequests,
+      consecutiveFailures: record.consecutiveFailures,
+      consecutive429s: record.consecutive429s,
+      lastUsedAt: record.lastUsedAt,
+      cooldownUntil: record.cooldownUntil,
+      state: record.state
+    };
+  }
+  /**
+   * Retrieves all runtime states for monitoring and telemetry (L1 0.02ms fast telemetry).
+   */
+  async getAllStates() {
+    const now = this.now();
+    this.pruneAllExpiredLeases(now);
+    const states = [];
+    for (const [keyId, record] of this.records.entries()) {
+      const inFlight = this.leases.get(keyId)?.size ?? 0;
+      states.push({
+        id: keyId,
+        accountId: record.config.accountId,
+        status: record.state,
+        circuitState: record.state === "ACTIVE" || record.state === "WARMUP" ? "CLOSED" : "OPEN",
+        inFlightRequests: inFlight,
+        consecutiveFailures: record.consecutiveFailures,
+        consecutive429s: record.consecutive429s,
+        cooldownUntil: record.cooldownUntil,
+        lastUsedAt: record.lastUsedAt,
+        healthScore: Math.max(0, 1 - record.consecutiveFailures * 0.2 - record.consecutive429s * 0.3),
+        lastStatusCode: record.lastStatusCode,
+        lastErrorMessage: record.lastErrorMessage,
+        canaryToken: record.canaryToken,
+        totalRequests: record.totalRequests
+      });
+    }
+    return states;
+  }
+  /**
+   * Manually resets an exhausted or rate-limited key back to active state.
+   */
+  async resetKeyToActive(keyId) {
+    const record = this.records.get(keyId);
+    if (record) {
+      record.state = "ACTIVE";
+      record.cooldownUntil = 0;
+      record.consecutiveFailures = 0;
+      record.consecutive429s = 0;
+      record.canaryToken = void 0;
+      record.lastStatusCode = null;
+      record.lastErrorMessage = null;
+    }
+  }
+  // --- Internal Utilities ---
+  pruneAllExpiredLeases(now) {
+    for (const [keyId] of this.records.keys()) {
+      this.pruneKeyLeases(keyId, now);
+    }
+  }
+  pruneKeyLeases(keyId, now) {
+    const leaseMap = this.leases.get(keyId);
+    if (!leaseMap) return;
+    for (const [token, expireAt] of leaseMap.entries()) {
+      if (now >= expireAt) {
+        leaseMap.delete(token);
+      }
+    }
+  }
+  isAccountBroken(accountId, now) {
+    if (!accountId) return false;
+    const brokenUntil = this.brokenAccounts.get(accountId);
+    if (!brokenUntil) return false;
+    if (now >= brokenUntil) {
+      this.brokenAccounts.delete(accountId);
+      return false;
+    }
+    return true;
+  }
+};
+
+// lib/llm/rotating-provider.ts
+var RotatingLLMProvider = class {
+  constructor(keyStore, keyConfigMap, options) {
+    this.name = "openrouter-rotating";
+    this.syncPromise = null;
+    this.keyStore = keyStore;
+    this.keyConfigMap = keyConfigMap;
+    this.defaultModel = options?.defaultModel ?? "openai/gpt-4o-mini";
+    this.extraHeaders = options?.extraHeaders ?? {
+      "HTTP-Referer": "https://tokki.app",
+      "X-Title": "Tokki AI"
+    };
+    this.maxAttempts = options?.maxAttempts ?? 3;
+    this.perAttemptTimeoutMs = options?.perAttemptTimeoutMs ?? 6e3;
+  }
+  /**
+   * Idempotently seeds keys, weights, and account metadata in the store.
+   * Cached to run only once per provider instance across warm serverless requests.
+   */
+  async ensureSynced() {
+    if (!this.syncPromise) {
+      this.syncPromise = this.keyStore.syncKeys(
+        Array.from(this.keyConfigMap.values())
+      );
+    }
+    await this.syncPromise;
+  }
+  /**
+   * Phase 1: Pre-Stream Handshake
+   * Executes multi-attempt key selection and HTTP handshake with upstream OpenRouter.
+   * 
+   * On HTTP 200 OK headers from upstream:
+   *   - Acknowledges handshake (<500ms), graduating WARMUP keys to ACTIVE.
+   *   - Returns HandshakeResult containing the live response body and lease credentials.
+   * On failure (all keys rate-limited or exhausted):
+   *   - Throws typed KeyManagerError before any response is committed to the client.
+   */
+  async preStreamHandshake(req, clientSignal) {
+    await this.ensureSynced();
+    return executeWithResilientFailover(
+      this.keyStore,
+      this.keyConfigMap,
+      async (apiKey, attemptSignal) => {
+        const primaryModel = req.model || this.defaultModel;
+        return fetch("https://openrouter.ai/api/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            "Content-Type": "application/json",
+            ...this.extraHeaders
+          },
+          body: JSON.stringify({
+            model: primaryModel,
+            models: [primaryModel, "openai/gpt-4o-mini"],
+            messages: req.messages,
+            max_tokens: req.maxTokens ?? 512,
+            temperature: req.temperature ?? 0.7,
+            stream: true
+          }),
+          signal: attemptSignal
+        });
+      },
+      this.maxAttempts,
+      clientSignal
+    );
+  }
+  /**
+   * Phase 2: Stream Consumption
+   * Consumes SSE chunks from an established upstream HandshakeResult.
+   * Guarantees that the concurrency lease is released in the finally block.
+   */
+  async *streamFromHandshake(handshake, clientSignal) {
+    const { response, keyId, leaseToken } = handshake;
+    if (!response.body) {
+      await this.safeRelease(keyId, leaseToken, 500, 2e3, "Empty response body");
+      throw new Error("STREAM_ERROR: Response body is null.");
+    }
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let streamStatusCode = 200;
+    let streamErrorMessage = "";
+    const onAbort = () => {
+      streamStatusCode = 499;
+      streamErrorMessage = "Client disconnected";
+      void reader.cancel().catch(() => {
+      });
+    };
+    if (clientSignal) {
+      if (clientSignal.aborted) {
+        onAbort();
+      } else {
+        clientSignal.addEventListener("abort", onAbort, { once: true });
+      }
+    }
+    try {
+      while (true) {
+        if (clientSignal?.aborted) {
+          streamStatusCode = 499;
+          streamErrorMessage = "Client disconnected";
+          break;
+        }
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let nl;
+        while ((nl = buffer.indexOf("\n")) !== -1) {
+          const line = buffer.slice(0, nl).trim();
+          buffer = buffer.slice(nl + 1);
+          if (!line || line.startsWith(":")) continue;
+          if (line === "data: [DONE]") return;
+          if (line.startsWith("data: ")) {
+            try {
+              const json = JSON.parse(line.slice(6));
+              const token = json?.choices?.[0]?.delta?.content;
+              if (token) yield token;
+            } catch {
+            }
+          }
+        }
+      }
+    } catch (streamErr) {
+      if (clientSignal?.aborted || streamStatusCode === 499) {
+        streamStatusCode = 499;
+        streamErrorMessage = "Client disconnected";
+      } else {
+        streamStatusCode = 500;
+        streamErrorMessage = streamErr?.message || "Stream read error";
+        throw streamErr;
+      }
+    } finally {
+      if (clientSignal) {
+        clientSignal.removeEventListener("abort", onAbort);
+      }
+      try {
+        reader.releaseLock();
+      } catch {
+      }
+      void response.body.cancel().catch(() => {
+      });
+      await this.safeRelease(
+        keyId,
+        leaseToken,
+        streamStatusCode,
+        streamStatusCode === 200 || streamStatusCode === 499 ? 0 : 2e3,
+        streamErrorMessage
+      );
+    }
+  }
+  /**
+   * Drop-in LLMProvider stream interface.
+   * Chains preStreamHandshake and streamFromHandshake seamlessly.
+   */
+  async *stream(req, clientSignal) {
+    const handshake = await this.preStreamHandshake(req, clientSignal);
+    yield* this.streamFromHandshake(handshake, clientSignal);
+  }
+  /**
+   * Polymorphic helper supporting both positional arguments and KeyReleaseOutcome objects.
+   */
+  async safeRelease(keyId, leaseToken, statusCode, cooldownMs, errorMessage) {
+    const store = this.keyStore;
+    try {
+      if (typeof store.releaseKey === "function") {
+        await store.releaseKey(keyId, leaseToken, {
+          statusCode,
+          cooldownMs,
+          errorMessage: errorMessage || ""
+        });
+      }
+    } catch {
+      await store.releaseKey(keyId, leaseToken, statusCode, cooldownMs, errorMessage);
+    }
+  }
+};
+
+// lib/llm/key-manager/lua/scripts.ts
+var RESERVE_KEY_LUA = `
+local keys_set = KEYS[1]
+local default_max_conc = tonumber(ARGV[1]) or 5
+local lease_timeout_ms = tonumber(ARGV[2]) or 45000
+local exclude_raw = ARGV[3] or ""
+local client_nonce = ARGV[4]
+
+-- Parse exclusion set with whitespace trimming
+local excluded = {}
+for id in string.gmatch(exclude_raw, "([^,]+)") do
+    local trimmed = string.match(id, "^%s*(.-)%s*$")
+    if trimmed and #trimmed > 0 then
+        excluded[trimmed] = true
+    end
+end
+
+-- Monotonic Redis server time (eliminates microVM clock skew)
+local rtime = redis.call('TIME')
+local now = tonumber(rtime[1]) * 1000 + math.floor(tonumber(rtime[2]) / 1000)
+
+local key_ids = redis.call('SMEMBERS', keys_set)
+if not key_ids or #key_ids == 0 then
+    return { nil, "ERR_NO_KEYS_CONFIGURED" }
+end
+
+local best_key = nil
+local lowest_tier = 999
+local lowest_load_score = 999999999
+local oldest_used = 9999999999999
+
+for _, key_id in ipairs(key_ids) do
+    if not excluded[key_id] then
+        local hash = "openrouter:key:" .. key_id
+        local leases_zset = "openrouter:key:" .. key_id .. ":leases"
+        
+        -- 1. Self-Pruning: Purge all expired leases atomically
+        redis.call('ZREMRANGEBYSCORE', leases_zset, '-inf', now)
+        local in_flight = tonumber(redis.call('ZCARD', leases_zset)) or 0
+
+        local data = redis.call('HMGET', hash, 'state', 'tier', 'cooldown_until', 'max_concurrency', 'weight', 'last_used_at', 'account_id')
+        local state = data[1] or 'ACTIVE'
+        local tier = tonumber(data[2]) or 0
+        local cooldown_until = tonumber(data[3]) or 0
+        local max_conc = tonumber(data[4]) or default_max_conc
+        local weight = tonumber(data[5]) or 1
+        if weight <= 0 then weight = 1 end
+        local last_used = tonumber(data[6]) or 0
+        local account_id = data[7] or ""
+
+        -- Check account-wide breaker
+        local account_broken = false
+        if account_id ~= "" then
+            if redis.call('EXISTS', "openrouter:account:" .. account_id .. ":broken") == 1 then
+                account_broken = true
+            end
+        end
+
+        local eligible = false
+
+        if not account_broken and state ~= 'EXHAUSTED' and state ~= 'DISABLED' then
+            if state == 'ACTIVE' then
+                if in_flight < max_conc then
+                    eligible = true
+                end
+            elseif state == 'RATE_LIMITED' or state == 'TRANSIENT_BACKOFF' then
+                if now >= cooldown_until then
+                    -- Cooldown elapsed: promote to WARMUP
+                    redis.call('HSET', hash, 'state', 'WARMUP')
+                    state = 'WARMUP'
+                    if in_flight == 0 then
+                        eligible = true
+                    end
+                end
+            elseif state == 'WARMUP' then
+                -- Strict canary lock: exactly 1 in-flight permitted
+                if in_flight == 0 then
+                    eligible = true
+                end
+            end
+        end
+
+        if eligible then
+            -- Weighted Least-In-Flight Load Score (scaled by 1000 for integer precision)
+            local load_score = math.floor((in_flight * 1000) / weight)
+
+            if tier < lowest_tier then
+                lowest_tier = tier
+                lowest_load_score = load_score
+                oldest_used = last_used
+                best_key = key_id
+            elseif tier == lowest_tier then
+                if load_score < lowest_load_score then
+                    lowest_load_score = load_score
+                    oldest_used = last_used
+                    best_key = key_id
+                elseif load_score == lowest_load_score then
+                    if last_used < oldest_used then
+                        oldest_used = last_used
+                        best_key = key_id
+                    end
+                end
+            end
+        end
+    end
+end
+
+if best_key then
+    local selected_hash = "openrouter:key:" .. best_key
+    local selected_leases = "openrouter:key:" .. best_key .. ":leases"
+    
+    local nonce = (client_nonce and client_nonce ~= "") and client_nonce or tostring(math.random(10000, 99999))
+    local lease_token = best_key .. ":" .. now .. ":" .. nonce
+    local lease_expire_at = now + lease_timeout_ms
+
+    -- Register lease in ZSET
+    redis.call('ZADD', selected_leases, lease_expire_at, lease_token)
+    redis.call('HINCRBY', selected_hash, 'total_requests', 1)
+    redis.call('HSET', selected_hash, 'last_used_at', now)
+
+    -- If key is in WARMUP, bind this specific lease token as the authorized canary
+    local current_state = redis.call('HGET', selected_hash, 'state')
+    if current_state == 'WARMUP' then
+        redis.call('HSET', selected_hash, 'canary_token', lease_token)
+    end
+
+    return { best_key, lease_token }
+else
+    return { nil, "ERR_NO_ELIGIBLE_KEYS" }
+end
+`;
+var ACKNOWLEDGE_HANDSHAKE_LUA = `
+local hash = KEYS[1]
+if string.sub(hash, 1, 15) ~= "openrouter:key:" then
+    hash = "openrouter:key:" .. hash
+end
+local lease_token = ARGV[1]
+
+local state = redis.call('HGET', hash, 'state') or 'ACTIVE'
+local canary_token = redis.call('HGET', hash, 'canary_token') or ''
+
+if state == 'WARMUP' and lease_token == canary_token then
+    -- Canary test passed on handshake! Graduate immediately to ACTIVE
+    redis.call('HSET', hash, 'state', 'ACTIVE')
+    redis.call('HSET', hash, 'consecutive_429s', 0)
+    redis.call('HSET', hash, 'consecutive_failures', 0)
+    redis.call('HDEL', hash, 'last_error_code', 'last_error_message', 'canary_token')
+    return "GRADUATED_ACTIVE"
+end
+
+return "OK"
+`;
+var RELEASE_KEY_LUA = `
+local hash = KEYS[1]
+local key_id
+if string.sub(hash, 1, 15) == "openrouter:key:" then
+    key_id = string.sub(hash, 16)
+else
+    key_id = hash
+    hash = "openrouter:key:" .. key_id
+end
+
+local lease_token = ARGV[1]
+local status = tonumber(ARGV[2]) or 0
+local cooldown_ms = tonumber(ARGV[3]) or 0
+local err_msg = ARGV[4] or ""
+
+local leases_zset = "openrouter:key:" .. key_id .. ":leases"
+
+-- Monotonic Redis server time
+local rtime = redis.call('TIME')
+local now = tonumber(rtime[1]) * 1000 + math.floor(tonumber(rtime[2]) / 1000)
+
+-- 1. Idempotently remove lease from ZSET
+local removed = redis.call('ZREM', leases_zset, lease_token)
+if removed == 0 then
+    -- Lease already expired or released; do not double-process state unless failure
+    if status == 200 or status == 499 then
+        return "ALREADY_RELEASED"
+    end
+end
+
+local data = redis.call('HMGET', hash, 'state', 'account_id', 'canary_token')
+local current_state = data[1] or 'ACTIVE'
+local account_id = data[2] or ""
+local canary_token = data[3] or ""
+
+-- 2. State transitions
+if status == 200 then
+    if current_state == 'WARMUP' and lease_token == canary_token then
+        redis.call('HSET', hash, 'state', 'ACTIVE')
+        redis.call('HSET', hash, 'consecutive_429s', 0)
+        redis.call('HSET', hash, 'consecutive_failures', 0)
+        redis.call('HDEL', hash, 'last_error_code', 'last_error_message', 'canary_token')
+    elseif current_state == 'ACTIVE' then
+        redis.call('HSET', hash, 'consecutive_failures', 0)
+    end
+
+elseif status == 429 then
+    -- CRITICAL SAFETY GUARD: NEVER overwrite permanent EXHAUSTED with temporary RATE_LIMITED!
+    if current_state ~= 'EXHAUSTED' then
+        redis.call('HINCRBY', hash, 'consecutive_429s', 1)
+        redis.call('HSET', hash, 'state', 'RATE_LIMITED')
+        redis.call('HSET', hash, 'cooldown_until', now + cooldown_ms)
+        redis.call('HSET', hash, 'last_error_code', 429)
+        redis.call('HSET', hash, 'last_error_message', err_msg)
+    end
+
+elseif status == 402 or status == 401 then
+    -- Permanent Financial / Auth Exhaustion
+    redis.call('HSET', hash, 'state', 'EXHAUSTED')
+    redis.call('HSET', hash, 'last_error_code', status)
+    redis.call('HSET', hash, 'last_error_message', err_msg)
+
+    -- Bulk-invalidate all keys sharing the same account in <5ms
+    if account_id ~= "" then
+        redis.call('SET', "openrouter:account:" .. account_id .. ":broken", 1, 'EX', 86400)
+        local linked_keys = redis.call('SMEMBERS', "openrouter:account:" .. account_id .. ":keys")
+        if linked_keys then
+            for _, linked_id in ipairs(linked_keys) do
+                local lhash = "openrouter:key:" .. linked_id
+                redis.call('HSET', lhash, 'state', 'EXHAUSTED')
+                redis.call('HSET', lhash, 'last_error_code', status)
+                redis.call('HSET', lhash, 'last_error_message', "Account credit balance exhausted")
+            end
+        end
+    end
+
+elseif status >= 500 or (status == 0 and cooldown_ms > 0) or status == 408 then
+    -- Transient network drop, timeout, or upstream 5xx
+    local fails = redis.call('HINCRBY', hash, 'consecutive_failures', 1)
+    if fails >= 3 and current_state == 'ACTIVE' then
+        redis.call('HSET', hash, 'state', 'TRANSIENT_BACKOFF')
+        redis.call('HSET', hash, 'cooldown_until', now + 2500)
+    end
+    redis.call('HSET', hash, 'last_error_code', status)
+    redis.call('HSET', hash, 'last_error_message', err_msg)
+
+elseif status == 0 and cooldown_ms == 0 then
+    -- Provider outage or zero-cooldown bypass: zero failure penalty
+    redis.call('HSET', hash, 'last_error_code', 0)
+    redis.call('HSET', hash, 'last_error_message', err_msg)
+
+elseif status == 499 then
+    -- Client stream abort: slot already reclaimed by ZREM, no error penalty applied
+    redis.call('HSET', hash, 'last_error_code', 499)
+    redis.call('HSET', hash, 'last_error_message', "Client stream aborted")
+end
+
+return "OK"
+`;
+
+// lib/llm/key-manager/stores/upstash-redis.ts
+var UpstashRedisKeyStore = class {
+  constructor(urlOrConfig, token, options) {
+    // Storage circuit breaker state
+    this.redisConsecutiveFailures = 0;
+    this.storageBreakerOpenUntil = 0;
+    if (typeof urlOrConfig === "object") {
+      this.restUrl = urlOrConfig.restUrl.replace(/\/$/, "");
+      this.restToken = urlOrConfig.restToken;
+      this.memoryFallback = urlOrConfig.memoryFallback ?? new MemoryKeyStore();
+      this.timeoutMs = urlOrConfig.timeoutMs ?? 500;
+      this.breakerDurationMs = urlOrConfig.breakerDurationMs ?? 3e4;
+    } else {
+      this.restUrl = urlOrConfig.replace(/\/$/, "");
+      this.restToken = token ?? "";
+      this.memoryFallback = options?.memoryFallback ?? new MemoryKeyStore();
+      this.timeoutMs = options?.timeoutMs ?? 500;
+      this.breakerDurationMs = options?.breakerDurationMs ?? 3e4;
+    }
+  }
+  /**
+   * Idempotent initialization: seeds keys, hashes, and account groups in Redis.
+   */
+  async syncKeys(keys) {
+    await this.memoryFallback.syncKeys(keys);
+    try {
+      const pipeline = [];
+      const keyIds = keys.map((k) => k.id);
+      pipeline.push(["SADD", "openrouter:keys:list", ...keyIds]);
+      for (const k of keys) {
+        pipeline.push([
+          "HSETNX",
+          `openrouter:key:${k.id}`,
+          "tier",
+          k.tier.toString(),
+          "weight",
+          k.weight.toString(),
+          "max_concurrency",
+          k.maxConcurrency.toString(),
+          "account_id",
+          k.accountId || "",
+          "state",
+          "ACTIVE",
+          "total_requests",
+          "0"
+        ]);
+        if (k.accountId) {
+          pipeline.push(["SADD", `openrouter:account:${k.accountId}:keys`, k.id]);
+        }
+      }
+      await this.execPipeline(pipeline);
+    } catch (err) {
+      console.warn("[KeyStore:Upstash] Redis syncKeys degraded to in-memory:", err?.message || err);
+    }
+  }
+  /**
+   * Atomically reserves the optimal key using RESERVE_KEY_LUA in Redis.
+   * On failure or breaker-open, fails open to MemoryKeyStore.
+   */
+  async reserveKey(modelOrExclude, maybeExclude) {
+    let excludeKeyIds = [];
+    if (Array.isArray(modelOrExclude)) {
+      excludeKeyIds = modelOrExclude;
+    } else if (Array.isArray(maybeExclude)) {
+      excludeKeyIds = maybeExclude;
+    }
+    if (this.isStorageBreakerOpen()) {
+      return this.memoryFallback.reserveKey(modelOrExclude, maybeExclude);
+    }
+    try {
+      const clientNonce = typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : "";
+      const result = await this.evalLua(
+        RESERVE_KEY_LUA,
+        ["openrouter:keys:list"],
+        [5, 45e3, excludeKeyIds.join(","), clientNonce]
+      );
+      this.recordSuccess();
+      if (!result || !result[0]) {
+        return null;
+      }
+      const keyId = result[0];
+      const leaseToken = result[1];
+      return { keyId, leaseToken };
+    } catch (err) {
+      this.recordFailure(err);
+      return this.memoryFallback.reserveKey(modelOrExclude, maybeExclude);
+    }
+  }
+  /**
+   * Phase 1: Immediately graduates WARMUP keys to ACTIVE upon receiving HTTP 200 headers (<500ms).
+   */
+  async acknowledgeHandshake(keyId, leaseToken) {
+    if (this.isStorageBreakerOpen()) {
+      return this.memoryFallback.acknowledgeHandshake(keyId, leaseToken);
+    }
+    try {
+      const res = await this.evalLua(
+        ACKNOWLEDGE_HANDSHAKE_LUA,
+        [`openrouter:key:${keyId}`],
+        [leaseToken]
+      );
+      this.recordSuccess();
+      await this.memoryFallback.acknowledgeHandshake(keyId, leaseToken);
+      return res === "GRADUATED_ACTIVE";
+    } catch (err) {
+      this.recordFailure(err);
+      return this.memoryFallback.acknowledgeHandshake(keyId, leaseToken);
+    }
+  }
+  /**
+   * Phase 2: Finalizes lease release on stream end, client abort (499), or error.
+   */
+  async releaseKey(keyId, leaseToken, outcomeOrStatus, cooldownMs, errorMessage) {
+    let statusCode;
+    let cooldown;
+    let errMsg;
+    if (typeof outcomeOrStatus === "object") {
+      statusCode = outcomeOrStatus.statusCode;
+      cooldown = outcomeOrStatus.cooldownMs ?? 0;
+      errMsg = outcomeOrStatus.errorMessage ?? "";
+    } else {
+      statusCode = outcomeOrStatus;
+      cooldown = cooldownMs ?? 0;
+      errMsg = errorMessage ?? "";
+    }
+    if (this.isStorageBreakerOpen()) {
+      return this.memoryFallback.releaseKey(keyId, leaseToken, statusCode, cooldown, errMsg);
+    }
+    try {
+      await this.evalLua(
+        RELEASE_KEY_LUA,
+        [`openrouter:key:${keyId}`],
+        [leaseToken, statusCode, cooldown, errMsg.slice(0, 200)]
+      );
+      this.recordSuccess();
+      await this.memoryFallback.releaseKey(keyId, leaseToken, statusCode, cooldown, errMsg);
+    } catch (err) {
+      this.recordFailure(err);
+      await this.memoryFallback.releaseKey(keyId, leaseToken, statusCode, cooldown, errMsg);
+    }
+  }
+  /**
+   * Retrieves live active in-flight lease count from Redis via ZCARD.
+   */
+  async getActiveLeaseCount(keyId) {
+    if (this.isStorageBreakerOpen()) {
+      return this.memoryFallback.getActiveLeaseCount(keyId);
+    }
+    try {
+      const now = Date.now();
+      const zsetKey = `openrouter:key:${keyId}:leases`;
+      const pipeline = [
+        ["ZREMRANGEBYSCORE", zsetKey, "-inf", now.toString()],
+        ["ZCARD", zsetKey]
+      ];
+      const res = await this.execPipeline(pipeline);
+      this.recordSuccess();
+      return typeof res[1]?.result === "number" ? res[1].result : 0;
+    } catch (err) {
+      this.recordFailure(err);
+      return this.memoryFallback.getActiveLeaseCount(keyId);
+    }
+  }
+  /**
+   * Retrieves operational metrics for a key.
+   */
+  async getKeyMetrics(keyId) {
+    if (this.isStorageBreakerOpen()) {
+      return this.memoryFallback.getKeyMetrics(keyId);
+    }
+    try {
+      const now = Date.now();
+      const hashKey = `openrouter:key:${keyId}`;
+      const zsetKey = `openrouter:key:${keyId}:leases`;
+      const pipeline = [
+        ["ZREMRANGEBYSCORE", zsetKey, "-inf", now.toString()],
+        ["ZCARD", zsetKey],
+        ["HMGET", hashKey, "state", "total_requests", "consecutive_failures", "consecutive_429s", "last_used_at", "cooldown_until"]
+      ];
+      const res = await this.execPipeline(pipeline);
+      this.recordSuccess();
+      const inFlight = typeof res[1]?.result === "number" ? res[1].result : 0;
+      const hmData = res[2]?.result || [];
+      return {
+        keyId,
+        inFlightRequests: inFlight,
+        totalRequests: parseInt(hmData[1] || "0", 10),
+        consecutiveFailures: parseInt(hmData[2] || "0", 10),
+        consecutive429s: parseInt(hmData[3] || "0", 10),
+        lastUsedAt: parseInt(hmData[4] || "0", 10),
+        cooldownUntil: parseInt(hmData[5] || "0", 10),
+        state: hmData[0] || "ACTIVE"
+      };
+    } catch (err) {
+      this.recordFailure(err);
+      return this.memoryFallback.getKeyMetrics(keyId);
+    }
+  }
+  /**
+   * Fast telemetry (0.02ms) via local memory fallback state.
+   */
+  async getAllStates() {
+    return this.memoryFallback.getAllStates();
+  }
+  /**
+   * Manually resets an exhausted or rate-limited key back to active.
+   */
+  async resetKeyToActive(keyId) {
+    await this.memoryFallback.resetKeyToActive(keyId);
+    if (this.isStorageBreakerOpen()) return;
+    try {
+      await this.execCommand(
+        "HSET",
+        `openrouter:key:${keyId}`,
+        "state",
+        "ACTIVE",
+        "consecutive_429s",
+        "0",
+        "consecutive_failures",
+        "0"
+      );
+      this.recordSuccess();
+    } catch (err) {
+      this.recordFailure(err);
+    }
+  }
+  // --- Internal Fail-Open Circuit Breaker & HTTP Transport ---
+  isStorageBreakerOpen() {
+    return Date.now() < this.storageBreakerOpenUntil;
+  }
+  recordSuccess() {
+    this.redisConsecutiveFailures = 0;
+  }
+  recordFailure(err) {
+    this.redisConsecutiveFailures++;
+    console.warn(`[KeyStore:Upstash] Request failed (${this.redisConsecutiveFailures}/3):`, err?.message || err);
+    if (this.redisConsecutiveFailures >= 3) {
+      this.storageBreakerOpenUntil = Date.now() + this.breakerDurationMs;
+      console.error(
+        `[KeyStore:StorageBreaker] TRIPPED OPEN. Failing open to MemoryKeyStore for ${this.breakerDurationMs / 1e3}s.`
+      );
+    }
+  }
+  async evalLua(script, keys, args) {
+    const res = await fetch(`${this.restUrl}/eval`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${this.restToken}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify([script, keys.length, ...keys, ...args]),
+      signal: AbortSignal.timeout(this.timeoutMs)
+    });
+    if (!res.ok) {
+      throw new Error(`Upstash HTTP ${res.status}: ${res.statusText}`);
+    }
+    const data = await res.json();
+    if (data.error) {
+      throw new Error(`Upstash Lua Error: ${data.error}`);
+    }
+    return data.result;
+  }
+  async execCommand(...cmd) {
+    const res = await fetch(`${this.restUrl}`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${this.restToken}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(cmd),
+      signal: AbortSignal.timeout(this.timeoutMs)
+    });
+    if (!res.ok) {
+      throw new Error(`Upstash HTTP ${res.status}: ${res.statusText}`);
+    }
+    const data = await res.json();
+    if (data.error) {
+      throw new Error(`Upstash Command Error: ${data.error}`);
+    }
+    return data.result;
+  }
+  async execPipeline(commands) {
+    const res = await fetch(`${this.restUrl}/pipeline`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${this.restToken}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(commands),
+      signal: AbortSignal.timeout(1e3)
+    });
+    if (!res.ok) {
+      throw new Error(`Upstash HTTP ${res.status}: ${res.statusText}`);
+    }
+    const data = await res.json();
+    return data;
+  }
+};
+
+// lib/llm/factory.ts
+var PRESETS = {
+  openrouter: {
+    baseUrl: "https://openrouter.ai/api/v1",
+    defaultModel: "openai/gpt-4o-mini",
+    extraHeaders: () => ({
+      // OpenRouter uses these to attribute traffic on its leaderboard.
+      "HTTP-Referer": process.env.LLM_REFERER ?? "https://tokki.app",
+      "X-Title": process.env.LLM_TITLE ?? "Tokki AI"
+    })
+  },
+  openai: {
+    baseUrl: "https://api.openai.com/v1",
+    defaultModel: "gpt-4o-mini"
+  },
+  groq: {
+    baseUrl: "https://api.groq.com/openai/v1",
+    defaultModel: "llama-3.1-70b-versatile"
+  },
+  together: {
+    baseUrl: "https://api.together.xyz/v1",
+    defaultModel: "meta-llama/Llama-3.1-70B-Instruct-Turbo"
+  },
+  deepseek: {
+    baseUrl: "https://api.deepseek.com",
+    defaultModel: "deepseek-chat"
+  },
+  mistral: {
+    baseUrl: "https://api.mistral.ai/v1",
+    defaultModel: "mistral-small-latest"
+  },
+  fireworks: {
+    baseUrl: "https://api.fireworks.ai/inference/v1",
+    defaultModel: "accounts/fireworks/models/llama-v3p1-70b-instruct"
+  },
+  /**
+   * Google Gemini via its **OpenAI-compatible** endpoint.
+   */
+  gemini: {
+    baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
+    defaultModel: "gemini-3.5-flash-lite"
+  }
+};
+var cachedRotatingProvider = null;
+var cachedRotatingSignature = null;
+var cachedKeyStore = null;
+function getKeyStore() {
+  if (cachedKeyStore) return cachedKeyStore;
+  const redisUrl = process.env.UPSTASH_REDIS_REST_URL?.trim();
+  const redisToken = process.env.UPSTASH_REDIS_REST_TOKEN?.trim();
+  if (redisUrl && redisToken) {
+    cachedKeyStore = new UpstashRedisKeyStore(redisUrl, redisToken, {
+      timeoutMs: 500
+    });
+  } else {
+    cachedKeyStore = new MemoryKeyStore();
+  }
+  return cachedKeyStore;
+}
+function parseKeyConfigsFromEnv() {
+  const rawOpenRouterKeys = process.env.OPENROUTER_API_KEYS?.trim() || process.env.LLM_API_KEYS?.trim();
+  const rawSingleKey = process.env.LLM_API_KEY?.trim();
+  const defaultMaxConcurrency = Number(process.env.DEFAULT_KEY_MAX_CONCURRENCY || 5);
+  const configs = [];
+  if (rawOpenRouterKeys) {
+    if (rawOpenRouterKeys.startsWith("[") && rawOpenRouterKeys.endsWith("]")) {
+      try {
+        const parsed = JSON.parse(rawOpenRouterKeys);
+        if (Array.isArray(parsed)) {
+          parsed.forEach((item, idx) => {
+            if (typeof item === "string" && item.trim()) {
+              configs.push({
+                id: `openrouter-key-${idx + 1}`,
+                apiKey: item.trim(),
+                tier: idx === 0 ? 0 : 1,
+                weight: 10,
+                maxConcurrency: defaultMaxConcurrency
+              });
+            } else if (typeof item === "object" && item !== null && item.apiKey) {
+              configs.push({
+                id: item.id || `openrouter-key-${idx + 1}`,
+                apiKey: item.apiKey,
+                accountId: item.accountId,
+                tier: typeof item.tier === "number" ? item.tier : idx === 0 ? 0 : 1,
+                weight: typeof item.weight === "number" ? item.weight : 10,
+                maxConcurrency: typeof item.maxConcurrency === "number" ? item.maxConcurrency : defaultMaxConcurrency
+              });
+            }
+          });
+        }
+      } catch (err) {
+        console.warn(
+          "[factory] Failed to parse JSON in OPENROUTER_API_KEYS, falling back to CSV parsing:",
+          err
+        );
+      }
+    }
+    if (configs.length === 0) {
+      const tokens = rawOpenRouterKeys.split(/[,\n]/).map((s) => s.trim()).filter(Boolean);
+      tokens.forEach((key, idx) => {
+        configs.push({
+          id: `openrouter-key-${idx + 1}`,
+          apiKey: key,
+          tier: idx === 0 ? 0 : 1,
+          weight: 10,
+          maxConcurrency: defaultMaxConcurrency
+        });
+      });
+    }
+  }
+  if (configs.length === 0 && rawSingleKey && rawSingleKey.includes(",")) {
+    const tokens = rawSingleKey.split(",").map((s) => s.trim()).filter(Boolean);
+    tokens.forEach((key, idx) => {
+      configs.push({
+        id: `openrouter-key-${idx + 1}`,
+        apiKey: key,
+        tier: idx === 0 ? 0 : 1,
+        weight: 10,
+        maxConcurrency: defaultMaxConcurrency
+      });
+    });
+  }
+  return configs;
+}
+function createLLMProvider() {
+  return createRotatingOrConfiguredProvider();
+}
+function createRotatingOrConfiguredProvider() {
+  const providerName = (process.env.LLM_PROVIDER ?? "openrouter").trim().toLowerCase();
+  const hasExplicitOpenRouterPool = Boolean(process.env.OPENROUTER_API_KEYS?.trim());
+  if (providerName === "openrouter" || hasExplicitOpenRouterPool) {
+    const configs = parseKeyConfigsFromEnv();
+    if (configs.length > 1 || configs.length === 1 && hasExplicitOpenRouterPool) {
+      const defaultModel = process.env.LLM_MODEL?.trim() || "openai/gpt-4o-mini";
+      const referer = process.env.LLM_REFERER ?? "https://tokki.app";
+      const title = process.env.LLM_TITLE ?? "Tokki AI";
+      const sig = JSON.stringify([
+        process.env.OPENROUTER_API_KEYS ?? "",
+        process.env.LLM_API_KEYS ?? "",
+        hasExplicitOpenRouterPool ? "" : process.env.LLM_API_KEY ?? "",
+        defaultModel,
+        referer,
+        title
+      ]);
+      if (!cachedRotatingProvider || cachedRotatingSignature !== sig) {
+        const store = getKeyStore();
+        const configMap = new Map(configs.map((c) => [c.id, c]));
+        cachedRotatingProvider = new RotatingLLMProvider(store, configMap, {
+          defaultModel,
+          extraHeaders: {
+            "HTTP-Referer": referer,
+            "X-Title": title
+          }
+        });
+        cachedRotatingSignature = sig;
+      }
+      return cachedRotatingProvider;
+    }
+    if (providerName === "openrouter") {
+      const singleKey2 = process.env.LLM_API_KEY?.trim();
+      if (!singleKey2) return null;
+      const preset2 = PRESETS.openrouter;
+      return new OpenAICompatibleProvider({
+        name: "openrouter",
+        baseUrl: process.env.LLM_BASE_URL?.trim() || preset2.baseUrl,
+        apiKey: singleKey2,
+        defaultModel: process.env.LLM_MODEL?.trim() || preset2.defaultModel,
+        extraHeaders: preset2.extraHeaders?.()
+      });
+    }
+  }
+  if (providerName === "custom") {
+    const singleKey2 = process.env.LLM_API_KEY?.trim();
+    if (!singleKey2) return null;
+    const baseUrl = process.env.LLM_BASE_URL?.trim();
+    if (!baseUrl) {
+      throw new Error(
+        "[llm] LLM_PROVIDER=custom requires LLM_BASE_URL to be set"
+      );
+    }
+    return new OpenAICompatibleProvider({
+      name: "custom",
+      baseUrl,
+      apiKey: singleKey2,
+      defaultModel: process.env.LLM_MODEL ?? "gpt-4o-mini"
+    });
+  }
+  const singleKey = process.env.LLM_API_KEY?.trim();
+  if (!singleKey) return null;
+  const preset = PRESETS[providerName];
+  if (!preset) {
+    throw new Error(
+      `[llm] unknown LLM_PROVIDER="${providerName}". Pick one of: ${Object.keys(PRESETS).join(", ")}, custom`
+    );
+  }
+  return new OpenAICompatibleProvider({
+    name: providerName,
+    baseUrl: process.env.LLM_BASE_URL?.trim() || preset.baseUrl,
+    apiKey: singleKey,
+    defaultModel: process.env.LLM_MODEL?.trim() || preset.defaultModel,
+    extraHeaders: preset.extraHeaders?.()
+  });
+}
 
 // src/generated-migrations.ts
 var MIGRATIONS = [
@@ -714349,8 +714283,7 @@ var v2WidgetEndpoints = async (app) => {
         let provider;
         try {
           if (process.env.OPENROUTER_API_KEYS?.trim()) {
-            const { createRotatingOrConfiguredProvider: createRotatingOrConfiguredProvider2 } = await Promise.resolve().then(() => (init_factory(), factory_exports));
-            provider = createRotatingOrConfiguredProvider2();
+            provider = createRotatingOrConfiguredProvider();
           } else {
             provider = createLLMProvider();
           }

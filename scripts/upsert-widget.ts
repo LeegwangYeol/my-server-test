@@ -18,7 +18,7 @@
  *     --system-prompt "너는 친절한 상담원이야. 한국어로 짧게 답해." \
  *     --questions "가격이 궁금해요|환불 정책은?|배송 얼마나 걸려요?"
  *
- * 대상 서버: 기본 https://my-server-test.vercel.app — --base https://... 로 변경.
+ * 대상 서버: 기본 https://my-server-mocha.vercel.app — --base https://... 로 변경.
  */
 
 const argv = process.argv.slice(2);
@@ -31,7 +31,7 @@ const has = (f: string): boolean => argv.includes(f);
 const BASE = (
   flag("--base") ??
   process.env.BASE_URL ??
-  "https://my-server-test.vercel.app"
+  "https://my-server-mocha.vercel.app"
 ).replace(/\/$/, "");
 const TOKEN = process.env.ADMIN_TOKEN?.trim();
 

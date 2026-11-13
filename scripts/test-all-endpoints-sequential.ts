@@ -19,7 +19,7 @@ interface TestReportItem {
   notes: string;
 }
 
-const LIVE_BASE = "https://my-server-test.vercel.app";
+const LIVE_BASE = "https://my-server-mocha.vercel.app";
 
 async function runExhaustiveSequentialTest() {
   console.log(
