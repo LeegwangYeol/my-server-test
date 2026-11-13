@@ -73,6 +73,10 @@ export const v2MailEndpoints = async (app: any) => {
           set.status = 400;
           return { success: false, error: "subject exceeds maximum length of 1000 characters" };
         }
+        if (/[\r\n]/.test(subject) || (body?.from && /[\r\n]/.test(body.from))) {
+          set.status = 400;
+          return { success: false, error: "invalid header characters (CRLF prohibited)" };
+        }
         if (!body?.text?.trim() && !body?.html?.trim()) {
           set.status = 400;
           return { success: false, error: "text or html required" };

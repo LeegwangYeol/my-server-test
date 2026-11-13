@@ -270,6 +270,22 @@ describe("Adversarial Security Test Suite (Requirement R2)", () => {
         );
         expect(res.status).toBe(413);
       });
+
+      test("rejects multi-byte UTF-8 (>1MB bytes, <1M chars) chunked JSON with charset param with HTTP 413", async () => {
+        const multiBytePayload = JSON.stringify({
+          widgetId: VALID_WIDGET_ID,
+          message: "hi",
+          padding: "가".repeat(500_000), // 500k UTF-16 code units, ~1.5MB UTF-8 bytes
+        });
+        const res = await app.handle(
+          new Request("http://localhost/v2/ask", {
+            method: "POST",
+            headers: { "content-type": "application/json; charset=utf-8" },
+            body: multiBytePayload,
+          }),
+        );
+        expect(res.status).toBe(413);
+      });
     });
 
     describe("2.3 Context History Token Bounding", () => {
@@ -323,6 +339,26 @@ describe("Adversarial Security Test Suite (Requirement R2)", () => {
         const data = (await res.json()) as any;
         expect(data.success).toBe(false);
         expect(data.error).toContain("search options too large");
+      });
+
+      test("rejects threadId smuggling exceeding 2,000 characters with HTTP 413", async () => {
+        const res = await postJson(app, "/v2/ask", {
+          widgetId: VALID_WIDGET_ID,
+          threadId: "T".repeat(2500),
+          message: "Safe message",
+        });
+        expect(res.status).toBe(413);
+        const data = (await res.json()) as any;
+        expect(data.success).toBe(false);
+        expect(data.error).toContain("threadId too large");
+      });
+
+      test("rejects oversized widgetId (>256 chars) with HTTP 403", async () => {
+        const res = await postJson(app, "/v2/ask", {
+          widgetId: "W".repeat(1000),
+          message: "Safe message",
+        });
+        expect(res.status).toBe(403);
       });
 
       test("accepts browserInfo and search within 2,000 character limit", async () => {

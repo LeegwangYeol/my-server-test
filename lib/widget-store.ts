@@ -77,6 +77,7 @@ interface CacheEntry {
 
 export const MAX_CACHE_ENTRIES = 500;
 export const CACHE_TTL_MS = 60_000;
+export const MAX_WIDGET_ID_CHARS = 256;
 
 /**
  * Bounded LRU cache with TTL expiration.
@@ -149,44 +150,57 @@ export function invalidateWidgetCache(id?: string) {
 
 /** Read one widget row, ignoring soft-deleted entries. Cached with 60s TTL. */
 export async function getWidget(id: string): Promise<WidgetRow | null> {
-  if (!id) return null;
+  if (!id || id.length > MAX_WIDGET_ID_CHARS) return null;
   const now = Date.now();
   const cached = widgetCache.get(id);
   if (cached && cached.expiresAt > now) {
     return cached.row;
   }
 
-  const { data, error } = await supabaseUntyped
-    .from(TABLE)
-    .select("*")
-    .eq("id", id)
-    .eq("is_deleted", false)
-    .maybeSingle();
-  if (error) {
-    console.error("[widget-store] getWidget failed:", error.message);
+  try {
+    const { data, error } = await supabaseUntyped
+      .from(TABLE)
+      .select("*")
+      .eq("id", id)
+      .eq("is_deleted", false)
+      .maybeSingle();
+    if (error) {
+      console.error("[widget-store] getWidget failed:", error.message);
+      return null;
+    }
+    const result = data ? normalizeRow(data) : null;
+    widgetCache.set(id, { row: result, expiresAt: now + CACHE_TTL_MS });
+    return result;
+  } catch (err: any) {
+    console.warn("[widget-store] getWidget skipped:", err?.message || err);
     return null;
   }
-  const result = data ? normalizeRow(data) : null;
-  widgetCache.set(id, { row: result, expiresAt: now + CACHE_TTL_MS });
-  return result;
 }
 
 /** List all live widgets, newest activity first. */
 export async function listWidgetsRegistered(): Promise<WidgetRow[]> {
-  const { data, error } = await supabaseUntyped
-    .from(TABLE)
-    .select("*")
-    .eq("is_deleted", false)
-    .order("updated_at", { ascending: false })
-    .limit(500);
-  if (error) {
-    console.error(
-      "[widget-store] listWidgetsRegistered failed:",
-      error.message,
+  try {
+    const { data, error } = await supabaseUntyped
+      .from(TABLE)
+      .select("*")
+      .eq("is_deleted", false)
+      .order("updated_at", { ascending: false })
+      .limit(500);
+    if (error) {
+      console.error(
+        "[widget-store] listWidgetsRegistered failed:",
+        error.message,
+      );
+      return [];
+    }
+    return (data ?? []).map(normalizeRow);
+  } catch (err: any) {
+    console.warn(
+      "[widget-store] listWidgetsRegistered skipped:",
+      err?.message || err,
     );
     return [];
   }
-  return (data ?? []).map(normalizeRow);
 }
 
 /**
@@ -219,30 +233,41 @@ export async function upsertWidget(
     patch.chat_bubble_size = v ? v : null;
   }
 
-  const { data, error } = await supabaseUntyped
-    .from(TABLE)
-    .upsert(patch, { onConflict: "id" })
-    .select("*")
-    .single();
-  if (error) {
-    console.error("[widget-store] upsertWidget failed:", error.message);
-    return { row: null, error: error.message };
+  try {
+    const { data, error } = await supabaseUntyped
+      .from(TABLE)
+      .upsert(patch, { onConflict: "id" })
+      .select("*")
+      .single();
+    if (error) {
+      console.error("[widget-store] upsertWidget failed:", error.message);
+      return { row: null, error: error.message };
+    }
+    invalidateWidgetCache(input.id);
+    return { row: normalizeRow(data) };
+  } catch (err: any) {
+    const msg = err?.message || String(err);
+    console.warn("[widget-store] upsertWidget skipped:", msg);
+    return { row: null, error: msg };
   }
-  invalidateWidgetCache(input.id);
-  return { row: normalizeRow(data) };
 }
 
 /** Soft-delete (sets is_deleted = true). Hard delete is intentionally not exposed. */
 export async function deleteWidget(id: string): Promise<boolean> {
   if (!id) return false;
-  const { error } = await supabaseUntyped
-    .from(TABLE)
-    .update({ is_deleted: true })
-    .eq("id", id);
-  if (error) {
-    console.error("[widget-store] deleteWidget failed:", error.message);
+  try {
+    const { error } = await supabaseUntyped
+      .from(TABLE)
+      .update({ is_deleted: true })
+      .eq("id", id);
+    if (error) {
+      console.error("[widget-store] deleteWidget failed:", error.message);
+      return false;
+    }
+    invalidateWidgetCache(id);
+    return true;
+  } catch (err: any) {
+    console.warn("[widget-store] deleteWidget skipped:", err?.message || err);
     return false;
   }
-  invalidateWidgetCache(id);
-  return true;
 }

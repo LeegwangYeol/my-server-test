@@ -2751,3 +2751,39 @@ This document serves as the shared communication channel between the AI Team (Ge
 - **Verification Matrix**:
   - `bun test`: **268 PASS / 0 FAIL (1,733 assertions)** in backend, **25 PASS / 0 FAIL (87 assertions)** in frontend (`tokki-widget`). Total: **293 PASS / 0 FAIL (1,820 assertions)**.
 - **Status**: **100% PASS — Production Certified & Fully Robust (AUDIT-TOKKI-CHAOS-20261103 / Level 5 Resilience)**.
+
+---
+
+## 77. Daily Quota-Safe Controlled Load & Perimeter Defense Audit (2026-11-13)
+
+- **Session**: `[세션명: 토키 위젯 일일 부하 테스트]` (Single-Agent Focused Mode — Zero External Quota Burn).
+- **R1 Controlled Concurrency & 429/402 Failover**:
+  - Dispatched 16 controlled concurrent `/v2/ask` requests (14 full SSE streams + 2 mid-stream client aborts) against 4 keys across 2 accounts (`acc-bankrupt`, `acc-healthy`).
+  - Completed in **38.93ms** (`p50: 38.53ms`, `p95/max: 38.64ms` vs 60,000ms Vercel limit), 100% failover (14/14 `[DONE]`), 0 sibling network calls on HTTP 402 (`sk-or-bankrupt-2: 0`), and authoritative post-wave $\text{ZCARD} \equiv 0$ across all keys.
+- **R2 Adversarial Perimeter Hardening (4 Patches Applied)**:
+  1. `src/app.ts`: Enforced UTF-8 byte-length (`Buffer.byteLength(text, "utf8") > MAX_REQUEST_BODY_SIZE`) and parameterized `application/json;...` matching to block multi-byte chunked >1MB payloads with HTTP 413.
+  2. `src/endpoints/v2/widget-endpoints.ts`: Added `threadId` auxiliary length guard (`> 2,000` chars -> HTTP 413).
+  3. `lib/widget-store.ts`: Added `MAX_WIDGET_ID_CHARS = 256` fast-reject to prevent oversized unregistered `widgetId`s from bloating `BoundedLRUCache` or querying Supabase (returns HTTP 403 in O(1)).
+  4. `tokki-widget` (`lib/api/llm.ts`, `lib/state/chat.tsx`): Added `if (!response.ok) throw response` + `signal` forwarding on `createThread` (stopping secondary `/v2/ask` call after 403) and enforced 4,000-char ceiling in `startVoiceQuestion`.
+- **R3 Verification**:
+  - `bun test`: **271/271 PASS** (`my-server-test`, 1,738 assertions) + **27/27 PASS** (`tokki-widget`, 93 assertions) = **298/298 PASS (1,831 assertions)**.
+  - Pre-flight builds: `bundle:api` (116ms, 26.9MB), `type-check` (0 errors), `build` (3.01s), `build:embed` (2.17s).
+  - Korean report updated at `stress_test_audit.md` (`v6.2.0-DAILY-KO`). Committed locally with `[skip ci]`.
+
+---
+
+## 78. Daily Diagnostics & Auto-Remediation Attestation (`[세션명: 내 서버 및 Vercel 일일 총검사]`, 2026-11-13)
+
+- **Trigger**: Scheduled single-agent daily diagnostic & auto-remediation routine (`development` integrity mode, zero subagent/swarm quota overhead).
+- **Live Vercel Infrastructure Findings (`https://my-server-mocha.vercel.app`)**:
+  1. **Domain & Routing**: `my-server-mocha.vercel.app` is live (`iad1`, Node `v24.22.2`, `commitSha: cb5f128`). `/api/hello` (cold 748ms / warm 239ms), `/v1/healthz` (cold 1,401ms / warm 224ms), `/v1/heartbeat` (warm 248ms) all return `HTTP 200`. `/api/health` returns `HTTP 404` by design (`vercel.json` negative lookahead `(?!api/)` only maps `api/index.js` & `api/hello.js`). Legacy `my-server-test.vercel.app` returns `HTTP 402 DEPLOYMENT_DISABLED` (`AGENTS.md` updated).
+  2. **CRITICAL Operator Action Needed — Missing Supabase Env Vars on Vercel**: `ADMIN_TOKEN` is set on `my-server-mocha.vercel.app`, **but `SUPABASE_URL` and `SUPABASE_SERVICE_KEY` are unset**, causing `/v2/admin/db/migrate` -> `500`, `/v2/admin/widgets` -> `count: 0`, and `/v2/ask` / `/v2/widget/create-thread` -> `403 unregistered widget_id` on live production until configured in Vercel Dashboard.
+- **Auto-Remediations Applied & Bundled (`api/index.js`)**:
+  1. **CORS `Access-Control-Expose-Headers` Fix (`src/app.ts`)**: Pinned `exposeHeaders: ["retry-after", "x-ratelimit-limit", "x-ratelimit-remaining", "x-ratelimit-reset"]` in `@elysiajs/cors` so default `exposeHeaders: true` no longer clobbers rate-limit headers on `200 OK` responses.
+  2. **Singleton `RotatingLLMProvider` Caching (`lib/llm/factory.ts`, `src/endpoints/v2/widget-endpoints.ts`)**: Eliminated per-request `new RotatingLLMProvider()` instantiation in `/v2/ask`, preventing redundant Upstash Redis `syncKeys()` `/pipeline` writes on every chat turn while auto-invalidating on env key rotation.
+  3. **Duplicate Query Elimination (`src/endpoints/v2/widget-endpoints.ts`)**: Reused `existingThread` in `/v2/ask`, removing a duplicate `SELECT * FROM chat_thread` round-trip per chat message.
+  4. **Binary Magic-Byte Icon Validation & Error Guarding (`src/endpoints/v2/widget-endpoints.ts`)**: Added `detectImageMime(bytes)` (`PNG`, `JPEG`, `GIF87a/89a`, `RIFF..WEBP`) + `try/catch` to `/v2/admin/widgets/upload-icon` (blocking MIME-spoofed SVG/HTML XSS uploads with HTTP 400) and `try/catch` around `/v2/admin/db/migrate`.
+  5. **Honest DB Failure Semantics & Complete Store `try/catch` (`lib/chat-store.ts`, `lib/widget-store.ts`)**: Removed fake `crypto.randomUUID()` fallback on `createThread()` catch (returns `null` honestly, preventing `chat_message` FK `23503` errors) and wrapped `renameThread`, `updateThreadPrompt`, `upsertWidget`, and `deleteWidget` in `try/catch`.
+  6. **SMTP CRLF Header Injection & OAuth State Hardening (`src/endpoints/v2/mail-endpoints.ts`, `src/endpoints/v1/youtube/auth-create.ts`)**: Blocked `\r`/`\n` in `subject`/`from` (`HTTP 400`) and validated decoded Base64 `state` fields (`clientId`, `clientSecret`, `redirectUri`) before `google.auth.OAuth2` exchange.
+  7. **Regression Suite (`test/reviewer-adversarial.test.ts`)**: Added `VULN-23` through `VULN-26` regression tests.
+- **Status**: **275 / 275 PASS (`bun test`), 0 TypeScript errors, `api/index.js` synchronized & committed with `[skip ci]`.**

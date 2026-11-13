@@ -453,4 +453,102 @@ describe("Adversarial Reviewer Verification Suite", () => {
     // (1_700_000_123 + 60_000) / 1000 = 1700060.123 -> Math.ceil = 1700061
     expect(res.resetEpochSec).toBe(1700061);
   });
+
+  it("VULN-23: Normal 200 and route-level 403 responses preserve rate-limit Access-Control-Expose-Headers", async () => {
+    const app = await createApp(true);
+    const origin = "https://embedded-client.example";
+    const okRes = await app.handle(
+      new Request("http://localhost/v1/healthz", {
+        headers: { origin, "x-custom-proxy-header": "secret-internal" },
+      }),
+    );
+    expect(okRes.status).toBe(200);
+    const expose = (okRes.headers.get("access-control-expose-headers") || "").toLowerCase();
+    expect(expose).toContain("retry-after");
+    expect(expose).toContain("x-ratelimit-limit");
+    expect(expose).toContain("x-ratelimit-remaining");
+    expect(expose).toContain("x-ratelimit-reset");
+    expect(expose).not.toContain("x-custom-proxy-header");
+  });
+
+  it("VULN-24: /v2/admin/widgets/upload-icon rejects MIME-spoofed non-image binary signatures with HTTP 400", async () => {
+    const prevToken = process.env.ADMIN_TOKEN;
+    process.env.ADMIN_TOKEN = "test-admin-secret";
+    try {
+      const app = await createApp(true);
+      const form = new FormData();
+      form.append("widgetId", "test-widget");
+      const spoofedSvg = new TextEncoder().encode("<svg onload='alert(1)'></svg>");
+      form.append("file", new File([spoofedSvg], "evil.png", { type: "image/png" }));
+
+      const res = await app.handle(
+        new Request("http://localhost/v2/admin/widgets/upload-icon", {
+          method: "POST",
+          headers: { "x-admin-token": "test-admin-secret" },
+          body: form,
+        }),
+      );
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as any;
+      expect(body.success).toBe(false);
+      expect(body.error).toContain("signature");
+    } finally {
+      if (prevToken === undefined) delete process.env.ADMIN_TOKEN;
+      else process.env.ADMIN_TOKEN = prevToken;
+    }
+  });
+
+  it("VULN-25: /v2/admin/mail/send rejects CRLF header injection in subject or from with HTTP 400", async () => {
+    const prevToken = process.env.ADMIN_TOKEN;
+    process.env.ADMIN_TOKEN = "test-admin-secret";
+    try {
+      const app = await createApp(true);
+      const res = await app.handle(
+        new Request("http://localhost/v2/admin/mail/send", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-admin-token": "test-admin-secret",
+          },
+          body: JSON.stringify({
+            to: "victim@example.com",
+            subject: "Hello\r\nBcc: attacker@evil.com",
+            text: "Test",
+          }),
+        }),
+      );
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as any;
+      expect(body.success).toBe(false);
+      expect(body.error).toContain("CRLF");
+    } finally {
+      if (prevToken === undefined) delete process.env.ADMIN_TOKEN;
+      else process.env.ADMIN_TOKEN = prevToken;
+    }
+  });
+
+  it("VULN-26: createLLMProvider reuses warm RotatingLLMProvider singleton and invalidates on env rotation", async () => {
+    const {
+      createRotatingOrConfiguredProvider: createLLMProvider,
+      resetCachedProviderForTesting,
+    } = await import("../lib/llm/factory");
+    const prevKeys = process.env.OPENROUTER_API_KEYS;
+    try {
+      resetCachedProviderForTesting();
+      process.env.OPENROUTER_API_KEYS = "sk-or-test-1,sk-or-test-2";
+      const p1 = createLLMProvider();
+      const p2 = createLLMProvider();
+      expect(p1).not.toBeNull();
+      expect(p1).toBe(p2);
+
+      process.env.OPENROUTER_API_KEYS = "sk-or-test-1,sk-or-test-3";
+      const p3 = createLLMProvider();
+      expect(p3).not.toBeNull();
+      expect(p3).not.toBe(p1);
+    } finally {
+      if (prevKeys === undefined) delete process.env.OPENROUTER_API_KEYS;
+      else process.env.OPENROUTER_API_KEYS = prevKeys;
+      resetCachedProviderForTesting();
+    }
+  });
 });

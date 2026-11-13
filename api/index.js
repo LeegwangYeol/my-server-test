@@ -674416,12 +674416,6 @@ var init_memory = __esm({
 });
 
 // lib/llm/rotating-provider.ts
-var rotating_provider_exports = {};
-__export(rotating_provider_exports, {
-  MemoryKeyStore: () => MemoryKeyStore,
-  RotatingLLMProvider: () => RotatingLLMProvider,
-  RotatingProvider: () => RotatingLLMProvider
-});
 var RotatingLLMProvider;
 var init_rotating_provider = __esm({
   "lib/llm/rotating-provider.ts"() {
@@ -675171,6 +675165,7 @@ var init_upstash_redis = __esm({
 var factory_exports = {};
 __export(factory_exports, {
   createLLMProvider: () => createLLMProvider,
+  createRotatingOrConfiguredProvider: () => createRotatingOrConfiguredProvider,
   getKeyStore: () => getKeyStore,
   parseKeyConfigsFromEnv: () => parseKeyConfigsFromEnv,
   resetCachedProviderForTesting: () => resetCachedProviderForTesting
@@ -675190,6 +675185,7 @@ function getKeyStore() {
 }
 function resetCachedProviderForTesting() {
   cachedRotatingProvider = null;
+  cachedRotatingSignature = null;
   cachedKeyStore = null;
 }
 function parseKeyConfigsFromEnv() {
@@ -675258,33 +675254,51 @@ function parseKeyConfigsFromEnv() {
   return configs;
 }
 function createLLMProvider() {
+  return createRotatingOrConfiguredProvider();
+}
+function createRotatingOrConfiguredProvider() {
   const providerName = (process.env.LLM_PROVIDER ?? "openrouter").trim().toLowerCase();
-  if (providerName === "openrouter") {
+  const hasExplicitOpenRouterPool = Boolean(process.env.OPENROUTER_API_KEYS?.trim());
+  if (providerName === "openrouter" || hasExplicitOpenRouterPool) {
     const configs = parseKeyConfigsFromEnv();
-    if (configs.length > 1 || configs.length === 1 && process.env.OPENROUTER_API_KEYS) {
-      if (!cachedRotatingProvider) {
+    if (configs.length > 1 || configs.length === 1 && hasExplicitOpenRouterPool) {
+      const defaultModel = process.env.LLM_MODEL?.trim() || "openai/gpt-4o-mini";
+      const referer = process.env.LLM_REFERER ?? "https://tokki.app";
+      const title = process.env.LLM_TITLE ?? "Tokki AI";
+      const sig = JSON.stringify([
+        process.env.OPENROUTER_API_KEYS ?? "",
+        process.env.LLM_API_KEYS ?? "",
+        hasExplicitOpenRouterPool ? "" : process.env.LLM_API_KEY ?? "",
+        defaultModel,
+        referer,
+        title
+      ]);
+      if (!cachedRotatingProvider || cachedRotatingSignature !== sig) {
         const store = getKeyStore();
         const configMap = new Map(configs.map((c) => [c.id, c]));
         cachedRotatingProvider = new RotatingLLMProvider(store, configMap, {
-          defaultModel: process.env.LLM_MODEL?.trim() || "openai/gpt-4o-mini",
+          defaultModel,
           extraHeaders: {
-            "HTTP-Referer": process.env.LLM_REFERER ?? "https://tokki.app",
-            "X-Title": process.env.LLM_TITLE ?? "Tokki AI"
+            "HTTP-Referer": referer,
+            "X-Title": title
           }
         });
+        cachedRotatingSignature = sig;
       }
       return cachedRotatingProvider;
     }
-    const singleKey2 = process.env.LLM_API_KEY?.trim();
-    if (!singleKey2) return null;
-    const preset2 = PRESETS.openrouter;
-    return new OpenAICompatibleProvider({
-      name: "openrouter",
-      baseUrl: process.env.LLM_BASE_URL?.trim() || preset2.baseUrl,
-      apiKey: singleKey2,
-      defaultModel: process.env.LLM_MODEL?.trim() || preset2.defaultModel,
-      extraHeaders: preset2.extraHeaders?.()
-    });
+    if (providerName === "openrouter") {
+      const singleKey2 = process.env.LLM_API_KEY?.trim();
+      if (!singleKey2) return null;
+      const preset2 = PRESETS.openrouter;
+      return new OpenAICompatibleProvider({
+        name: "openrouter",
+        baseUrl: process.env.LLM_BASE_URL?.trim() || preset2.baseUrl,
+        apiKey: singleKey2,
+        defaultModel: process.env.LLM_MODEL?.trim() || preset2.defaultModel,
+        extraHeaders: preset2.extraHeaders?.()
+      });
+    }
   }
   if (providerName === "custom") {
     const singleKey2 = process.env.LLM_API_KEY?.trim();
@@ -675318,7 +675332,7 @@ function createLLMProvider() {
     extraHeaders: preset.extraHeaders?.()
   });
 }
-var PRESETS, cachedRotatingProvider, cachedKeyStore;
+var PRESETS, cachedRotatingProvider, cachedRotatingSignature, cachedKeyStore;
 var init_factory = __esm({
   "lib/llm/factory.ts"() {
     init_openai_compatible();
@@ -675368,6 +675382,7 @@ var init_factory = __esm({
       }
     };
     cachedRotatingProvider = null;
+    cachedRotatingSignature = null;
     cachedKeyStore = null;
   }
 });
@@ -703706,6 +703721,13 @@ var v1AuthCreate = (app) => {
         const authState = JSON.parse(
           Buffer.from(state, "base64").toString()
         );
+        if (!authState || typeof authState !== "object" || typeof authState.clientId !== "string" || !authState.clientId.trim() || typeof authState.clientSecret !== "string" || !authState.clientSecret.trim() || typeof authState.redirectUri !== "string" || !authState.redirectUri.trim()) {
+          set.status = 400;
+          return {
+            success: false,
+            message: "\uC720\uD6A8\uD558\uC9C0 \uC54A\uC740 \uC778\uC99D \uC0C1\uD0DC(state) \uC815\uBCF4\uC785\uB2C8\uB2E4."
+          };
+        }
         const oauth2Client = new import_googleapis.google.auth.OAuth2(
           authState.clientId,
           authState.clientSecret,
@@ -713706,23 +713728,39 @@ function getQueuedMessagesForThread(threadId) {
 
 // lib/chat-store.ts
 async function createThread(widgetId) {
-  const { data, error } = await supabaseUntyped.from("chat_thread").insert({ widget_id: widgetId }).select("id").single();
-  if (error) {
-    console.error("[chat-store] createThread failed:", error.message);
+  try {
+    const { data, error } = await supabaseUntyped.from("chat_thread").insert({ widget_id: widgetId }).select("id").single();
+    if (error) {
+      console.error("[chat-store] createThread failed:", error.message);
+      return null;
+    }
+    return data?.id ?? null;
+  } catch (err) {
+    console.warn(
+      "[chat-store] createThread database query failed or skipped:",
+      err?.message || err
+    );
     return null;
   }
-  return data?.id ?? null;
 }
 async function getThread(threadId, widgetId) {
   const wid = (widgetId ?? "").trim();
   const tid = (threadId ?? "").trim();
   if (!wid || !tid) return null;
-  const { data, error } = await supabaseUntyped.from("chat_thread").select("*").eq("id", tid).eq("widget_id", wid).eq("is_deleted", false).maybeSingle();
-  if (error) {
-    console.error("[chat-store] getThread failed:", error.message);
+  try {
+    const { data, error } = await supabaseUntyped.from("chat_thread").select("*").eq("id", tid).eq("widget_id", wid).eq("is_deleted", false).maybeSingle();
+    if (error) {
+      console.error("[chat-store] getThread failed:", error.message);
+      return null;
+    }
+    return data ?? null;
+  } catch (err) {
+    console.warn(
+      "[chat-store] getThread database query skipped:",
+      err?.message || err
+    );
     return null;
   }
-  return data ?? null;
 }
 async function listMessages(threadId, limit = 50) {
   const safeLimit = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 50;
@@ -713830,73 +713868,88 @@ var defaultDbInsert = async (payload) => {
 };
 registerDefaultDbHandler(defaultDbInsert);
 async function listWidgets(limit = 1e3) {
-  const { data, error } = await supabaseUntyped.from("chat_thread").select("widget_id, updated_at").eq("is_deleted", false).order("updated_at", { ascending: false }).limit(limit);
-  if (error) {
-    console.error("[chat-store] listWidgets failed:", error.message);
+  try {
+    const { data, error } = await supabaseUntyped.from("chat_thread").select("widget_id, updated_at").eq("is_deleted", false).order("updated_at", { ascending: false }).limit(limit);
+    if (error) {
+      console.error("[chat-store] listWidgets failed:", error.message);
+      return [];
+    }
+    const rows = data ?? [];
+    const byWidget = /* @__PURE__ */ new Map();
+    for (const r of rows) {
+      const key = r.widget_id ?? "";
+      const entry = byWidget.get(key) ?? {
+        widget_id: key,
+        thread_count: 0,
+        latest_updated_at: r.updated_at
+      };
+      entry.thread_count += 1;
+      if (r.updated_at > entry.latest_updated_at) {
+        entry.latest_updated_at = r.updated_at;
+      }
+      byWidget.set(key, entry);
+    }
+    return Array.from(byWidget.values()).sort(
+      (a, b) => b.latest_updated_at.localeCompare(a.latest_updated_at)
+    );
+  } catch (err) {
+    console.warn("[chat-store] listWidgets skipped:", err?.message || err);
     return [];
   }
-  const rows = data ?? [];
-  const byWidget = /* @__PURE__ */ new Map();
-  for (const r of rows) {
-    const key = r.widget_id ?? "";
-    const entry = byWidget.get(key) ?? {
-      widget_id: key,
-      thread_count: 0,
-      latest_updated_at: r.updated_at
-    };
-    entry.thread_count += 1;
-    if (r.updated_at > entry.latest_updated_at) {
-      entry.latest_updated_at = r.updated_at;
-    }
-    byWidget.set(key, entry);
-  }
-  return Array.from(byWidget.values()).sort(
-    (a, b) => b.latest_updated_at.localeCompare(a.latest_updated_at)
-  );
 }
 async function listThreads(widgetId, limit = 100) {
-  const { data: threads, error } = await supabaseUntyped.from("chat_thread").select("*").eq("widget_id", widgetId).eq("is_deleted", false).order("updated_at", { ascending: false }).limit(limit);
-  if (error) {
-    console.error("[chat-store] listThreads failed:", error.message);
+  try {
+    const { data: threads, error } = await supabaseUntyped.from("chat_thread").select("*").eq("widget_id", widgetId).eq("is_deleted", false).order("updated_at", { ascending: false }).limit(limit);
+    if (error) {
+      console.error("[chat-store] listThreads failed:", error.message);
+      return [];
+    }
+    const rows = threads ?? [];
+    if (rows.length === 0) return [];
+    const ids = rows.map((r) => r.id);
+    const { data: msgs } = await supabaseUntyped.from("chat_message").select("thread_id, role, content, created_at").in("thread_id", ids).order("created_at", { ascending: false });
+    const byThread = /* @__PURE__ */ new Map();
+    for (const m of msgs ?? []) {
+      const entry = byThread.get(m.thread_id) ?? { count: 0, lastUser: null };
+      entry.count += 1;
+      if (m.role === "user" && entry.lastUser === null) {
+        entry.lastUser = m.content;
+      }
+      byThread.set(m.thread_id, entry);
+    }
+    return rows.map((r) => {
+      const entry = byThread.get(r.id);
+      const extra = r;
+      return {
+        id: r.id,
+        widget_id: r.widget_id,
+        created_at: r.created_at,
+        updated_at: r.updated_at,
+        message_count: entry?.count ?? 0,
+        last_user_message: entry?.lastUser ?? null,
+        title: extra.title ?? null,
+        system_prompt: extra.system_prompt ?? null,
+        context_text: extra.context_text ?? null
+      };
+    });
+  } catch (err) {
+    console.warn("[chat-store] listThreads skipped:", err?.message || err);
     return [];
   }
-  const rows = threads ?? [];
-  if (rows.length === 0) return [];
-  const ids = rows.map((r) => r.id);
-  const { data: msgs } = await supabaseUntyped.from("chat_message").select("thread_id, role, content, created_at").in("thread_id", ids).order("created_at", { ascending: false });
-  const byThread = /* @__PURE__ */ new Map();
-  for (const m of msgs ?? []) {
-    const entry = byThread.get(m.thread_id) ?? { count: 0, lastUser: null };
-    entry.count += 1;
-    if (m.role === "user" && entry.lastUser === null) {
-      entry.lastUser = m.content;
-    }
-    byThread.set(m.thread_id, entry);
-  }
-  return rows.map((r) => {
-    const entry = byThread.get(r.id);
-    const extra = r;
-    return {
-      id: r.id,
-      widget_id: r.widget_id,
-      created_at: r.created_at,
-      updated_at: r.updated_at,
-      message_count: entry?.count ?? 0,
-      last_user_message: entry?.lastUser ?? null,
-      title: extra.title ?? null,
-      system_prompt: extra.system_prompt ?? null,
-      context_text: extra.context_text ?? null
-    };
-  });
 }
 async function renameThread(threadId, widgetId, title) {
   const normalized = title && title.trim().length > 0 ? title.trim().slice(0, 200) : null;
-  const { error } = await supabaseUntyped.from("chat_thread").update({ title: normalized }).eq("id", threadId).eq("widget_id", widgetId).eq("is_deleted", false);
-  if (error) {
-    console.error("[chat-store] renameThread failed:", error.message);
+  try {
+    const { error } = await supabaseUntyped.from("chat_thread").update({ title: normalized }).eq("id", threadId).eq("widget_id", widgetId).eq("is_deleted", false);
+    if (error) {
+      console.error("[chat-store] renameThread failed:", error.message);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.warn("[chat-store] renameThread skipped:", err?.message || err);
     return false;
   }
-  return true;
 }
 async function updateThreadPrompt(threadId, widgetId, patch) {
   const update = {};
@@ -713909,12 +713962,20 @@ async function updateThreadPrompt(threadId, widgetId, patch) {
     update.context_text = v.length > 0 ? v.slice(0, 2e4) : null;
   }
   if (Object.keys(update).length === 0) return true;
-  const { error } = await supabaseUntyped.from("chat_thread").update(update).eq("id", threadId).eq("widget_id", widgetId).eq("is_deleted", false);
-  if (error) {
-    console.error("[chat-store] updateThreadPrompt failed:", error.message);
+  try {
+    const { error } = await supabaseUntyped.from("chat_thread").update(update).eq("id", threadId).eq("widget_id", widgetId).eq("is_deleted", false);
+    if (error) {
+      console.error("[chat-store] updateThreadPrompt failed:", error.message);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.warn(
+      "[chat-store] updateThreadPrompt skipped:",
+      err?.message || err
+    );
     return false;
   }
-  return true;
 }
 function toWidgetMessage(row) {
   return { role: row.role, content: row.content };
@@ -713940,6 +714001,7 @@ function normalizeRow(row) {
 }
 var MAX_CACHE_ENTRIES = 500;
 var CACHE_TTL_MS = 6e4;
+var MAX_WIDGET_ID_CHARS = 256;
 var BoundedLRUCache = class {
   constructor(max) {
     this.map = /* @__PURE__ */ new Map();
@@ -713993,31 +714055,44 @@ function invalidateWidgetCache(id) {
   }
 }
 async function getWidget(id) {
-  if (!id) return null;
+  if (!id || id.length > MAX_WIDGET_ID_CHARS) return null;
   const now = Date.now();
   const cached2 = widgetCache.get(id);
   if (cached2 && cached2.expiresAt > now) {
     return cached2.row;
   }
-  const { data, error } = await supabaseUntyped.from(TABLE).select("*").eq("id", id).eq("is_deleted", false).maybeSingle();
-  if (error) {
-    console.error("[widget-store] getWidget failed:", error.message);
+  try {
+    const { data, error } = await supabaseUntyped.from(TABLE).select("*").eq("id", id).eq("is_deleted", false).maybeSingle();
+    if (error) {
+      console.error("[widget-store] getWidget failed:", error.message);
+      return null;
+    }
+    const result = data ? normalizeRow(data) : null;
+    widgetCache.set(id, { row: result, expiresAt: now + CACHE_TTL_MS });
+    return result;
+  } catch (err) {
+    console.warn("[widget-store] getWidget skipped:", err?.message || err);
     return null;
   }
-  const result = data ? normalizeRow(data) : null;
-  widgetCache.set(id, { row: result, expiresAt: now + CACHE_TTL_MS });
-  return result;
 }
 async function listWidgetsRegistered() {
-  const { data, error } = await supabaseUntyped.from(TABLE).select("*").eq("is_deleted", false).order("updated_at", { ascending: false }).limit(500);
-  if (error) {
-    console.error(
-      "[widget-store] listWidgetsRegistered failed:",
-      error.message
+  try {
+    const { data, error } = await supabaseUntyped.from(TABLE).select("*").eq("is_deleted", false).order("updated_at", { ascending: false }).limit(500);
+    if (error) {
+      console.error(
+        "[widget-store] listWidgetsRegistered failed:",
+        error.message
+      );
+      return [];
+    }
+    return (data ?? []).map(normalizeRow);
+  } catch (err) {
+    console.warn(
+      "[widget-store] listWidgetsRegistered skipped:",
+      err?.message || err
     );
     return [];
   }
-  return (data ?? []).map(normalizeRow);
 }
 async function upsertWidget(input) {
   if (!input.id) return { row: null, error: "id required" };
@@ -714039,23 +714114,34 @@ async function upsertWidget(input) {
     const v = input.chat_bubble_size?.trim();
     patch.chat_bubble_size = v ? v : null;
   }
-  const { data, error } = await supabaseUntyped.from(TABLE).upsert(patch, { onConflict: "id" }).select("*").single();
-  if (error) {
-    console.error("[widget-store] upsertWidget failed:", error.message);
-    return { row: null, error: error.message };
+  try {
+    const { data, error } = await supabaseUntyped.from(TABLE).upsert(patch, { onConflict: "id" }).select("*").single();
+    if (error) {
+      console.error("[widget-store] upsertWidget failed:", error.message);
+      return { row: null, error: error.message };
+    }
+    invalidateWidgetCache(input.id);
+    return { row: normalizeRow(data) };
+  } catch (err) {
+    const msg = err?.message || String(err);
+    console.warn("[widget-store] upsertWidget skipped:", msg);
+    return { row: null, error: msg };
   }
-  invalidateWidgetCache(input.id);
-  return { row: normalizeRow(data) };
 }
 async function deleteWidget(id) {
   if (!id) return false;
-  const { error } = await supabaseUntyped.from(TABLE).update({ is_deleted: true }).eq("id", id);
-  if (error) {
-    console.error("[widget-store] deleteWidget failed:", error.message);
+  try {
+    const { error } = await supabaseUntyped.from(TABLE).update({ is_deleted: true }).eq("id", id);
+    if (error) {
+      console.error("[widget-store] deleteWidget failed:", error.message);
+      return false;
+    }
+    invalidateWidgetCache(id);
+    return true;
+  } catch (err) {
+    console.warn("[widget-store] deleteWidget skipped:", err?.message || err);
     return false;
   }
-  invalidateWidgetCache(id);
-  return true;
 }
 
 // src/endpoints/v2/widget-endpoints.ts
@@ -714181,6 +714267,13 @@ var v2WidgetEndpoints = async (app) => {
           };
         }
         const MAX_AUX_CHARS = 2e3;
+        if (threadId.length > MAX_AUX_CHARS) {
+          set.status = 413;
+          return {
+            success: false,
+            error: `threadId too large (${threadId.length} > ${MAX_AUX_CHARS} chars)`
+          };
+        }
         if (body?.browserInfo) {
           let raw = "";
           try {
@@ -714226,9 +714319,10 @@ var v2WidgetEndpoints = async (app) => {
             error: "unregistered widget_id \u2014 register it via /v2/admin/widgets/upsert first"
           };
         }
+        let existingThread = null;
         if (threadId) {
-          const existing = await getThread(threadId, widgetId);
-          if (!existing) threadId = "";
+          existingThread = await getThread(threadId, widgetId);
+          if (!existingThread) threadId = "";
         }
         if (!threadId) {
           threadId = await createThread(widgetId) ?? "";
@@ -714254,15 +714348,9 @@ var v2WidgetEndpoints = async (app) => {
         }
         let provider;
         try {
-          if (process.env.OPENROUTER_API_KEYS) {
-            const { RotatingLLMProvider: RotatingLLMProvider2 } = await Promise.resolve().then(() => (init_rotating_provider(), rotating_provider_exports));
-            const { getKeyStore: getKeyStore2, parseKeyConfigsFromEnv: parseKeyConfigsFromEnv2 } = await Promise.resolve().then(() => (init_factory(), factory_exports));
-            const configs = parseKeyConfigsFromEnv2();
-            const store = getKeyStore2();
-            const configMap = new Map(configs.map((c) => [c.id, c]));
-            provider = new RotatingLLMProvider2(store, configMap, {
-              defaultModel: process.env.LLM_MODEL?.trim() || "openai/gpt-4o-mini"
-            });
+          if (process.env.OPENROUTER_API_KEYS?.trim()) {
+            const { createRotatingOrConfiguredProvider: createRotatingOrConfiguredProvider2 } = await Promise.resolve().then(() => (init_factory(), factory_exports));
+            provider = createRotatingOrConfiguredProvider2();
           } else {
             provider = createLLMProvider();
           }
@@ -714274,7 +714362,7 @@ var v2WidgetEndpoints = async (app) => {
             error: `[LLM configuration error] ${msg}`
           };
         }
-        const threadRow = threadId ? await getThread(threadId, widgetId) : null;
+        const threadRow = existingThread;
         const systemContent = threadRow?.system_prompt?.trim() || widgetMaster?.system_prompt?.trim() || process.env.LLM_SYSTEM_PROMPT || [
           "You are a helpful assistant embedded in a website.",
           "Reply in the user's language.",
@@ -714579,54 +714667,63 @@ var v2WidgetEndpoints = async (app) => {
       }) => {
         const deny = requireAdmin(headers, set);
         if (deny) return deny;
-        const { data: appliedRows, error: histErr } = await supabaseClient.from("_migration_history").select("name");
-        if (histErr) {
+        try {
+          const { data: appliedRows, error: histErr } = await supabaseClient.from("_migration_history").select("name");
+          if (histErr) {
+            set.status = 500;
+            return {
+              success: false,
+              error: `read history failed: ${histErr.message}`
+            };
+          }
+          const appliedSet = new Set(
+            (appliedRows ?? []).map((r) => r.name)
+          );
+          const pending = MIGRATIONS.filter((m) => !appliedSet.has(m.name));
+          if (body?.dryRun) {
+            return {
+              success: true,
+              dryRun: true,
+              applied: appliedRows ?? [],
+              pending: pending.map((m) => m.name)
+            };
+          }
+          const results = [];
+          for (const m of pending) {
+            const { error: execErr } = await supabaseClient.rpc(
+              "admin_exec_sql",
+              { sql: m.content }
+            );
+            if (execErr) {
+              results.push({ name: m.name, ok: false, error: execErr.message });
+              break;
+            }
+            const { error: trackErr } = await supabaseClient.from("_migration_history").insert({ name: m.name });
+            if (trackErr) {
+              results.push({
+                name: m.name,
+                ok: false,
+                error: `applied but history insert failed: ${trackErr.message}`
+              });
+              break;
+            }
+            results.push({ name: m.name, ok: true });
+          }
+          const allOk = results.every((r) => r.ok);
+          const pendingNotRun = pending.slice(results.length).map((m) => m.name);
+          return {
+            success: allOk,
+            ran: results,
+            remaining: pendingNotRun,
+            totalPending: pending.length
+          };
+        } catch (err) {
+          set.status = 500;
           return {
             success: false,
-            error: `read history failed: ${histErr.message}`
+            error: err instanceof Error ? err.message : String(err)
           };
         }
-        const appliedSet = new Set(
-          (appliedRows ?? []).map((r) => r.name)
-        );
-        const pending = MIGRATIONS.filter((m) => !appliedSet.has(m.name));
-        if (body?.dryRun) {
-          return {
-            success: true,
-            dryRun: true,
-            applied: appliedRows ?? [],
-            pending: pending.map((m) => m.name)
-          };
-        }
-        const results = [];
-        for (const m of pending) {
-          const { error: execErr } = await supabaseClient.rpc(
-            "admin_exec_sql",
-            { sql: m.content }
-          );
-          if (execErr) {
-            results.push({ name: m.name, ok: false, error: execErr.message });
-            break;
-          }
-          const { error: trackErr } = await supabaseClient.from("_migration_history").insert({ name: m.name });
-          if (trackErr) {
-            results.push({
-              name: m.name,
-              ok: false,
-              error: `applied but history insert failed: ${trackErr.message}`
-            });
-            break;
-          }
-          results.push({ name: m.name, ok: true });
-        }
-        const allOk = results.every((r) => r.ok);
-        const pendingNotRun = pending.slice(results.length).map((m) => m.name);
-        return {
-          success: allOk,
-          ran: results,
-          remaining: pendingNotRun,
-          totalPending: pending.length
-        };
       },
       {
         body: t.Optional(t.Object({ dryRun: t.Optional(t.Boolean()) })),
@@ -714647,8 +714744,14 @@ var v2WidgetEndpoints = async (app) => {
         if (deny) return deny;
         const widgetId = (body?.widgetId ?? "").trim();
         const file2 = body?.file;
-        if (!widgetId) return { success: false, error: "widgetId required" };
-        if (!file2) return { success: false, error: "file required" };
+        if (!widgetId) {
+          set.status = 400;
+          return { success: false, error: "widgetId required" };
+        }
+        if (!file2) {
+          set.status = 400;
+          return { success: false, error: "file required" };
+        }
         const ALLOWED_MIME = {
           "image/png": "png",
           "image/jpeg": "jpg",
@@ -714658,6 +714761,7 @@ var v2WidgetEndpoints = async (app) => {
         const mime2 = (file2.type ?? "").toLowerCase().trim();
         const ext = ALLOWED_MIME[mime2];
         if (!ext) {
+          set.status = 400;
           return {
             success: false,
             error: "Only PNG, JPEG, WEBP, and GIF images are permitted"
@@ -714665,22 +714769,41 @@ var v2WidgetEndpoints = async (app) => {
         }
         const MAX = 2 * 1024 * 1024;
         if (file2.size > MAX) {
+          set.status = 413;
           return { success: false, error: `file too large (>${MAX} bytes)` };
+        }
+        const buf = await file2.arrayBuffer();
+        const bytes = new Uint8Array(buf);
+        const detectedMime = detectImageMime(bytes);
+        if (!detectedMime || detectedMime !== mime2) {
+          set.status = 400;
+          return {
+            success: false,
+            error: "Invalid or spoofed image binary signature"
+          };
         }
         const safeWid = widgetId.replace(/[^a-zA-Z0-9_-]/g, "_");
         const rand = Math.random().toString(36).slice(2, 8);
         const path2 = `${safeWid}/${Date.now()}-${rand}.${ext}`;
-        const buf = await file2.arrayBuffer();
-        const { error } = await supabaseClient.storage.from("widget-icons").upload(path2, new Uint8Array(buf), {
-          contentType: file2.type,
-          upsert: false
-        });
-        if (error) {
-          console.error("[upload-icon] failed:", error.message);
-          return { success: false, error: error.message };
+        try {
+          const { error } = await supabaseClient.storage.from("widget-icons").upload(path2, bytes, {
+            contentType: detectedMime,
+            upsert: false
+          });
+          if (error) {
+            console.error("[upload-icon] failed:", error.message);
+            set.status = 502;
+            return { success: false, error: error.message };
+          }
+          const { data } = supabaseClient.storage.from("widget-icons").getPublicUrl(path2);
+          return { success: true, icon_url: data.publicUrl, path: path2 };
+        } catch (err) {
+          set.status = 500;
+          return {
+            success: false,
+            error: err instanceof Error ? err.message : String(err)
+          };
         }
-        const { data } = supabaseClient.storage.from("widget-icons").getPublicUrl(path2);
-        return { success: true, icon_url: data.publicUrl, path: path2 };
       },
       {
         body: t.Object({
@@ -714891,6 +715014,33 @@ function chunkText(text) {
 function sleep4(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
+function detectImageMime(bytes) {
+  if (bytes.length < 12) {
+    if (bytes.length >= 8 && bytes[0] === 137 && bytes[1] === 80 && bytes[2] === 78 && bytes[3] === 71 && bytes[4] === 13 && bytes[5] === 10 && bytes[6] === 26 && bytes[7] === 10) {
+      return "image/png";
+    }
+    if (bytes.length >= 3 && bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255) {
+      return "image/jpeg";
+    }
+    if (bytes.length >= 6 && bytes[0] === 71 && bytes[1] === 73 && bytes[2] === 70 && bytes[3] === 56 && (bytes[4] === 55 || bytes[4] === 57) && bytes[5] === 97) {
+      return "image/gif";
+    }
+    return null;
+  }
+  if (bytes[0] === 137 && bytes[1] === 80 && bytes[2] === 78 && bytes[3] === 71 && bytes[4] === 13 && bytes[5] === 10 && bytes[6] === 26 && bytes[7] === 10) {
+    return "image/png";
+  }
+  if (bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255) {
+    return "image/jpeg";
+  }
+  if (bytes[0] === 71 && bytes[1] === 73 && bytes[2] === 70 && bytes[3] === 56 && (bytes[4] === 55 || bytes[4] === 57) && bytes[5] === 97) {
+    return "image/gif";
+  }
+  if (bytes[0] === 82 && bytes[1] === 73 && bytes[2] === 70 && bytes[3] === 70 && bytes[8] === 87 && bytes[9] === 69 && bytes[10] === 66 && bytes[11] === 80) {
+    return "image/webp";
+  }
+  return null;
+}
 
 // lib/mail/naver.ts
 var import_nodemailer = __toESM(require_nodemailer());
@@ -715062,6 +715212,10 @@ var v2MailEndpoints = async (app) => {
         if (subject.length > 1e3) {
           set.status = 400;
           return { success: false, error: "subject exceeds maximum length of 1000 characters" };
+        }
+        if (/[\r\n]/.test(subject) || body?.from && /[\r\n]/.test(body.from)) {
+          set.status = 400;
+          return { success: false, error: "invalid header characters (CRLF prohibited)" };
         }
         if (!body?.text?.trim() && !body?.html?.trim()) {
           set.status = 400;
@@ -715958,16 +716112,22 @@ var createApp = async (serverless = false) => {
       error: isProd ? "Internal Server Error" : error?.message ?? "Internal Server Error"
     };
   }).onParse(async ({ request, contentType }) => {
-    if (contentType === "application/json") {
+    if (contentType === "application/json" || typeof contentType === "string" && contentType.toLowerCase().startsWith("application/json;")) {
       const text = await request.text();
-      if (text.length > MAX_REQUEST_BODY_SIZE) {
+      if (Buffer.byteLength(text, "utf8") > MAX_REQUEST_BODY_SIZE) {
         throw new Error("PAYLOAD_TOO_LARGE");
       }
       return JSON.parse(text);
     }
   }).use(
     cors({
-      origin: true
+      origin: true,
+      exposeHeaders: [
+        "retry-after",
+        "x-ratelimit-limit",
+        "x-ratelimit-remaining",
+        "x-ratelimit-reset"
+      ]
     })
   ).use(
     swagger({

@@ -62,6 +62,7 @@ const PRESETS: Record<
 
 // Module-level singletons for warm serverless container reuse
 let cachedRotatingProvider: RotatingLLMProvider | null = null;
+let cachedRotatingSignature: string | null = null;
 let cachedKeyStore: IKeyStore | null = null;
 
 export function getKeyStore(): IKeyStore {
@@ -83,6 +84,7 @@ export function getKeyStore(): IKeyStore {
 
 export function resetCachedProviderForTesting(): void {
   cachedRotatingProvider = null;
+  cachedRotatingSignature = null;
   cachedKeyStore = null;
 }
 
@@ -178,43 +180,64 @@ export function parseKeyConfigsFromEnv(): KeyConfig[] {
  *   LLM_BASE_URL          override base URL (mandatory when provider=custom)
  */
 export function createLLMProvider(): LLMProvider | null {
+  return createRotatingOrConfiguredProvider();
+}
+
+export function createRotatingOrConfiguredProvider(): LLMProvider | null {
   const providerName = (process.env.LLM_PROVIDER ?? "openrouter")
     .trim()
     .toLowerCase();
 
-  // If provider is OpenRouter (default):
-  if (providerName === "openrouter") {
+  // Explicit OPENROUTER_API_KEYS always activates the multi-key RotatingLLMProvider
+  // (also matches OpenRouter default when multiple keys are configured via CSV).
+  const hasExplicitOpenRouterPool = Boolean(process.env.OPENROUTER_API_KEYS?.trim());
+
+  if (providerName === "openrouter" || hasExplicitOpenRouterPool) {
     const configs = parseKeyConfigsFromEnv();
 
     // Trigger rotation if multiple keys configured OR OPENROUTER_API_KEYS explicitly provided
-    if (configs.length > 1 || (configs.length === 1 && process.env.OPENROUTER_API_KEYS)) {
-      if (!cachedRotatingProvider) {
+    if (configs.length > 1 || (configs.length === 1 && hasExplicitOpenRouterPool)) {
+      const defaultModel = process.env.LLM_MODEL?.trim() || "openai/gpt-4o-mini";
+      const referer = process.env.LLM_REFERER ?? "https://tokki.app";
+      const title = process.env.LLM_TITLE ?? "Tokki AI";
+      const sig = JSON.stringify([
+        process.env.OPENROUTER_API_KEYS ?? "",
+        process.env.LLM_API_KEYS ?? "",
+        hasExplicitOpenRouterPool ? "" : (process.env.LLM_API_KEY ?? ""),
+        defaultModel,
+        referer,
+        title,
+      ]);
+
+      if (!cachedRotatingProvider || cachedRotatingSignature !== sig) {
         const store = getKeyStore();
         const configMap = new Map<string, KeyConfig>(configs.map((c) => [c.id, c]));
         cachedRotatingProvider = new RotatingLLMProvider(store, configMap, {
-          defaultModel: process.env.LLM_MODEL?.trim() || "openai/gpt-4o-mini",
+          defaultModel,
           extraHeaders: {
-            "HTTP-Referer":
-              process.env.LLM_REFERER ?? "https://tokki.app",
-            "X-Title": process.env.LLM_TITLE ?? "Tokki AI",
+            "HTTP-Referer": referer,
+            "X-Title": title,
           },
         });
+        cachedRotatingSignature = sig;
       }
       return cachedRotatingProvider;
     }
 
-    // Single key backward compatibility
-    const singleKey = process.env.LLM_API_KEY?.trim();
-    if (!singleKey) return null;
+    if (providerName === "openrouter") {
+      // Single key backward compatibility
+      const singleKey = process.env.LLM_API_KEY?.trim();
+      if (!singleKey) return null;
 
-    const preset = PRESETS.openrouter;
-    return new OpenAICompatibleProvider({
-      name: "openrouter",
-      baseUrl: process.env.LLM_BASE_URL?.trim() || preset.baseUrl,
-      apiKey: singleKey,
-      defaultModel: process.env.LLM_MODEL?.trim() || preset.defaultModel,
-      extraHeaders: preset.extraHeaders?.(),
-    });
+      const preset = PRESETS.openrouter;
+      return new OpenAICompatibleProvider({
+        name: "openrouter",
+        baseUrl: process.env.LLM_BASE_URL?.trim() || preset.baseUrl,
+        apiKey: singleKey,
+        defaultModel: process.env.LLM_MODEL?.trim() || preset.defaultModel,
+        extraHeaders: preset.extraHeaders?.(),
+      });
+    }
   }
 
   // Handle custom provider

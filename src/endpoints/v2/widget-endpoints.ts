@@ -1,6 +1,7 @@
 import { t } from "elysia";
 import { supabaseClient } from "../../../lib/supabase/client";
 import { createLLMProvider, type ChatMessage } from "../../../lib/llm";
+import { createRotatingOrConfiguredProvider } from "../../../lib/llm/factory";
 import { MIGRATIONS } from "../../generated-migrations";
 import {
   appendMessage,
@@ -206,8 +207,15 @@ export const v2WidgetEndpoints = async (app: any) => {
           };
         }
 
-        // ── Guard 1b: 보조 필드(browserInfo, search) 페이로드 스머글링 방어 ──
+        // ── Guard 1b: 보조 필드(threadId, browserInfo, search) 페이로드 스머글링 방어 ──
         const MAX_AUX_CHARS = 2000;
+        if (threadId.length > MAX_AUX_CHARS) {
+          set.status = 413;
+          return {
+            success: false,
+            error: `threadId too large (${threadId.length} > ${MAX_AUX_CHARS} chars)`,
+          };
+        }
         if (body?.browserInfo) {
           let raw = "";
           try {
@@ -268,9 +276,10 @@ export const v2WidgetEndpoints = async (app: any) => {
         }
 
         // Make sure we have a thread on file before persisting anything.
+        let existingThread = null;
         if (threadId) {
-          const existing = await getThread(threadId, widgetId);
-          if (!existing) threadId = "";
+          existingThread = await getThread(threadId, widgetId);
+          if (!existingThread) threadId = "";
         }
         if (!threadId) {
           threadId = (await createThread(widgetId)) ?? "";
@@ -306,22 +315,11 @@ export const v2WidgetEndpoints = async (app: any) => {
           }
         }
 
-        // Instantiate provider
+        // Instantiate provider (reuses warm cached RotatingLLMProvider singleton)
         let provider;
         try {
-          if (process.env.OPENROUTER_API_KEYS) {
-            const { RotatingLLMProvider } = await import(
-              "../../../lib/llm/rotating-provider"
-            );
-            const { getKeyStore, parseKeyConfigsFromEnv } = await import(
-              "../../../lib/llm/factory"
-            );
-            const configs = parseKeyConfigsFromEnv();
-            const store = getKeyStore();
-            const configMap = new Map(configs.map((c) => [c.id, c]));
-            provider = new RotatingLLMProvider(store, configMap, {
-              defaultModel: process.env.LLM_MODEL?.trim() || "openai/gpt-4o-mini",
-            });
+          if (process.env.OPENROUTER_API_KEYS?.trim()) {
+            provider = createRotatingOrConfiguredProvider();
           } else {
             provider = createLLMProvider();
           }
@@ -334,10 +332,8 @@ export const v2WidgetEndpoints = async (app: any) => {
           };
         }
 
-        // Prepare context & messages
-        const threadRow = threadId
-          ? await getThread(threadId, widgetId)
-          : null;
+        // Prepare context & messages (reuse existingThread to avoid duplicate DB RTT)
+        const threadRow = existingThread;
         const systemContent =
           threadRow?.system_prompt?.trim() ||
           widgetMaster?.system_prompt?.trim() ||
@@ -763,62 +759,71 @@ export const v2WidgetEndpoints = async (app: any) => {
         const deny = requireAdmin(headers, set);
         if (deny) return deny;
 
-        // Read history
-        const { data: appliedRows, error: histErr } = await (supabaseClient as any)
-          .from("_migration_history")
-          .select("name");
-        if (histErr) {
+        try {
+          // Read history
+          const { data: appliedRows, error: histErr } = await (supabaseClient as any)
+            .from("_migration_history")
+            .select("name");
+          if (histErr) {
+            set.status = 500;
+            return {
+              success: false,
+              error: `read history failed: ${histErr.message}`,
+            };
+          }
+          const appliedSet = new Set(
+            ((appliedRows as { name: string }[]) ?? []).map((r) => r.name),
+          );
+          const pending = MIGRATIONS.filter((m) => !appliedSet.has(m.name));
+
+          if (body?.dryRun) {
+            return {
+              success: true,
+              dryRun: true,
+              applied: appliedRows ?? [],
+              pending: pending.map((m) => m.name),
+            };
+          }
+
+          const results: { name: string; ok: boolean; error?: string }[] = [];
+          for (const m of pending) {
+            const { error: execErr } = await supabaseClient.rpc(
+              "admin_exec_sql" as never,
+              { sql: m.content } as never,
+            );
+            if (execErr) {
+              results.push({ name: m.name, ok: false, error: execErr.message });
+              break;
+            }
+            const { error: trackErr } = await (supabaseClient as any)
+              .from("_migration_history")
+              .insert({ name: m.name });
+            if (trackErr) {
+              results.push({
+                name: m.name,
+                ok: false,
+                error: `applied but history insert failed: ${trackErr.message}`,
+              });
+              break;
+            }
+            results.push({ name: m.name, ok: true });
+          }
+
+          const allOk = results.every((r) => r.ok);
+          const pendingNotRun = pending.slice(results.length).map((m) => m.name);
+          return {
+            success: allOk,
+            ran: results,
+            remaining: pendingNotRun,
+            totalPending: pending.length,
+          };
+        } catch (err: any) {
+          set.status = 500;
           return {
             success: false,
-            error: `read history failed: ${histErr.message}`,
+            error: err instanceof Error ? err.message : String(err),
           };
         }
-        const appliedSet = new Set(
-          ((appliedRows as { name: string }[]) ?? []).map((r) => r.name),
-        );
-        const pending = MIGRATIONS.filter((m) => !appliedSet.has(m.name));
-
-        if (body?.dryRun) {
-          return {
-            success: true,
-            dryRun: true,
-            applied: appliedRows ?? [],
-            pending: pending.map((m) => m.name),
-          };
-        }
-
-        const results: { name: string; ok: boolean; error?: string }[] = [];
-        for (const m of pending) {
-          const { error: execErr } = await supabaseClient.rpc(
-            "admin_exec_sql" as never,
-            { sql: m.content } as never,
-          );
-          if (execErr) {
-            results.push({ name: m.name, ok: false, error: execErr.message });
-            break;
-          }
-          const { error: trackErr } = await (supabaseClient as any)
-            .from("_migration_history")
-            .insert({ name: m.name });
-          if (trackErr) {
-            results.push({
-              name: m.name,
-              ok: false,
-              error: `applied but history insert failed: ${trackErr.message}`,
-            });
-            break;
-          }
-          results.push({ name: m.name, ok: true });
-        }
-
-        const allOk = results.every((r) => r.ok);
-        const pendingNotRun = pending.slice(results.length).map((m) => m.name);
-        return {
-          success: allOk,
-          ran: results,
-          remaining: pendingNotRun,
-          totalPending: pending.length,
-        };
       },
       {
         body: t.Optional(t.Object({ dryRun: t.Optional(t.Boolean()) })),
@@ -856,8 +861,14 @@ export const v2WidgetEndpoints = async (app: any) => {
         if (deny) return deny;
         const widgetId = (body?.widgetId ?? "").trim();
         const file = body?.file;
-        if (!widgetId) return { success: false, error: "widgetId required" };
-        if (!file) return { success: false, error: "file required" };
+        if (!widgetId) {
+          set.status = 400;
+          return { success: false, error: "widgetId required" };
+        }
+        if (!file) {
+          set.status = 400;
+          return { success: false, error: "file required" };
+        }
         const ALLOWED_MIME: Record<string, string> = {
           "image/png": "png",
           "image/jpeg": "jpg",
@@ -867,6 +878,7 @@ export const v2WidgetEndpoints = async (app: any) => {
         const mime = (file.type ?? "").toLowerCase().trim();
         const ext = ALLOWED_MIME[mime];
         if (!ext) {
+          set.status = 400;
           return {
             success: false,
             error: "Only PNG, JPEG, WEBP, and GIF images are permitted",
@@ -876,28 +888,48 @@ export const v2WidgetEndpoints = async (app: any) => {
         // CDN-resized variant anyway.
         const MAX = 2 * 1024 * 1024;
         if (file.size > MAX) {
+          set.status = 413;
           return { success: false, error: `file too large (>${MAX} bytes)` };
+        }
+
+        const buf = await file.arrayBuffer();
+        const bytes = new Uint8Array(buf);
+        const detectedMime = detectImageMime(bytes);
+        if (!detectedMime || detectedMime !== mime) {
+          set.status = 400;
+          return {
+            success: false,
+            error: "Invalid or spoofed image binary signature",
+          };
         }
 
         const safeWid = widgetId.replace(/[^a-zA-Z0-9_-]/g, "_");
         const rand = Math.random().toString(36).slice(2, 8);
         const path = `${safeWid}/${Date.now()}-${rand}.${ext}`;
 
-        const buf = await file.arrayBuffer();
-        const { error } = await supabaseClient.storage
-          .from("widget-icons")
-          .upload(path, new Uint8Array(buf), {
-            contentType: file.type,
-            upsert: false,
-          });
-        if (error) {
-          console.error("[upload-icon] failed:", error.message);
-          return { success: false, error: error.message };
+        try {
+          const { error } = await supabaseClient.storage
+            .from("widget-icons")
+            .upload(path, bytes, {
+              contentType: detectedMime,
+              upsert: false,
+            });
+          if (error) {
+            console.error("[upload-icon] failed:", error.message);
+            set.status = 502;
+            return { success: false, error: error.message };
+          }
+          const { data } = supabaseClient.storage
+            .from("widget-icons")
+            .getPublicUrl(path);
+          return { success: true, icon_url: data.publicUrl, path };
+        } catch (err: any) {
+          set.status = 500;
+          return {
+            success: false,
+            error: err instanceof Error ? err.message : String(err),
+          };
         }
-        const { data } = supabaseClient.storage
-          .from("widget-icons")
-          .getPublicUrl(path);
-        return { success: true, icon_url: data.publicUrl, path };
       },
       {
         body: t.Object({
@@ -1171,4 +1203,90 @@ function chunkText(text: string): string[] {
 
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+function detectImageMime(bytes: Uint8Array): string | null {
+  if (bytes.length < 12) {
+    // GIF can be >= 6 bytes, JPEG >= 3 bytes, PNG >= 8 bytes
+    if (
+      bytes.length >= 8 &&
+      bytes[0] === 0x89 &&
+      bytes[1] === 0x50 &&
+      bytes[2] === 0x4e &&
+      bytes[3] === 0x47 &&
+      bytes[4] === 0x0d &&
+      bytes[5] === 0x0a &&
+      bytes[6] === 0x1a &&
+      bytes[7] === 0x0a
+    ) {
+      return "image/png";
+    }
+    if (
+      bytes.length >= 3 &&
+      bytes[0] === 0xff &&
+      bytes[1] === 0xd8 &&
+      bytes[2] === 0xff
+    ) {
+      return "image/jpeg";
+    }
+    if (
+      bytes.length >= 6 &&
+      bytes[0] === 0x47 &&
+      bytes[1] === 0x49 &&
+      bytes[2] === 0x46 &&
+      bytes[3] === 0x38 &&
+      (bytes[4] === 0x37 || bytes[4] === 0x39) &&
+      bytes[5] === 0x61
+    ) {
+      return "image/gif";
+    }
+    return null;
+  }
+
+  // PNG: 89 50 4E 47 0D 0A 1A 0A
+  if (
+    bytes[0] === 0x89 &&
+    bytes[1] === 0x50 &&
+    bytes[2] === 0x4e &&
+    bytes[3] === 0x47 &&
+    bytes[4] === 0x0d &&
+    bytes[5] === 0x0a &&
+    bytes[6] === 0x1a &&
+    bytes[7] === 0x0a
+  ) {
+    return "image/png";
+  }
+
+  // JPEG: FF D8 FF
+  if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+    return "image/jpeg";
+  }
+
+  // GIF87a / GIF89a: 47 49 46 38 (37|39) 61
+  if (
+    bytes[0] === 0x47 &&
+    bytes[1] === 0x49 &&
+    bytes[2] === 0x46 &&
+    bytes[3] === 0x38 &&
+    (bytes[4] === 0x37 || bytes[4] === 0x39) &&
+    bytes[5] === 0x61
+  ) {
+    return "image/gif";
+  }
+
+  // WEBP: "RIFF" .... "WEBP"
+  if (
+    bytes[0] === 0x52 &&
+    bytes[1] === 0x49 &&
+    bytes[2] === 0x46 &&
+    bytes[3] === 0x46 &&
+    bytes[8] === 0x57 &&
+    bytes[9] === 0x45 &&
+    bytes[10] === 0x42 &&
+    bytes[11] === 0x50
+  ) {
+    return "image/webp";
+  }
+
+  return null;
 }

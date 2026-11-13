@@ -82,6 +82,22 @@ export const v1AuthCreate = (app: any) => {
           const authState = JSON.parse(
             Buffer.from(state as string, "base64").toString(),
           );
+          if (
+            !authState ||
+            typeof authState !== "object" ||
+            typeof authState.clientId !== "string" ||
+            !authState.clientId.trim() ||
+            typeof authState.clientSecret !== "string" ||
+            !authState.clientSecret.trim() ||
+            typeof authState.redirectUri !== "string" ||
+            !authState.redirectUri.trim()
+          ) {
+            set.status = 400;
+            return {
+              success: false,
+              message: "유효하지 않은 인증 상태(state) 정보입니다.",
+            };
+          }
           const oauth2Client = new google.auth.OAuth2(
             authState.clientId,
             authState.clientSecret,

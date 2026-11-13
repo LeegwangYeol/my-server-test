@@ -16,8 +16,8 @@
   2. **임베드형 채팅 위젯 백엔드** (`/v2/*`) — LLM 스트리밍 + 대화 이력 영속화
 
 ### 프로덕션 URL
-- ✅ **정상 동작: `https://my-server-test.vercel.app/`**
-- ⚠️ `https://my-server-pearl-eta.vercel.app/` 는 **옛 깨진 deploy에 핀된 alias** — 무시하거나 대시보드에서 정리할 것. 테스트는 항상 `my-server-test` 도메인으로.
+- ✅ **정상 동작: `https://my-server-mocha.vercel.app/`**
+- ⚠️ `https://my-server-test.vercel.app/` 는 현재 **HTTP 402 (`DEPLOYMENT_DISABLED`)** 상태이며, `https://my-server-pearl-eta.vercel.app/` 는 옛 깨진 deploy에 핀된 alias다. 테스트·헬스체크는 항상 `my-server-mocha.vercel.app` 도메인으로 수행할 것.
 - 루트 `/` 는 Swagger(Scalar) API 문서 UI.
 
 ---
@@ -108,9 +108,8 @@ vercel.json             ← 배포 설정 (2번 절 참고)
 ```bash
 # 1. 소스 수정 (src/ 또는 lib/ 또는 lambda-src/)
 
-# 2. 재번들 — esbuild로 api/index.js 재생성 (PATH 주의: nvm node 쓰면 esbuild 못 찾을 수 있음)
-npx esbuild lambda-src/handler.ts --bundle --platform=node --target=node20 \
-  --format=cjs --outfile=api/index.js --log-level=warning
+# 2. 재번들 — npm 스크립트(마이그레이션 인라인 + esbuild node24 CJS 번들)로 api/index.js 재생성
+npm run bundle:api
 
 # 3. (선택) 로컬 핸들러 검증
 SUPABASE_URL=http://test SUPABASE_SERVICE_KEY=test node -e "
@@ -120,14 +119,14 @@ SUPABASE_URL=http://test SUPABASE_SERVICE_KEY=test node -e "
   let b=''; const res={statusCode:0,headers:{},setHeader(){},write(c){b+=c},end(c){if(c)b+=c;console.log(this.statusCode,b.slice(0,80))}};
   h(req,res);"
 
-# 4. 소스 + 번들을 함께 커밋 (api/index.js 빠뜨리면 프로덕션 반영 안 됨!)
+# 4. 소스 + 번들을 함께 커밋 (api/index.js 빠뜨리면 프로덕션 반영 안 됨! 런타임/정기 점검 커밋은 [skip ci] 포함)
 git add <수정한 소스> api/index.js
 git commit -m "..."
-git push origin HEAD:main      # main에 push해야 Vercel production deploy 트리거됨
+git push origin HEAD:main      # main에 push해야 Vercel production deploy 트리거됨 (배포 쿼터 주의)
 
-# 5. 배포 검증 (3~5분 후). my-server-test 도메인으로:
-curl -s https://my-server-test.vercel.app/v1/healthz          # → OK
-curl -s https://my-server-test.vercel.app/v1/heartbeat        # → {"status":"alive",...}
+# 5. 배포 검증 (3~5분 후). my-server-mocha 도메인으로:
+curl -s https://my-server-mocha.vercel.app/v1/healthz          # → OK
+curl -s https://my-server-mocha.vercel.app/v1/heartbeat        # → {"status":"alive",...}
 ```
 
 > **번들을 안 올리면 코드는 GitHub엔 있어도 프로덕션은 옛날 그대로다.** 가장 흔한 실수.
@@ -214,7 +213,7 @@ curl -s https://my-server-test.vercel.app/v1/heartbeat        # → {"status":"a
 - [ ] `main`에 push했나? (production deploy 트리거)
 - [ ] 새 엔드포인트면 `app.ts`/그룹 인덱스에 등록했나?
 - [ ] module-load 시점에 throw하는 코드를 넣지 않았나? (lazy 패턴 유지)
-- [ ] 검증은 `my-server-test.vercel.app` 도메인으로 했나?
+- [ ] 검증은 `my-server-mocha.vercel.app` 도메인으로 했나?
 - [ ] `vercel.json`의 4개 키(framework/buildCommand/outputDirectory/rewrites)를 이유 없이 바꾸지 않았나?
 - [ ] `bun test` 통과했나? (`test/healthz.test.ts` — 부팅·라우팅·**admin fail-closed 가드** 회귀 방지. 외부 API/DB 안 씀)
 

@@ -43,16 +43,24 @@ export interface ChatThreadRow {
 /* ─── threads ──────────────────────────────────────────────────────── */
 
 export async function createThread(widgetId: string): Promise<string | null> {
-  const { data, error } = await supabaseUntyped
-    .from("chat_thread")
-    .insert({ widget_id: widgetId })
-    .select("id")
-    .single();
-  if (error) {
-    console.error("[chat-store] createThread failed:", error.message);
+  try {
+    const { data, error } = await supabaseUntyped
+      .from("chat_thread")
+      .insert({ widget_id: widgetId })
+      .select("id")
+      .single();
+    if (error) {
+      console.error("[chat-store] createThread failed:", error.message);
+      return null;
+    }
+    return (data as { id: string } | null)?.id ?? null;
+  } catch (err: any) {
+    console.warn(
+      "[chat-store] createThread database query failed or skipped:",
+      err?.message || err,
+    );
     return null;
   }
-  return (data as { id: string } | null)?.id ?? null;
 }
 
 /**
@@ -69,18 +77,26 @@ export async function getThread(
   const tid = (threadId ?? "").trim();
   if (!wid || !tid) return null;
 
-  const { data, error } = await supabaseUntyped
-    .from("chat_thread")
-    .select("*")
-    .eq("id", tid)
-    .eq("widget_id", wid)
-    .eq("is_deleted", false)
-    .maybeSingle();
-  if (error) {
-    console.error("[chat-store] getThread failed:", error.message);
+  try {
+    const { data, error } = await supabaseUntyped
+      .from("chat_thread")
+      .select("*")
+      .eq("id", tid)
+      .eq("widget_id", wid)
+      .eq("is_deleted", false)
+      .maybeSingle();
+    if (error) {
+      console.error("[chat-store] getThread failed:", error.message);
+      return null;
+    }
+    return (data as ChatThreadRow | null) ?? null;
+  } catch (err: any) {
+    console.warn(
+      "[chat-store] getThread database query skipped:",
+      err?.message || err,
+    );
     return null;
   }
-  return (data as ChatThreadRow | null) ?? null;
 }
 
 /**
@@ -97,16 +113,21 @@ export async function deleteThread(
   const tid = (threadId ?? "").trim();
   if (!wid || !tid) return false;
 
-  const { error } = await supabaseUntyped
-    .from("chat_thread")
-    .update({ is_deleted: true })
-    .eq("id", tid)
-    .eq("widget_id", wid);
-  if (error) {
-    console.error("[chat-store] deleteThread failed:", error.message);
+  try {
+    const { error } = await supabaseUntyped
+      .from("chat_thread")
+      .update({ is_deleted: true })
+      .eq("id", tid)
+      .eq("widget_id", wid);
+    if (error) {
+      console.error("[chat-store] deleteThread failed:", error.message);
+      return false;
+    }
+    return true;
+  } catch (err: any) {
+    console.warn("[chat-store] deleteThread skipped:", err?.message || err);
     return false;
   }
-  return true;
 }
 
 /**
@@ -115,15 +136,20 @@ export async function deleteThread(
  */
 export async function rollbackThread(threadId: string): Promise<boolean> {
   if (!threadId) return false;
-  const { error } = await supabaseUntyped
-    .from("chat_thread")
-    .update({ is_deleted: true })
-    .eq("id", threadId);
-  if (error) {
-    console.error("[chat-store] rollbackThread failed:", error.message);
+  try {
+    const { error } = await supabaseUntyped
+      .from("chat_thread")
+      .update({ is_deleted: true })
+      .eq("id", threadId);
+    if (error) {
+      console.error("[chat-store] rollbackThread failed:", error.message);
+      return false;
+    }
+    return true;
+  } catch (err: any) {
+    console.warn("[chat-store] rollbackThread skipped:", err?.message || err);
     return false;
   }
-  return true;
 }
 
 import {
@@ -328,37 +354,42 @@ export interface WidgetSummary {
  * of widgets.
  */
 export async function listWidgets(limit = 1000): Promise<WidgetSummary[]> {
-  const { data, error } = await supabaseUntyped
-    .from("chat_thread")
-    .select("widget_id, updated_at")
-    .eq("is_deleted", false)
-    .order("updated_at", { ascending: false })
-    .limit(limit);
-  if (error) {
-    console.error("[chat-store] listWidgets failed:", error.message);
+  try {
+    const { data, error } = await supabaseUntyped
+      .from("chat_thread")
+      .select("widget_id, updated_at")
+      .eq("is_deleted", false)
+      .order("updated_at", { ascending: false })
+      .limit(limit);
+    if (error) {
+      console.error("[chat-store] listWidgets failed:", error.message);
+      return [];
+    }
+    const rows = (data as { widget_id: string; updated_at: string }[]) ?? [];
+
+    const byWidget = new Map<string, WidgetSummary>();
+    for (const r of rows) {
+      const key = r.widget_id ?? "";
+      const entry =
+        byWidget.get(key) ??
+        ({
+          widget_id: key,
+          thread_count: 0,
+          latest_updated_at: r.updated_at,
+        } as WidgetSummary);
+      entry.thread_count += 1;
+      if (r.updated_at > entry.latest_updated_at) {
+        entry.latest_updated_at = r.updated_at;
+      }
+      byWidget.set(key, entry);
+    }
+    return Array.from(byWidget.values()).sort((a, b) =>
+      b.latest_updated_at.localeCompare(a.latest_updated_at),
+    );
+  } catch (err: any) {
+    console.warn("[chat-store] listWidgets skipped:", err?.message || err);
     return [];
   }
-  const rows = (data as { widget_id: string; updated_at: string }[]) ?? [];
-
-  const byWidget = new Map<string, WidgetSummary>();
-  for (const r of rows) {
-    const key = r.widget_id ?? "";
-    const entry =
-      byWidget.get(key) ??
-      ({
-        widget_id: key,
-        thread_count: 0,
-        latest_updated_at: r.updated_at,
-      } as WidgetSummary);
-    entry.thread_count += 1;
-    if (r.updated_at > entry.latest_updated_at) {
-      entry.latest_updated_at = r.updated_at;
-    }
-    byWidget.set(key, entry);
-  }
-  return Array.from(byWidget.values()).sort((a, b) =>
-    b.latest_updated_at.localeCompare(a.latest_updated_at),
-  );
 }
 
 export interface ThreadSummary {
@@ -388,61 +419,66 @@ export async function listThreads(
   // NOTE: select("*") so this keeps working both before and after the
   // `title` column migration lands. Once title is everywhere we can
   // tighten this back to an explicit column list.
-  const { data: threads, error } = await supabaseUntyped
-    .from("chat_thread")
-    .select("*")
-    .eq("widget_id", widgetId)
-    .eq("is_deleted", false)
-    .order("updated_at", { ascending: false })
-    .limit(limit);
-  if (error) {
-    console.error("[chat-store] listThreads failed:", error.message);
+  try {
+    const { data: threads, error } = await supabaseUntyped
+      .from("chat_thread")
+      .select("*")
+      .eq("widget_id", widgetId)
+      .eq("is_deleted", false)
+      .order("updated_at", { ascending: false })
+      .limit(limit);
+    if (error) {
+      console.error("[chat-store] listThreads failed:", error.message);
+      return [];
+    }
+    const rows = (threads as ChatThreadRow[]) ?? [];
+    if (rows.length === 0) return [];
+
+    // Fetch counts + last user message per thread in a single round trip.
+    const ids = rows.map((r) => r.id);
+    const { data: msgs } = await supabaseUntyped
+      .from("chat_message")
+      .select("thread_id, role, content, created_at")
+      .in("thread_id", ids)
+      .order("created_at", { ascending: false });
+
+    const byThread = new Map<
+      string,
+      { count: number; lastUser: string | null }
+    >();
+    for (const m of (msgs as ChatMessageRow[]) ?? []) {
+      const entry = byThread.get(m.thread_id) ?? { count: 0, lastUser: null };
+      entry.count += 1;
+      if (m.role === "user" && entry.lastUser === null) {
+        entry.lastUser = m.content;
+      }
+      byThread.set(m.thread_id, entry);
+    }
+
+    return rows.map((r) => {
+      const entry = byThread.get(r.id);
+      // post-migration columns — coerce undefined → null for pre-migration rows
+      const extra = r as unknown as {
+        title?: string | null;
+        system_prompt?: string | null;
+        context_text?: string | null;
+      };
+      return {
+        id: r.id,
+        widget_id: r.widget_id,
+        created_at: r.created_at,
+        updated_at: r.updated_at,
+        message_count: entry?.count ?? 0,
+        last_user_message: entry?.lastUser ?? null,
+        title: extra.title ?? null,
+        system_prompt: extra.system_prompt ?? null,
+        context_text: extra.context_text ?? null,
+      };
+    });
+  } catch (err: any) {
+    console.warn("[chat-store] listThreads skipped:", err?.message || err);
     return [];
   }
-  const rows = (threads as ChatThreadRow[]) ?? [];
-  if (rows.length === 0) return [];
-
-  // Fetch counts + last user message per thread in a single round trip.
-  const ids = rows.map((r) => r.id);
-  const { data: msgs } = await supabaseUntyped
-    .from("chat_message")
-    .select("thread_id, role, content, created_at")
-    .in("thread_id", ids)
-    .order("created_at", { ascending: false });
-
-  const byThread = new Map<
-    string,
-    { count: number; lastUser: string | null }
-  >();
-  for (const m of (msgs as ChatMessageRow[]) ?? []) {
-    const entry = byThread.get(m.thread_id) ?? { count: 0, lastUser: null };
-    entry.count += 1;
-    if (m.role === "user" && entry.lastUser === null) {
-      entry.lastUser = m.content;
-    }
-    byThread.set(m.thread_id, entry);
-  }
-
-  return rows.map((r) => {
-    const entry = byThread.get(r.id);
-    // post-migration columns — coerce undefined → null for pre-migration rows
-    const extra = r as unknown as {
-      title?: string | null;
-      system_prompt?: string | null;
-      context_text?: string | null;
-    };
-    return {
-      id: r.id,
-      widget_id: r.widget_id,
-      created_at: r.created_at,
-      updated_at: r.updated_at,
-      message_count: entry?.count ?? 0,
-      last_user_message: entry?.lastUser ?? null,
-      title: extra.title ?? null,
-      system_prompt: extra.system_prompt ?? null,
-      context_text: extra.context_text ?? null,
-    };
-  });
 }
 
 /**
@@ -457,17 +493,22 @@ export async function renameThread(
 ): Promise<boolean> {
   const normalized =
     title && title.trim().length > 0 ? title.trim().slice(0, 200) : null;
-  const { error } = await supabaseUntyped
-    .from("chat_thread")
-    .update({ title: normalized })
-    .eq("id", threadId)
-    .eq("widget_id", widgetId)
-    .eq("is_deleted", false);
-  if (error) {
-    console.error("[chat-store] renameThread failed:", error.message);
+  try {
+    const { error } = await supabaseUntyped
+      .from("chat_thread")
+      .update({ title: normalized })
+      .eq("id", threadId)
+      .eq("widget_id", widgetId)
+      .eq("is_deleted", false);
+    if (error) {
+      console.error("[chat-store] renameThread failed:", error.message);
+      return false;
+    }
+    return true;
+  } catch (err: any) {
+    console.warn("[chat-store] renameThread skipped:", err?.message || err);
     return false;
   }
-  return true;
 }
 
 /**
@@ -496,17 +537,25 @@ export async function updateThreadPrompt(
   }
   if (Object.keys(update).length === 0) return true;
 
-  const { error } = await supabaseUntyped
-    .from("chat_thread")
-    .update(update)
-    .eq("id", threadId)
-    .eq("widget_id", widgetId)
-    .eq("is_deleted", false);
-  if (error) {
-    console.error("[chat-store] updateThreadPrompt failed:", error.message);
+  try {
+    const { error } = await supabaseUntyped
+      .from("chat_thread")
+      .update(update)
+      .eq("id", threadId)
+      .eq("widget_id", widgetId)
+      .eq("is_deleted", false);
+    if (error) {
+      console.error("[chat-store] updateThreadPrompt failed:", error.message);
+      return false;
+    }
+    return true;
+  } catch (err: any) {
+    console.warn(
+      "[chat-store] updateThreadPrompt skipped:",
+      err?.message || err,
+    );
     return false;
   }
-  return true;
 }
 
 /* ─── widget-facing message shape ──────────────────────────────────── */
