@@ -2790,7 +2790,25 @@ This document serves as the shared communication channel between the AI Team (Ge
 
 ---
 
-## 79. Daily Diagnostics & Auto-Remediation Attestation (`[세션명: 내 서버 및 Vercel 일일 총검사]`, 2026-11-15)
+## 79. Daily Quota-Safe Controlled Load & Adversarial Perimeter Audit (2026-11-15)
+
+- **Session**: `[세션명: 토키 위젯 일일 부하 테스트]` (Single-Agent Focused Mode — Zero External Cloud Quota Burn).
+- **R1 Controlled Concurrency & 429/402 Failover Verification**:
+  - Executed Wave 1 (18 concurrent `/v2/ask` requests: 16 full SSE streams + 2 mid-stream client aborts) + Wave 2 (12 post-failover concurrent requests) across a 5-key / 4-account ZSET pool (`acc-bankrupt` 2 keys returning Mock 402, `acc-ratelim-1` & `acc-ratelim-2` returning Mock 429, `acc-healthy` returning 200 SSE).
+  - Wave 1 completed in **69.62ms** (`p50: 59.50ms`, `p95/max: 69.45ms` vs 60,000ms Vercel limit) with **100% failover**; Wave 2 completed in **38.76ms** (`p50: 38.41ms`) with **0 upstream calls** to all 4 broken/cooling-down keys, post-wave $\text{ZCARD} \equiv 0$, and `-13,818.90 KB` steady-state heap delta after GC.
+- **R2 Adversarial Perimeter Hardening (7 Patches Applied Across Backend & Frontend)**:
+  1. `src/app.ts`: Normalized `Content-Type` (`extractMediaType`) + streaming reader byte-ceiling (`readBoundedBodyText` <= 1MB) to block uppercase `APPLICATION/JSON`, RFC 9110 OWS `application/json ; charset=utf-8`, and `*+json` >1MB chunked bodies with HTTP 413; restricted 2MB upload allowance strictly to `multipart/form-data` on `/v2/admin/widgets/upload-icon`.
+  2. `src/endpoints/v2/widget-endpoints.ts`: Guarded `/v2/widget/view` so unregistered/empty `widgetId`s do NOT insert orphan `chat_thread` rows (`thread_id: ""`), fast-rejected `widgetId` > 100 chars on `/v2/widget/create-thread` & `/v2/ask` with HTTP 403, and hardened `/v2/ask` Guard 1b against non-string `threadId` object smuggling (`> 2,000` chars -> HTTP 413) and `threadId: null` (`-> 403` for unregistered).
+  3. `lib/llm/rotating-provider.ts` & `lib/llm/key-manager/executor.ts`: Auto-scaled default `maxAttempts` across 4–5 key pools (`Math.max(3, Math.min(keyConfigMap.size, 5))`) and wired `perAttemptTimeoutMs` into `executeWithResilientFailover`.
+  4. `tokki-widget` (`lib/utils/sanitize-css.ts`, `lib/export.tsx`, `lib/components/ChatWindow.tsx`, `lib/state/chat.tsx`, `src/App.tsx`): Blocked `<style>` tag DOM XSS breakouts, enforced 4,000-char limit in direct `chatOps.startQuestion`, added `waitingResponse` re-entrancy lock, fixed lossless `%25`/`%0d` SSE chunk decoding, and updated `src/App.tsx` `DEFAULT_BASE_URL` to `https://my-server-mocha.vercel.app`.
+- **R3 Verification**:
+  - `bun test`: **286 / 286 PASS** (`my-server-test`, 1,790 assertions) + **31 / 31 PASS** (`tokki-widget`, 111 assertions) = **317 / 317 PASS (1,901 assertions)**.
+  - Pre-flight builds: `bundle:api` (114ms, 26.9MB), `type-check` (0 errors), `build` (2.77s), `build:embed` (2.02s), `export-playground` (2.40s).
+  - Korean report generated at `stress_test_audit.md` (`v6.3.0-DAILY-KO`). Committed locally with `[skip ci]`.
+
+---
+
+## 80. Daily Diagnostics & Auto-Remediation Attestation (`[세션명: 내 서버 및 Vercel 일일 총검사]`, 2026-11-15)
 
 - **Trigger**: Scheduled single-agent daily diagnostic & auto-remediation routine (`development` integrity mode, zero subagent/swarm quota overhead, zero Vercel build quota consumption).
 - **Live Vercel Infrastructure Findings (`https://my-server-mocha.vercel.app`)**:
