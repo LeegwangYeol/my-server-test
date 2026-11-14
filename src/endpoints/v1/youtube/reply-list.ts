@@ -6,7 +6,7 @@ export const v1ReplyList = (app: any) => {
   app.post(
     "/reply/list",
     async ({ body, set }: { body: any; set: any }) => {
-      const { parentId, accessToken, maxResults } = body;
+      const { parentId, accessToken, maxResults, pageToken } = body;
 
       if (!parentId) {
         set.status = 400;
@@ -33,8 +33,11 @@ export const v1ReplyList = (app: any) => {
         });
 
         let max = 20;
-        if (maxResults) {
-          const parsed = parseInt(maxResults, 10);
+        if (maxResults !== undefined && maxResults !== null && maxResults !== "") {
+          const parsed =
+            typeof maxResults === "number"
+              ? maxResults
+              : parseInt(String(maxResults), 10);
           if (!isNaN(parsed) && parsed >= 1 && parsed <= 100) {
             max = parsed;
           }
@@ -44,41 +47,42 @@ export const v1ReplyList = (app: any) => {
           part: ["snippet"], // part 파라미터 추가
           parentId: parentId,
           maxResults: max,
+          pageToken: pageToken || undefined,
         });
 
         return {
           success: true,
           message: "해당 댓글의 대댓글 리스트를 성공적으로 가져왔습니다.",
           data: {
-            kind: response.data.kind,
-            etag: response.data.etag,
-            nextPageToken: response.data.nextPageToken,
+            kind: response.data.kind ?? undefined,
+            etag: response.data.etag ?? undefined,
+            nextPageToken: response.data.nextPageToken ?? undefined,
             pageInfo: {
-              totalResults: response.data.pageInfo?.totalResults,
-              resultsPerPage: response.data.pageInfo?.resultsPerPage,
+              totalResults: response.data.pageInfo?.totalResults ?? 0,
+              resultsPerPage: response.data.pageInfo?.resultsPerPage ?? max,
             },
             items:
               response.data.items?.map((item) => ({
-                kind: item.kind,
-                etag: item.etag,
-                id: item.id,
+                kind: item.kind ?? undefined,
+                etag: item.etag ?? undefined,
+                id: item.id ?? "",
                 snippet: {
-                  authorDisplayName: item.snippet?.authorDisplayName,
-                  authorProfileImageUrl: item.snippet?.authorProfileImageUrl,
-                  authorChannelUrl: item.snippet?.authorChannelUrl,
+                  authorDisplayName: item.snippet?.authorDisplayName ?? undefined,
+                  authorProfileImageUrl: item.snippet?.authorProfileImageUrl ?? undefined,
+                  authorChannelUrl: item.snippet?.authorChannelUrl ?? undefined,
                   authorChannelId: {
-                    value: item.snippet?.authorChannelId?.value,
+                    value: item.snippet?.authorChannelId?.value ?? undefined,
                   },
-                  channelId: item.snippet?.channelId,
-                  textDisplay: item.snippet?.textDisplay,
-                  textOriginal: item.snippet?.textOriginal,
-                  parentId: item.snippet?.parentId,
-                  canRate: item.snippet?.canRate,
-                  viewerRating: item.snippet?.viewerRating,
-                  likeCount: item.snippet?.likeCount,
-                  moderationStatus: item.snippet?.moderationStatus,
-                  publishedAt: item.snippet?.publishedAt,
-                  updatedAt: item.snippet?.updatedAt,
+                  channelId: item.snippet?.channelId ?? undefined,
+                  textDisplay: item.snippet?.textDisplay ?? undefined,
+                  textOriginal: item.snippet?.textOriginal ?? undefined,
+                  parentId: item.snippet?.parentId ?? undefined,
+                  canRate: item.snippet?.canRate ?? undefined,
+                  viewerRating: item.snippet?.viewerRating ?? undefined,
+                  likeCount: item.snippet?.likeCount ?? undefined,
+                  moderationStatus: item.snippet?.moderationStatus ?? undefined,
+                  publishedAt: item.snippet?.publishedAt ?? undefined,
+                  updatedAt: item.snippet?.updatedAt ?? undefined,
                 },
               })) || [],
           },
@@ -108,9 +112,14 @@ export const v1ReplyList = (app: any) => {
           error: "Access Token이 필요합니다.",
         }),
         maxResults: t.Optional(
-          t.String({
+          t.Union([t.String(), t.Number()], {
             description: "한 페이지당 최대 결과 수 (1-100)",
             error: "maxResults는 1에서 100 사이의 값이어야 합니다.",
+          }),
+        ),
+        pageToken: t.Optional(
+          t.String({
+            description: "Page token for pagination",
           }),
         ),
       }),

@@ -44,12 +44,12 @@ export const v1AuthCreate = (app: any) => {
           clientId: t.String({
             description: "Google OAuth Client ID",
             error: "Client ID is required",
-            pattern: "^[0-9]+-[a-zA-Z0-9]+\\.apps\\.googleusercontent\\.com$",
+            pattern: "^[0-9]+-[a-zA-Z0-9_-]+\\.apps\\.googleusercontent\\.com$",
           }),
           clientSecret: t.String({
             description: "Google OAuth Client Secret",
             error: "Client Secret is required",
-            pattern: "^GOCSPX-[a-zA-Z0-9]+$",
+            pattern: "^GOCSPX-[a-zA-Z0-9_-]+$",
           }),
           redirectUri: t.String({
             description: "OAuth Redirect URI",
@@ -90,7 +90,10 @@ export const v1AuthCreate = (app: any) => {
             typeof authState.clientSecret !== "string" ||
             !authState.clientSecret.trim() ||
             typeof authState.redirectUri !== "string" ||
-            !authState.redirectUri.trim()
+            !authState.redirectUri.trim() ||
+            !/^https?:\/\/[\w.-]+(?::\d+)?\/.*$/.test(
+              authState.redirectUri.trim(),
+            )
           ) {
             set.status = 400;
             return {
@@ -99,20 +102,27 @@ export const v1AuthCreate = (app: any) => {
             };
           }
           const oauth2Client = new google.auth.OAuth2(
-            authState.clientId,
-            authState.clientSecret,
-            authState.redirectUri,
+            authState.clientId.trim(),
+            authState.clientSecret.trim(),
+            authState.redirectUri.trim(),
           );
 
           const { tokens } = await oauth2Client.getToken(code as string);
+          if (!tokens?.access_token) {
+            set.status = 400;
+            return {
+              success: false,
+              message: "유효한 액세스 토큰을 발급받지 못했습니다.",
+            };
+          }
 
           return {
             success: true,
             message: "인증이 완료되었습니다.",
             data: {
               accessToken: tokens.access_token,
-              refreshToken: tokens.refresh_token,
-              expiryDate: tokens.expiry_date,
+              refreshToken: tokens.refresh_token ?? undefined,
+              expiryDate: tokens.expiry_date ?? undefined,
             },
           };
         } catch (error: any) {

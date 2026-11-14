@@ -49,10 +49,10 @@ export const v1ChannelInfo = (app: any) => {
           message: "채널 정보를 성공적으로 가져왔습니다.",
           data: {
             items: response.data.items || [],
-            nextPageToken: response.data.nextPageToken,
-            pageInfo: response.data.pageInfo || {
-              totalResults: 0,
-              resultsPerPage: max,
+            nextPageToken: response.data.nextPageToken ?? undefined,
+            pageInfo: {
+              totalResults: response.data.pageInfo?.totalResults ?? 0,
+              resultsPerPage: response.data.pageInfo?.resultsPerPage ?? max,
             },
           },
         };

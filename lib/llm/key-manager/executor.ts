@@ -141,7 +141,8 @@ export async function executeWithResilientFailover(
   keyConfigMap: Map<string, KeyConfig>,
   requestFactory: (apiKey: string, signal?: AbortSignal) => Promise<Response>,
   maxAttempts: number = 3,
-  clientSignal?: AbortSignal
+  clientSignal?: AbortSignal,
+  perAttemptTimeoutMs: number = 6000
 ): Promise<HandshakeResult> {
   const attemptedKeyIds: string[] = [];
   const brokenAccountIds = new Set<string>();
@@ -192,9 +193,9 @@ export async function executeWithResilientFailover(
       continue;
     }
 
-    // Step 3: Enforce strict 6-second execution budget per attempt
+    // Step 3: Enforce strict execution budget per attempt (default 6000ms)
     const { signal: attemptSignal, cleanup: cleanupSignal } = createAttemptSignal(
-      6000,
+      perAttemptTimeoutMs,
       clientSignal
     );
 

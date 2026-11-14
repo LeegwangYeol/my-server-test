@@ -14,6 +14,64 @@ import {
 } from "../lib/rate-limit";
 
 const MAX_REQUEST_BODY_SIZE = 1024 * 1024; // 1MB
+const MAX_UPLOAD_BODY_SIZE = 2 * 1024 * 1024; // 2MB
+
+function normalizePathname(rawPathname: string): string {
+  let p = (rawPathname || "/").trim().replace(/\/+/g, "/");
+  if (p.toLowerCase().startsWith("/api/")) {
+    p = p.slice(4);
+  }
+  if (p.length > 1) {
+    p = p.replace(/\/+$/, "");
+  }
+  return p;
+}
+
+function extractMediaType(rawContentType?: string | null): string {
+  return String(rawContentType ?? "")
+    .split(";")[0]
+    .trim()
+    .toLowerCase();
+}
+
+async function readBoundedBodyText(
+  request: Request,
+  maxBytes: number,
+): Promise<string> {
+  if (!request.body) return "";
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value && value.byteLength > 0) {
+        totalBytes += value.byteLength;
+        if (totalBytes > maxBytes) {
+          await reader.cancel("PAYLOAD_TOO_LARGE").catch(() => {});
+          throw new Error("PAYLOAD_TOO_LARGE");
+        }
+        chunks.push(value);
+      }
+    }
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {
+      /* noop */
+    }
+  }
+  if (chunks.length === 0) return "";
+  if (chunks.length === 1) return new TextDecoder("utf-8").decode(chunks[0]);
+  const merged = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder("utf-8").decode(merged);
+}
 
 export const createApp = async (serverless = false) => {
   const app = new Elysia({
@@ -36,13 +94,23 @@ export const createApp = async (serverless = false) => {
         }
       };
 
+      let pathname = "/";
+      try {
+        const url = new URL(request.url, "http://localhost");
+        pathname = url.pathname;
+      } catch {
+        pathname = "/";
+      }
+      const normPath = normalizePathname(pathname);
+      const mediaType = extractMediaType(request.headers.get("content-type"));
+      const isUpload =
+        mediaType === "multipart/form-data" &&
+        normPath === "/v2/admin/widgets/upload-icon";
+
       const contentLength = request.headers.get("content-length");
       if (contentLength) {
         const size = parseInt(contentLength, 10);
-        const isUpload = request.headers
-          .get("content-type")
-          ?.includes("multipart/form-data");
-        const limit = isUpload ? 2 * 1024 * 1024 : MAX_REQUEST_BODY_SIZE;
+        const limit = isUpload ? MAX_UPLOAD_BODY_SIZE : MAX_REQUEST_BODY_SIZE;
         if (!isNaN(size) && size > limit) {
           set.status = 413;
           applyCorsHeaders();
@@ -59,14 +127,6 @@ export const createApp = async (serverless = false) => {
       }
 
       // Endpoint Rate Limiting
-      let pathname = "/";
-      try {
-        const url = new URL(request.url, "http://localhost");
-        pathname = url.pathname;
-      } catch {
-        pathname = "/";
-      }
-
       const policy = resolvePolicy(pathname, request.method);
       const clientIp = extractClientIp(request);
       const rateLimitKey = `${clientIp}:${policy.tier}`;
@@ -102,14 +162,23 @@ export const createApp = async (serverless = false) => {
       set.headers["access-control-expose-headers"] =
         "retry-after, x-ratelimit-limit, x-ratelimit-remaining, x-ratelimit-reset";
     })
-    .onError(({ error, code, set }: any) => {
+    .onError(({ request, error, code, set }: any) => {
       if (
-        code === "PARSE" &&
+        (code === "PARSE" || error?.message === "PAYLOAD_TOO_LARGE") &&
         (error?.message?.includes("PAYLOAD_TOO_LARGE") ||
           (error as any)?.cause?.message?.includes("PAYLOAD_TOO_LARGE") ||
           String(error).includes("PAYLOAD_TOO_LARGE"))
       ) {
         set.status = 413;
+        const origin = request?.headers?.get?.("origin");
+        if (origin) {
+          set.headers = set.headers || {};
+          set.headers["access-control-allow-origin"] = origin;
+          set.headers["access-control-allow-credentials"] = "true";
+          set.headers["access-control-expose-headers"] =
+            "retry-after, x-ratelimit-limit, x-ratelimit-remaining, x-ratelimit-reset";
+          set.headers["vary"] = "Origin";
+        }
         return {
           success: false,
           error: "Payload Too Large: request body exceeds 1MB limit",
@@ -136,16 +205,46 @@ export const createApp = async (serverless = false) => {
       };
     })
     .onParse(async ({ request, contentType }) => {
-      if (
-        contentType === "application/json" ||
-        (typeof contentType === "string" &&
-          contentType.toLowerCase().startsWith("application/json;"))
-      ) {
-        const text = await request.text();
-        if (Buffer.byteLength(text, "utf8") > MAX_REQUEST_BODY_SIZE) {
-          throw new Error("PAYLOAD_TOO_LARGE");
+      const mediaType = extractMediaType(
+        typeof contentType === "string" && contentType.length > 0
+          ? contentType
+          : request.headers.get("content-type"),
+      );
+
+      if (mediaType === "multipart/form-data") {
+        let pathname = "/";
+        try {
+          pathname = new URL(request.url, "http://localhost").pathname;
+        } catch {
+          pathname = "/";
         }
+        if (normalizePathname(pathname) === "/v2/admin/widgets/upload-icon") {
+          return;
+        }
+        // Non-upload routes must never buffer >1MB multipart streams
+        await readBoundedBodyText(request, MAX_REQUEST_BODY_SIZE);
+        return {};
+      }
+
+      if (mediaType === "application/json" || mediaType.endsWith("+json")) {
+        const text = await readBoundedBodyText(request, MAX_REQUEST_BODY_SIZE);
+        if (!text) return {};
         return JSON.parse(text);
+      }
+
+      if (mediaType === "text/plain") {
+        return await readBoundedBodyText(request, MAX_REQUEST_BODY_SIZE);
+      }
+
+      if (mediaType === "application/x-www-form-urlencoded") {
+        const text = await readBoundedBodyText(request, MAX_REQUEST_BODY_SIZE);
+        return Object.fromEntries(new URLSearchParams(text));
+      }
+
+      if (request.body) {
+        const text = await readBoundedBodyText(request, MAX_REQUEST_BODY_SIZE);
+        if (!text) return undefined;
+        return text;
       }
     })
     .use(

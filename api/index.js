@@ -701812,12 +701812,12 @@ var v1AuthCreate = (app) => {
         clientId: t.String({
           description: "Google OAuth Client ID",
           error: "Client ID is required",
-          pattern: "^[0-9]+-[a-zA-Z0-9]+\\.apps\\.googleusercontent\\.com$"
+          pattern: "^[0-9]+-[a-zA-Z0-9_-]+\\.apps\\.googleusercontent\\.com$"
         }),
         clientSecret: t.String({
           description: "Google OAuth Client Secret",
           error: "Client Secret is required",
-          pattern: "^GOCSPX-[a-zA-Z0-9]+$"
+          pattern: "^GOCSPX-[a-zA-Z0-9_-]+$"
         }),
         redirectUri: t.String({
           description: "OAuth Redirect URI",
@@ -701848,7 +701848,9 @@ var v1AuthCreate = (app) => {
         const authState = JSON.parse(
           Buffer.from(state, "base64").toString()
         );
-        if (!authState || typeof authState !== "object" || typeof authState.clientId !== "string" || !authState.clientId.trim() || typeof authState.clientSecret !== "string" || !authState.clientSecret.trim() || typeof authState.redirectUri !== "string" || !authState.redirectUri.trim()) {
+        if (!authState || typeof authState !== "object" || typeof authState.clientId !== "string" || !authState.clientId.trim() || typeof authState.clientSecret !== "string" || !authState.clientSecret.trim() || typeof authState.redirectUri !== "string" || !authState.redirectUri.trim() || !/^https?:\/\/[\w.-]+(?::\d+)?\/.*$/.test(
+          authState.redirectUri.trim()
+        )) {
           set.status = 400;
           return {
             success: false,
@@ -701856,18 +701858,25 @@ var v1AuthCreate = (app) => {
           };
         }
         const oauth2Client = new import_googleapis.google.auth.OAuth2(
-          authState.clientId,
-          authState.clientSecret,
-          authState.redirectUri
+          authState.clientId.trim(),
+          authState.clientSecret.trim(),
+          authState.redirectUri.trim()
         );
         const { tokens } = await oauth2Client.getToken(code);
+        if (!tokens?.access_token) {
+          set.status = 400;
+          return {
+            success: false,
+            message: "\uC720\uD6A8\uD55C \uC561\uC138\uC2A4 \uD1A0\uD070\uC744 \uBC1C\uAE09\uBC1B\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4."
+          };
+        }
         return {
           success: true,
           message: "\uC778\uC99D\uC774 \uC644\uB8CC\uB418\uC5C8\uC2B5\uB2C8\uB2E4.",
           data: {
             accessToken: tokens.access_token,
-            refreshToken: tokens.refresh_token,
-            expiryDate: tokens.expiry_date
+            refreshToken: tokens.refresh_token ?? void 0,
+            expiryDate: tokens.expiry_date ?? void 0
           }
         };
       } catch (error) {
@@ -702069,10 +702078,10 @@ var v1CommentList = (app) => {
           message: "\uB313\uAE00 \uC2A4\uB808\uB4DC \uBAA9\uB85D\uC744 \uC131\uACF5\uC801\uC73C\uB85C \uAC00\uC838\uC654\uC2B5\uB2C8\uB2E4.",
           data: {
             items: response.data.items || [],
-            nextPageToken: response.data.nextPageToken,
-            pageInfo: response.data.pageInfo || {
-              totalResults: 0,
-              resultsPerPage: max
+            nextPageToken: response.data.nextPageToken ?? void 0,
+            pageInfo: {
+              totalResults: response.data.pageInfo?.totalResults ?? 0,
+              resultsPerPage: response.data.pageInfo?.resultsPerPage ?? max
             }
           }
         };
@@ -702336,7 +702345,7 @@ var v1ReplyList = (app) => {
   app.post(
     "/reply/list",
     async ({ body, set }) => {
-      const { parentId, accessToken, maxResults } = body;
+      const { parentId, accessToken, maxResults, pageToken } = body;
       if (!parentId) {
         set.status = 400;
         return {
@@ -702359,8 +702368,8 @@ var v1ReplyList = (app) => {
           auth: oauth2Client
         });
         let max = 20;
-        if (maxResults) {
-          const parsed = parseInt(maxResults, 10);
+        if (maxResults !== void 0 && maxResults !== null && maxResults !== "") {
+          const parsed = typeof maxResults === "number" ? maxResults : parseInt(String(maxResults), 10);
           if (!isNaN(parsed) && parsed >= 1 && parsed <= 100) {
             max = parsed;
           }
@@ -702369,40 +702378,41 @@ var v1ReplyList = (app) => {
           part: ["snippet"],
           // part 파라미터 추가
           parentId,
-          maxResults: max
+          maxResults: max,
+          pageToken: pageToken || void 0
         });
         return {
           success: true,
           message: "\uD574\uB2F9 \uB313\uAE00\uC758 \uB300\uB313\uAE00 \uB9AC\uC2A4\uD2B8\uB97C \uC131\uACF5\uC801\uC73C\uB85C \uAC00\uC838\uC654\uC2B5\uB2C8\uB2E4.",
           data: {
-            kind: response.data.kind,
-            etag: response.data.etag,
-            nextPageToken: response.data.nextPageToken,
+            kind: response.data.kind ?? void 0,
+            etag: response.data.etag ?? void 0,
+            nextPageToken: response.data.nextPageToken ?? void 0,
             pageInfo: {
-              totalResults: response.data.pageInfo?.totalResults,
-              resultsPerPage: response.data.pageInfo?.resultsPerPage
+              totalResults: response.data.pageInfo?.totalResults ?? 0,
+              resultsPerPage: response.data.pageInfo?.resultsPerPage ?? max
             },
             items: response.data.items?.map((item) => ({
-              kind: item.kind,
-              etag: item.etag,
-              id: item.id,
+              kind: item.kind ?? void 0,
+              etag: item.etag ?? void 0,
+              id: item.id ?? "",
               snippet: {
-                authorDisplayName: item.snippet?.authorDisplayName,
-                authorProfileImageUrl: item.snippet?.authorProfileImageUrl,
-                authorChannelUrl: item.snippet?.authorChannelUrl,
+                authorDisplayName: item.snippet?.authorDisplayName ?? void 0,
+                authorProfileImageUrl: item.snippet?.authorProfileImageUrl ?? void 0,
+                authorChannelUrl: item.snippet?.authorChannelUrl ?? void 0,
                 authorChannelId: {
-                  value: item.snippet?.authorChannelId?.value
+                  value: item.snippet?.authorChannelId?.value ?? void 0
                 },
-                channelId: item.snippet?.channelId,
-                textDisplay: item.snippet?.textDisplay,
-                textOriginal: item.snippet?.textOriginal,
-                parentId: item.snippet?.parentId,
-                canRate: item.snippet?.canRate,
-                viewerRating: item.snippet?.viewerRating,
-                likeCount: item.snippet?.likeCount,
-                moderationStatus: item.snippet?.moderationStatus,
-                publishedAt: item.snippet?.publishedAt,
-                updatedAt: item.snippet?.updatedAt
+                channelId: item.snippet?.channelId ?? void 0,
+                textDisplay: item.snippet?.textDisplay ?? void 0,
+                textOriginal: item.snippet?.textOriginal ?? void 0,
+                parentId: item.snippet?.parentId ?? void 0,
+                canRate: item.snippet?.canRate ?? void 0,
+                viewerRating: item.snippet?.viewerRating ?? void 0,
+                likeCount: item.snippet?.likeCount ?? void 0,
+                moderationStatus: item.snippet?.moderationStatus ?? void 0,
+                publishedAt: item.snippet?.publishedAt ?? void 0,
+                updatedAt: item.snippet?.updatedAt ?? void 0
               }
             })) || []
           }
@@ -702431,9 +702441,14 @@ var v1ReplyList = (app) => {
           error: "Access Token\uC774 \uD544\uC694\uD569\uB2C8\uB2E4."
         }),
         maxResults: t.Optional(
-          t.String({
+          t.Union([t.String(), t.Number()], {
             description: "\uD55C \uD398\uC774\uC9C0\uB2F9 \uCD5C\uB300 \uACB0\uACFC \uC218 (1-100)",
             error: "maxResults\uB294 1\uC5D0\uC11C 100 \uC0AC\uC774\uC758 \uAC12\uC774\uC5B4\uC57C \uD569\uB2C8\uB2E4."
+          })
+        ),
+        pageToken: t.Optional(
+          t.String({
+            description: "Page token for pagination"
           })
         )
       }),
@@ -702513,10 +702528,10 @@ var v1ChannelInfo = (app) => {
           message: "\uCC44\uB110 \uC815\uBCF4\uB97C \uC131\uACF5\uC801\uC73C\uB85C \uAC00\uC838\uC654\uC2B5\uB2C8\uB2E4.",
           data: {
             items: response.data.items || [],
-            nextPageToken: response.data.nextPageToken,
-            pageInfo: response.data.pageInfo || {
-              totalResults: 0,
-              resultsPerPage: max
+            nextPageToken: response.data.nextPageToken ?? void 0,
+            pageInfo: {
+              totalResults: response.data.pageInfo?.totalResults ?? 0,
+              resultsPerPage: response.data.pageInfo?.resultsPerPage ?? max
             }
           }
         };
@@ -702625,10 +702640,10 @@ var v1VideoList = (app) => {
           message: "\uCC44\uB110\uC758 \uB3D9\uC601\uC0C1 \uBAA9\uB85D\uC744 \uC131\uACF5\uC801\uC73C\uB85C \uAC00\uC838\uC654\uC2B5\uB2C8\uB2E4.",
           data: {
             items: response.data.items || [],
-            nextPageToken: response.data.nextPageToken,
-            pageInfo: response.data.pageInfo || {
-              totalResults: 0,
-              resultsPerPage: max
+            nextPageToken: response.data.nextPageToken ?? void 0,
+            pageInfo: {
+              totalResults: response.data.pageInfo?.totalResults ?? 0,
+              resultsPerPage: response.data.pageInfo?.resultsPerPage ?? max
             }
           }
         };
@@ -711731,7 +711746,7 @@ function createAttemptSignal(timeoutMs, clientSignal) {
   };
   return { signal: controller.signal, cleanup };
 }
-async function executeWithResilientFailover(keyStore, keyConfigMap, requestFactory, maxAttempts = 3, clientSignal) {
+async function executeWithResilientFailover(keyStore, keyConfigMap, requestFactory, maxAttempts = 3, clientSignal, perAttemptTimeoutMs = 6e3) {
   const attemptedKeyIds = [];
   const brokenAccountIds = /* @__PURE__ */ new Set();
   let attempt = 0;
@@ -711773,7 +711788,7 @@ async function executeWithResilientFailover(keyStore, keyConfigMap, requestFacto
       continue;
     }
     const { signal: attemptSignal, cleanup: cleanupSignal } = createAttemptSignal(
-      6e3,
+      perAttemptTimeoutMs,
       clientSignal
     );
     try {
@@ -712224,7 +712239,7 @@ var RotatingLLMProvider = class {
       "HTTP-Referer": "https://tokki.app",
       "X-Title": "Tokki AI"
     };
-    this.maxAttempts = options?.maxAttempts ?? 3;
+    this.maxAttempts = options?.maxAttempts ?? Math.max(3, Math.min(keyConfigMap.size, 5));
     this.perAttemptTimeoutMs = options?.perAttemptTimeoutMs ?? 6e3;
   }
   /**
@@ -712275,7 +712290,8 @@ var RotatingLLMProvider = class {
         });
       },
       this.maxAttempts,
-      clientSignal
+      clientSignal,
+      this.perAttemptTimeoutMs
     );
   }
   /**
@@ -713802,8 +713818,9 @@ var defaultDbInsert = async (payload) => {
 };
 registerDefaultDbHandler(defaultDbInsert);
 async function listWidgets(limit = 1e3) {
+  const safeLimit = Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 2e3) : 1e3;
   try {
-    const { data, error } = await supabaseUntyped.from("chat_thread").select("widget_id, updated_at").eq("is_deleted", false).order("updated_at", { ascending: false }).limit(limit);
+    const { data, error } = await supabaseUntyped.from("chat_thread").select("widget_id, updated_at").eq("is_deleted", false).order("updated_at", { ascending: false }).limit(safeLimit);
     if (error) {
       console.error("[chat-store] listWidgets failed:", error.message);
       return [];
@@ -713832,8 +713849,11 @@ async function listWidgets(limit = 1e3) {
   }
 }
 async function listThreads(widgetId, limit = 100) {
+  const wid = (widgetId ?? "").trim();
+  if (!wid) return [];
+  const safeLimit = Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 500) : 100;
   try {
-    const { data: threads, error } = await supabaseUntyped.from("chat_thread").select("*").eq("widget_id", widgetId).eq("is_deleted", false).order("updated_at", { ascending: false }).limit(limit);
+    const { data: threads, error } = await supabaseUntyped.from("chat_thread").select("*").eq("widget_id", wid).eq("is_deleted", false).order("updated_at", { ascending: false }).limit(safeLimit);
     if (error) {
       console.error("[chat-store] listThreads failed:", error.message);
       return [];
@@ -713841,9 +713861,27 @@ async function listThreads(widgetId, limit = 100) {
     const rows = threads ?? [];
     if (rows.length === 0) return [];
     const ids = rows.map((r) => r.id);
-    const { data: msgs } = await supabaseUntyped.from("chat_message").select("thread_id, role, content, created_at").in("thread_id", ids).order("created_at", { ascending: false });
+    const { data: msgs, error: msgErr } = await supabaseUntyped.from("chat_message").select("thread_id, role, content, created_at").in("thread_id", ids).order("created_at", { ascending: false }).limit(5e3);
+    if (msgErr) {
+      console.error(
+        "[chat-store] listThreads messages query failed:",
+        msgErr.message
+      );
+    }
     const byThread = /* @__PURE__ */ new Map();
-    for (const m of msgs ?? []) {
+    const combinedMsgs = [
+      ...(msgs ?? []).slice()
+    ];
+    for (const id of ids) {
+      const queued = getQueuedMessagesForThread(id);
+      if (queued.length > 0) {
+        combinedMsgs.push(...queued);
+      }
+    }
+    combinedMsgs.sort(
+      (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+    );
+    for (const m of combinedMsgs) {
       const entry = byThread.get(m.thread_id) ?? { count: 0, lastUser: null };
       entry.count += 1;
       if (m.role === "user" && entry.lastUser === null) {
@@ -713935,7 +713973,7 @@ function normalizeRow(row) {
 }
 var MAX_CACHE_ENTRIES = 500;
 var CACHE_TTL_MS = 6e4;
-var MAX_WIDGET_ID_CHARS = 256;
+var MAX_WIDGET_ID_CHARS = 100;
 var BoundedLRUCache = class {
   constructor(max) {
     this.map = /* @__PURE__ */ new Map();
@@ -714029,8 +714067,15 @@ async function listWidgetsRegistered() {
   }
 }
 async function upsertWidget(input) {
-  if (!input.id) return { row: null, error: "id required" };
-  const patch = { id: input.id, is_deleted: false };
+  const id = (input.id ?? "").trim();
+  if (!id) return { row: null, error: "id required" };
+  if (id.length > MAX_WIDGET_ID_CHARS) {
+    return {
+      row: null,
+      error: `id exceeds maximum length of ${MAX_WIDGET_ID_CHARS} characters`
+    };
+  }
+  const patch = { id, is_deleted: false };
   if (input.name !== void 0) patch.name = input.name;
   if (input.theme !== void 0) patch.theme = input.theme;
   if (input.description !== void 0) patch.description = input.description;
@@ -714054,7 +714099,7 @@ async function upsertWidget(input) {
       console.error("[widget-store] upsertWidget failed:", error.message);
       return { row: null, error: error.message };
     }
-    invalidateWidgetCache(input.id);
+    invalidateWidgetCache(id);
     return { row: normalizeRow(data) };
   } catch (err) {
     const msg = err?.message || String(err);
@@ -714063,14 +714108,15 @@ async function upsertWidget(input) {
   }
 }
 async function deleteWidget(id) {
-  if (!id) return false;
+  const trimmed = (id ?? "").trim();
+  if (!trimmed || trimmed.length > MAX_WIDGET_ID_CHARS) return false;
   try {
-    const { error } = await supabaseUntyped.from(TABLE).update({ is_deleted: true }).eq("id", id);
+    const { error } = await supabaseUntyped.from(TABLE).update({ is_deleted: true }).eq("id", trimmed);
     if (error) {
       console.error("[widget-store] deleteWidget failed:", error.message);
       return false;
     }
-    invalidateWidgetCache(id);
+    invalidateWidgetCache(trimmed);
     return true;
   } catch (err) {
     console.warn("[widget-store] deleteWidget skipped:", err?.message || err);
@@ -714080,6 +714126,7 @@ async function deleteWidget(id) {
 
 // src/endpoints/v2/widget-endpoints.ts
 var import_crypto9 = __toESM(require("crypto"));
+var MAX_WIDGET_ID_CHARS2 = 100;
 function timingSafeMatch(a, b) {
   if (!a || !b) return false;
   const hashA = import_crypto9.default.createHash("sha256").update(a).digest();
@@ -714105,23 +714152,29 @@ var v2WidgetEndpoints = async (app) => {
       "/widget/view",
       async ({ body }) => {
         const widgetId = (body?.widgetId ?? "").trim();
-        let threadId = body?.threadId ?? "";
+        let master = null;
+        try {
+          master = widgetId && widgetId.length <= 100 ? await getWidget(widgetId) : null;
+        } catch {
+          master = null;
+        }
+        let threadId = "";
         let messages = [];
-        if (threadId && widgetId) {
-          const existing = await getThread(threadId, widgetId);
-          if (existing) {
-            const rows = await listMessages(threadId);
-            messages = rows.map(toWidgetMessage);
-          } else {
-            threadId = "";
+        if (master) {
+          threadId = body?.threadId ?? "";
+          if (threadId) {
+            const existing = await getThread(threadId, widgetId);
+            if (existing) {
+              const rows = await listMessages(threadId);
+              messages = rows.map(toWidgetMessage);
+            } else {
+              threadId = "";
+            }
           }
-        } else if (threadId && !widgetId) {
-          threadId = "";
+          if (!threadId) {
+            threadId = await createThread(widgetId) ?? "";
+          }
         }
-        if (!threadId) {
-          threadId = await createThread(widgetId) ?? "";
-        }
-        const master = widgetId ? await getWidget(widgetId) : null;
         const persona = renderPersona(master, widgetId);
         return {
           success: true,
@@ -714153,7 +714206,7 @@ var v2WidgetEndpoints = async (app) => {
         const widgetId = (typeof rawWidgetId === "string" ? rawWidgetId : "").trim();
         let widgetMaster = null;
         try {
-          widgetMaster = widgetId ? await getWidget(widgetId) : null;
+          widgetMaster = widgetId && widgetId.length <= 100 ? await getWidget(widgetId) : null;
         } catch {
           widgetMaster = null;
         }
@@ -714191,7 +714244,8 @@ var v2WidgetEndpoints = async (app) => {
         const rawWidgetId = body?.widgetId;
         const widgetId = (typeof rawWidgetId === "string" ? rawWidgetId : "").trim();
         const userMessage = body?.message ?? "";
-        let threadId = body?.threadId ?? "";
+        const rawThreadId = body?.threadId;
+        let threadId = "";
         const MAX_MESSAGE_CHARS = 4e3;
         if (userMessage.length > MAX_MESSAGE_CHARS) {
           set.status = 413;
@@ -714201,12 +714255,34 @@ var v2WidgetEndpoints = async (app) => {
           };
         }
         const MAX_AUX_CHARS = 2e3;
-        if (threadId.length > MAX_AUX_CHARS) {
-          set.status = 413;
-          return {
-            success: false,
-            error: `threadId too large (${threadId.length} > ${MAX_AUX_CHARS} chars)`
-          };
+        if (rawThreadId !== void 0 && rawThreadId !== null) {
+          if (typeof rawThreadId === "string") {
+            if (rawThreadId.length > MAX_AUX_CHARS) {
+              set.status = 413;
+              return {
+                success: false,
+                error: `threadId too large (${rawThreadId.length} > ${MAX_AUX_CHARS} chars)`
+              };
+            }
+            threadId = rawThreadId;
+          } else {
+            let raw = "";
+            try {
+              raw = JSON.stringify(rawThreadId) ?? "";
+            } catch {
+              set.status = 400;
+              return { success: false, error: "malformed threadId payload" };
+            }
+            if (raw.length > MAX_AUX_CHARS) {
+              set.status = 413;
+              return {
+                success: false,
+                error: `threadId too large (${raw.length} > ${MAX_AUX_CHARS} chars)`
+              };
+            }
+            set.status = 400;
+            return { success: false, error: "threadId must be a string" };
+          }
         }
         if (body?.browserInfo) {
           let raw = "";
@@ -714242,7 +714318,7 @@ var v2WidgetEndpoints = async (app) => {
         }
         let widgetMaster = null;
         try {
-          widgetMaster = widgetId ? await getWidget(widgetId) : null;
+          widgetMaster = widgetId && widgetId.length <= 100 ? await getWidget(widgetId) : null;
         } catch {
           widgetMaster = null;
         }
@@ -714490,7 +714566,7 @@ var v2WidgetEndpoints = async (app) => {
       {
         body: t.Object({
           widgetId: t.Optional(t.Any()),
-          threadId: t.Optional(t.String()),
+          threadId: t.Optional(t.Any()),
           message: t.String(),
           browserInfo: t.Optional(t.Any()),
           search: t.Optional(t.Any())
@@ -714558,7 +714634,17 @@ var v2WidgetEndpoints = async (app) => {
         const deny = requireAdmin(headers, set);
         if (deny) return deny;
         const id = (body?.id ?? "").trim();
-        if (!id) return { success: false, error: "id required" };
+        if (!id) {
+          set.status = 400;
+          return { success: false, error: "id required" };
+        }
+        if (id.length > MAX_WIDGET_ID_CHARS2) {
+          set.status = 400;
+          return {
+            success: false,
+            error: `id exceeds maximum length of ${MAX_WIDGET_ID_CHARS2} characters`
+          };
+        }
         const result = await upsertWidget({
           id,
           name: body?.name,
@@ -715956,6 +716042,55 @@ function checkRateLimit(key, limit, windowMs, reqOrHeaders, now) {
 
 // src/app.ts
 var MAX_REQUEST_BODY_SIZE = 1024 * 1024;
+var MAX_UPLOAD_BODY_SIZE = 2 * 1024 * 1024;
+function normalizePathname(rawPathname) {
+  let p = (rawPathname || "/").trim().replace(/\/+/g, "/");
+  if (p.toLowerCase().startsWith("/api/")) {
+    p = p.slice(4);
+  }
+  if (p.length > 1) {
+    p = p.replace(/\/+$/, "");
+  }
+  return p;
+}
+function extractMediaType(rawContentType) {
+  return String(rawContentType ?? "").split(";")[0].trim().toLowerCase();
+}
+async function readBoundedBodyText(request, maxBytes) {
+  if (!request.body) return "";
+  const reader = request.body.getReader();
+  const chunks = [];
+  let totalBytes = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value && value.byteLength > 0) {
+        totalBytes += value.byteLength;
+        if (totalBytes > maxBytes) {
+          await reader.cancel("PAYLOAD_TOO_LARGE").catch(() => {
+          });
+          throw new Error("PAYLOAD_TOO_LARGE");
+        }
+        chunks.push(value);
+      }
+    }
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {
+    }
+  }
+  if (chunks.length === 0) return "";
+  if (chunks.length === 1) return new TextDecoder("utf-8").decode(chunks[0]);
+  const merged = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder("utf-8").decode(merged);
+}
 var createApp = async (serverless = false) => {
   const app = new Elysia({
     serve: {
@@ -715973,11 +716108,20 @@ var createApp = async (serverless = false) => {
         set.headers["vary"] = "Origin";
       }
     };
+    let pathname = "/";
+    try {
+      const url = new URL(request.url, "http://localhost");
+      pathname = url.pathname;
+    } catch {
+      pathname = "/";
+    }
+    const normPath = normalizePathname(pathname);
+    const mediaType = extractMediaType(request.headers.get("content-type"));
+    const isUpload = mediaType === "multipart/form-data" && normPath === "/v2/admin/widgets/upload-icon";
     const contentLength = request.headers.get("content-length");
     if (contentLength) {
       const size = parseInt(contentLength, 10);
-      const isUpload = request.headers.get("content-type")?.includes("multipart/form-data");
-      const limit = isUpload ? 2 * 1024 * 1024 : MAX_REQUEST_BODY_SIZE;
+      const limit = isUpload ? MAX_UPLOAD_BODY_SIZE : MAX_REQUEST_BODY_SIZE;
       if (!isNaN(size) && size > limit) {
         set.status = 413;
         applyCorsHeaders();
@@ -715989,13 +716133,6 @@ var createApp = async (serverless = false) => {
     }
     if (request.method === "OPTIONS") {
       return;
-    }
-    let pathname = "/";
-    try {
-      const url = new URL(request.url, "http://localhost");
-      pathname = url.pathname;
-    } catch {
-      pathname = "/";
     }
     const policy = resolvePolicy(pathname, request.method);
     const clientIp = extractClientIp(request);
@@ -716027,9 +716164,17 @@ var createApp = async (serverless = false) => {
     set.headers["x-ratelimit-remaining"] = String(rateLimitRes.remaining);
     set.headers["x-ratelimit-reset"] = String(rateLimitRes.resetEpochSec);
     set.headers["access-control-expose-headers"] = "retry-after, x-ratelimit-limit, x-ratelimit-remaining, x-ratelimit-reset";
-  }).onError(({ error, code, set }) => {
-    if (code === "PARSE" && (error?.message?.includes("PAYLOAD_TOO_LARGE") || error?.cause?.message?.includes("PAYLOAD_TOO_LARGE") || String(error).includes("PAYLOAD_TOO_LARGE"))) {
+  }).onError(({ request, error, code, set }) => {
+    if ((code === "PARSE" || error?.message === "PAYLOAD_TOO_LARGE") && (error?.message?.includes("PAYLOAD_TOO_LARGE") || error?.cause?.message?.includes("PAYLOAD_TOO_LARGE") || String(error).includes("PAYLOAD_TOO_LARGE"))) {
       set.status = 413;
+      const origin = request?.headers?.get?.("origin");
+      if (origin) {
+        set.headers = set.headers || {};
+        set.headers["access-control-allow-origin"] = origin;
+        set.headers["access-control-allow-credentials"] = "true";
+        set.headers["access-control-expose-headers"] = "retry-after, x-ratelimit-limit, x-ratelimit-remaining, x-ratelimit-reset";
+        set.headers["vary"] = "Origin";
+      }
       return {
         success: false,
         error: "Payload Too Large: request body exceeds 1MB limit"
@@ -716045,12 +716190,38 @@ var createApp = async (serverless = false) => {
       error: isProd ? "Internal Server Error" : error?.message ?? "Internal Server Error"
     };
   }).onParse(async ({ request, contentType }) => {
-    if (contentType === "application/json" || typeof contentType === "string" && contentType.toLowerCase().startsWith("application/json;")) {
-      const text = await request.text();
-      if (Buffer.byteLength(text, "utf8") > MAX_REQUEST_BODY_SIZE) {
-        throw new Error("PAYLOAD_TOO_LARGE");
+    const mediaType = extractMediaType(
+      typeof contentType === "string" && contentType.length > 0 ? contentType : request.headers.get("content-type")
+    );
+    if (mediaType === "multipart/form-data") {
+      let pathname = "/";
+      try {
+        pathname = new URL(request.url, "http://localhost").pathname;
+      } catch {
+        pathname = "/";
       }
+      if (normalizePathname(pathname) === "/v2/admin/widgets/upload-icon") {
+        return;
+      }
+      await readBoundedBodyText(request, MAX_REQUEST_BODY_SIZE);
+      return {};
+    }
+    if (mediaType === "application/json" || mediaType.endsWith("+json")) {
+      const text = await readBoundedBodyText(request, MAX_REQUEST_BODY_SIZE);
+      if (!text) return {};
       return JSON.parse(text);
+    }
+    if (mediaType === "text/plain") {
+      return await readBoundedBodyText(request, MAX_REQUEST_BODY_SIZE);
+    }
+    if (mediaType === "application/x-www-form-urlencoded") {
+      const text = await readBoundedBodyText(request, MAX_REQUEST_BODY_SIZE);
+      return Object.fromEntries(new URLSearchParams(text));
+    }
+    if (request.body) {
+      const text = await readBoundedBodyText(request, MAX_REQUEST_BODY_SIZE);
+      if (!text) return void 0;
+      return text;
     }
   }).use(
     cors({

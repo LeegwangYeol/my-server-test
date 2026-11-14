@@ -551,4 +551,99 @@ describe("Adversarial Reviewer Verification Suite", () => {
       resetCachedProviderForTesting();
     }
   });
+
+  it("VULN-27: YouTube OAuth accepts hyphen/underscore GOCSPX secrets and blocks non-HTTP(S) redirectUri in state", async () => {
+    const app = await createApp(true);
+
+    // 1. Real Google OAuth secret containing '-' and '_' must pass schema validation (200)
+    const createRes = await app.handle(
+      new Request("http://localhost/v1/youtube/auth/create", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          clientId: "123456789-abc_def-123.apps.googleusercontent.com",
+          clientSecret: "GOCSPX-aBc_123-XyZ987",
+          redirectUri: "https://example.com/oauth/callback",
+        }),
+      }),
+    );
+    expect(createRes.status).toBe(200);
+    const createData = (await createRes.json()) as any;
+    expect(createData.success).toBe(true);
+
+    // 2. Forged base64 state with javascript:/file: redirectUri must be rejected with HTTP 400 before Google call
+    const badState = Buffer.from(
+      JSON.stringify({
+        clientId: "123-abc.apps.googleusercontent.com",
+        clientSecret: "GOCSPX-secret",
+        redirectUri: "javascript:alert(1)",
+      }),
+    ).toString("base64");
+    const confirmRes = await app.handle(
+      new Request(
+        `http://localhost/v1/youtube/auth/confirm?code=mock_code&state=${encodeURIComponent(badState)}`,
+      ),
+    );
+    expect(confirmRes.status).toBe(400);
+    const confirmData = (await confirmRes.json()) as any;
+    expect(confirmData.success).toBe(false);
+  });
+
+  it("VULN-28: /v1/youtube/reply/list accepts numeric maxResults and pageToken without 422 schema failure", async () => {
+    const app = await createApp(true);
+    const res = await app.handle(
+      new Request("http://localhost/v1/youtube/reply/list", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          parentId: "comment-parent-123",
+          accessToken: "mock-invalid-token",
+          maxResults: 25,
+          pageToken: "CAUQAA",
+        }),
+      }),
+    );
+    // Must pass input schema validation (not 422) and return handled 400 on invalid OAuth token
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as any;
+    expect(body.success).toBe(false);
+  });
+
+  it("VULN-29: /v2/admin/widgets/upsert rejects empty or >100-char ghost widget IDs with HTTP 400", async () => {
+    const prevToken = process.env.ADMIN_TOKEN;
+    process.env.ADMIN_TOKEN = "test-admin-secret";
+    try {
+      const app = await createApp(true);
+
+      const emptyRes = await app.handle(
+        new Request("http://localhost/v2/admin/widgets/upsert", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-admin-token": "test-admin-secret",
+          },
+          body: JSON.stringify({ id: "   " }),
+        }),
+      );
+      expect(emptyRes.status).toBe(400);
+
+      const oversizedRes = await app.handle(
+        new Request("http://localhost/v2/admin/widgets/upsert", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-admin-token": "test-admin-secret",
+          },
+          body: JSON.stringify({ id: "w".repeat(101), name: "Ghost Widget" }),
+        }),
+      );
+      expect(oversizedRes.status).toBe(400);
+      const body = (await oversizedRes.json()) as any;
+      expect(body.success).toBe(false);
+      expect(body.error).toContain("maximum length");
+    } finally {
+      if (prevToken === undefined) delete process.env.ADMIN_TOKEN;
+      else process.env.ADMIN_TOKEN = prevToken;
+    }
+  });
 });

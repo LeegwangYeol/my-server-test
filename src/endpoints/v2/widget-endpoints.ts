@@ -22,6 +22,8 @@ import {
   type WidgetRow,
 } from "../../../lib/widget-store";
 
+const MAX_WIDGET_ID_CHARS = 100;
+
 import crypto from "crypto";
 
 /**
@@ -89,32 +91,41 @@ export const v2WidgetEndpoints = async (app: any) => {
       async ({ body }: { body: { widgetId?: string; threadId?: string } }) => {
         const widgetId = (body?.widgetId ?? "").trim();
 
-        // Resolve thread: use the one the widget sent if it exists and isn't
-        // deleted, otherwise mint a fresh one.
-        let threadId = body?.threadId ?? "";
-        let messages: { role: string; content: string }[] = [];
-
-        if (threadId && widgetId) {
-          const existing = await getThread(threadId, widgetId);
-          if (existing) {
-            const rows = await listMessages(threadId);
-            messages = rows.map(toWidgetMessage);
-          } else {
-            // The id the widget held is gone (table wiped, expired, etc.) —
-            // start over so we don't keep handing out a dangling reference.
-            threadId = "";
-          }
-        } else if (threadId && !widgetId) {
-          threadId = "";
-        }
-        if (!threadId) {
-          threadId = (await createThread(widgetId)) ?? "";
-        }
-
         // Pull persona from the widget master table if it exists; otherwise
         // fall back to the hardcoded default so unregistered embeds keep
-        // working.
-        const master = widgetId ? await getWidget(widgetId) : null;
+        // working WITHOUT inserting orphan rows into chat_thread.
+        let master = null;
+        try {
+          master =
+            widgetId && widgetId.length <= 100
+              ? await getWidget(widgetId)
+              : null;
+        } catch {
+          master = null;
+        }
+
+        // Resolve thread ONLY when widgetId is registered in widget_master.
+        let threadId = "";
+        let messages: { role: string; content: string }[] = [];
+
+        if (master) {
+          threadId = body?.threadId ?? "";
+          if (threadId) {
+            const existing = await getThread(threadId, widgetId);
+            if (existing) {
+              const rows = await listMessages(threadId);
+              messages = rows.map(toWidgetMessage);
+            } else {
+              // The id the widget held is gone (table wiped, expired, etc.) —
+              // start over so we don't keep handing out a dangling reference.
+              threadId = "";
+            }
+          }
+          if (!threadId) {
+            threadId = (await createThread(widgetId)) ?? "";
+          }
+        }
+
         const persona = renderPersona(master, widgetId);
 
         return {
@@ -153,7 +164,10 @@ export const v2WidgetEndpoints = async (app: any) => {
         const widgetId = (typeof rawWidgetId === "string" ? rawWidgetId : "").trim();
         let widgetMaster = null;
         try {
-          widgetMaster = widgetId ? await getWidget(widgetId) : null;
+          widgetMaster =
+            widgetId && widgetId.length <= 100
+              ? await getWidget(widgetId)
+              : null;
         } catch {
           widgetMaster = null;
         }
@@ -195,7 +209,8 @@ export const v2WidgetEndpoints = async (app: any) => {
         const rawWidgetId = body?.widgetId;
         const widgetId: string = (typeof rawWidgetId === "string" ? rawWidgetId : "").trim();
         const userMessage: string = body?.message ?? "";
-        let threadId: string = body?.threadId ?? "";
+        const rawThreadId = body?.threadId;
+        let threadId = "";
 
         // ── Guard 1: 요청당 메시지 길이 상한 — 단일 요청 토큰 폭탄 방어 ──
         const MAX_MESSAGE_CHARS = 4000;
@@ -209,12 +224,34 @@ export const v2WidgetEndpoints = async (app: any) => {
 
         // ── Guard 1b: 보조 필드(threadId, browserInfo, search) 페이로드 스머글링 방어 ──
         const MAX_AUX_CHARS = 2000;
-        if (threadId.length > MAX_AUX_CHARS) {
-          set.status = 413;
-          return {
-            success: false,
-            error: `threadId too large (${threadId.length} > ${MAX_AUX_CHARS} chars)`,
-          };
+        if (rawThreadId !== undefined && rawThreadId !== null) {
+          if (typeof rawThreadId === "string") {
+            if (rawThreadId.length > MAX_AUX_CHARS) {
+              set.status = 413;
+              return {
+                success: false,
+                error: `threadId too large (${rawThreadId.length} > ${MAX_AUX_CHARS} chars)`,
+              };
+            }
+            threadId = rawThreadId;
+          } else {
+            let raw = "";
+            try {
+              raw = JSON.stringify(rawThreadId) ?? "";
+            } catch {
+              set.status = 400;
+              return { success: false, error: "malformed threadId payload" };
+            }
+            if (raw.length > MAX_AUX_CHARS) {
+              set.status = 413;
+              return {
+                success: false,
+                error: `threadId too large (${raw.length} > ${MAX_AUX_CHARS} chars)`,
+              };
+            }
+            set.status = 400;
+            return { success: false, error: "threadId must be a string" };
+          }
         }
         if (body?.browserInfo) {
           let raw = "";
@@ -262,7 +299,10 @@ export const v2WidgetEndpoints = async (app: any) => {
         // 위젯을 먼저 등록해야 한다.
         let widgetMaster = null;
         try {
-          widgetMaster = widgetId ? await getWidget(widgetId) : null;
+          widgetMaster =
+            widgetId && widgetId.length <= 100
+              ? await getWidget(widgetId)
+              : null;
         } catch {
           widgetMaster = null;
         }
@@ -597,7 +637,7 @@ export const v2WidgetEndpoints = async (app: any) => {
       {
         body: t.Object({
           widgetId: t.Optional(t.Any()),
-          threadId: t.Optional(t.String()),
+          threadId: t.Optional(t.Any()),
           message: t.String(),
           browserInfo: t.Optional(t.Any()),
           search: t.Optional(t.Any()),
@@ -694,7 +734,17 @@ export const v2WidgetEndpoints = async (app: any) => {
         const deny = requireAdmin(headers, set);
         if (deny) return deny;
         const id = (body?.id ?? "").trim();
-        if (!id) return { success: false, error: "id required" };
+        if (!id) {
+          set.status = 400;
+          return { success: false, error: "id required" };
+        }
+        if (id.length > MAX_WIDGET_ID_CHARS) {
+          set.status = 400;
+          return {
+            success: false,
+            error: `id exceeds maximum length of ${MAX_WIDGET_ID_CHARS} characters`,
+          };
+        }
         const result = await upsertWidget({
           id,
           name: body?.name,

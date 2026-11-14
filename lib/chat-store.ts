@@ -354,13 +354,17 @@ export interface WidgetSummary {
  * of widgets.
  */
 export async function listWidgets(limit = 1000): Promise<WidgetSummary[]> {
+  const safeLimit =
+    Number.isFinite(limit) && limit > 0
+      ? Math.min(Math.floor(limit), 2000)
+      : 1000;
   try {
     const { data, error } = await supabaseUntyped
       .from("chat_thread")
       .select("widget_id, updated_at")
       .eq("is_deleted", false)
       .order("updated_at", { ascending: false })
-      .limit(limit);
+      .limit(safeLimit);
     if (error) {
       console.error("[chat-store] listWidgets failed:", error.message);
       return [];
@@ -416,6 +420,12 @@ export async function listThreads(
   widgetId: string,
   limit = 100,
 ): Promise<ThreadSummary[]> {
+  const wid = (widgetId ?? "").trim();
+  if (!wid) return [];
+  const safeLimit =
+    Number.isFinite(limit) && limit > 0
+      ? Math.min(Math.floor(limit), 500)
+      : 100;
   // NOTE: select("*") so this keeps working both before and after the
   // `title` column migration lands. Once title is everywhere we can
   // tighten this back to an explicit column list.
@@ -423,10 +433,10 @@ export async function listThreads(
     const { data: threads, error } = await supabaseUntyped
       .from("chat_thread")
       .select("*")
-      .eq("widget_id", widgetId)
+      .eq("widget_id", wid)
       .eq("is_deleted", false)
       .order("updated_at", { ascending: false })
-      .limit(limit);
+      .limit(safeLimit);
     if (error) {
       console.error("[chat-store] listThreads failed:", error.message);
       return [];
@@ -436,17 +446,38 @@ export async function listThreads(
 
     // Fetch counts + last user message per thread in a single round trip.
     const ids = rows.map((r) => r.id);
-    const { data: msgs } = await supabaseUntyped
+    const { data: msgs, error: msgErr } = await supabaseUntyped
       .from("chat_message")
       .select("thread_id, role, content, created_at")
       .in("thread_id", ids)
-      .order("created_at", { ascending: false });
+      .order("created_at", { ascending: false })
+      .limit(5000);
+    if (msgErr) {
+      console.error(
+        "[chat-store] listThreads messages query failed:",
+        msgErr.message,
+      );
+    }
 
     const byThread = new Map<
       string,
       { count: number; lastUser: string | null }
     >();
-    for (const m of (msgs as ChatMessageRow[]) ?? []) {
+    const combinedMsgs: ChatMessageRow[] = [
+      ...(((msgs as ChatMessageRow[]) ?? []).slice()),
+    ];
+    for (const id of ids) {
+      const queued = getQueuedMessagesForThread(id) as ChatMessageRow[];
+      if (queued.length > 0) {
+        combinedMsgs.push(...queued);
+      }
+    }
+    combinedMsgs.sort(
+      (a, b) =>
+        new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
+    );
+
+    for (const m of combinedMsgs) {
       const entry = byThread.get(m.thread_id) ?? { count: 0, lastUser: null };
       entry.count += 1;
       if (m.role === "user" && entry.lastUser === null) {

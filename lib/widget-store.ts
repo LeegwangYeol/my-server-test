@@ -77,7 +77,7 @@ interface CacheEntry {
 
 export const MAX_CACHE_ENTRIES = 500;
 export const CACHE_TTL_MS = 60_000;
-export const MAX_WIDGET_ID_CHARS = 256;
+export const MAX_WIDGET_ID_CHARS = 100;
 
 /**
  * Bounded LRU cache with TTL expiration.
@@ -210,9 +210,16 @@ export async function listWidgetsRegistered(): Promise<WidgetRow[]> {
 export async function upsertWidget(
   input: WidgetUpsertInput,
 ): Promise<{ row: WidgetRow | null; error?: string }> {
-  if (!input.id) return { row: null, error: "id required" };
+  const id = (input.id ?? "").trim();
+  if (!id) return { row: null, error: "id required" };
+  if (id.length > MAX_WIDGET_ID_CHARS) {
+    return {
+      row: null,
+      error: `id exceeds maximum length of ${MAX_WIDGET_ID_CHARS} characters`,
+    };
+  }
 
-  const patch: Record<string, unknown> = { id: input.id, is_deleted: false };
+  const patch: Record<string, unknown> = { id, is_deleted: false };
   if (input.name !== undefined) patch.name = input.name;
   if (input.theme !== undefined) patch.theme = input.theme;
   if (input.description !== undefined) patch.description = input.description;
@@ -243,7 +250,7 @@ export async function upsertWidget(
       console.error("[widget-store] upsertWidget failed:", error.message);
       return { row: null, error: error.message };
     }
-    invalidateWidgetCache(input.id);
+    invalidateWidgetCache(id);
     return { row: normalizeRow(data) };
   } catch (err: any) {
     const msg = err?.message || String(err);
@@ -254,17 +261,18 @@ export async function upsertWidget(
 
 /** Soft-delete (sets is_deleted = true). Hard delete is intentionally not exposed. */
 export async function deleteWidget(id: string): Promise<boolean> {
-  if (!id) return false;
+  const trimmed = (id ?? "").trim();
+  if (!trimmed || trimmed.length > MAX_WIDGET_ID_CHARS) return false;
   try {
     const { error } = await supabaseUntyped
       .from(TABLE)
       .update({ is_deleted: true })
-      .eq("id", id);
+      .eq("id", trimmed);
     if (error) {
       console.error("[widget-store] deleteWidget failed:", error.message);
       return false;
     }
-    invalidateWidgetCache(id);
+    invalidateWidgetCache(trimmed);
     return true;
   } catch (err: any) {
     console.warn("[widget-store] deleteWidget skipped:", err?.message || err);

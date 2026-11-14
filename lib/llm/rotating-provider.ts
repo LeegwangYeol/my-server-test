@@ -41,7 +41,8 @@ export class RotatingLLMProvider implements LLMProvider {
       "HTTP-Referer": "https://tokki.app",
       "X-Title": "Tokki AI",
     };
-    this.maxAttempts = options?.maxAttempts ?? 3;
+    this.maxAttempts =
+      options?.maxAttempts ?? Math.max(3, Math.min(keyConfigMap.size, 5));
     this.perAttemptTimeoutMs = options?.perAttemptTimeoutMs ?? 6000;
   }
 
@@ -98,7 +99,8 @@ export class RotatingLLMProvider implements LLMProvider {
         });
       },
       this.maxAttempts,
-      clientSignal
+      clientSignal,
+      this.perAttemptTimeoutMs
     );
   }
 

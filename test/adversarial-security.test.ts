@@ -43,9 +43,13 @@ mock.module("../lib/widget-store", () => ({
 }));
 
 let mockMessages: Array<{ id: number; thread_id: string; role: string; content: string; created_at: string }> = [];
+let createThreadCalls = 0;
 
 mock.module("../lib/chat-store", () => ({
-  createThread: async (widgetId: string) => `thread-${widgetId}-${Date.now()}`,
+  createThread: async (widgetId: string) => {
+    createThreadCalls++;
+    return `thread-${widgetId}-${Date.now()}`;
+  },
   getThread: async (threadId: string, widgetId?: string) => ({
     id: threadId,
     widget_id: widgetId ?? VALID_WIDGET_ID,
@@ -369,6 +373,190 @@ describe("Adversarial Security Test Suite (Requirement R2)", () => {
           search: { mode: "semantic" },
         });
         expect(res.status).not.toBe(413);
+      });
+
+      test("rejects non-string threadId object exceeding 2,000 serialized chars with HTTP 413", async () => {
+        const res = await postJson(app, "/v2/ask", {
+          widgetId: VALID_WIDGET_ID,
+          threadId: { smuggled: "T".repeat(2500) },
+          message: "Safe message",
+        });
+        expect(res.status).toBe(413);
+        const data = (await res.json()) as any;
+        expect(data.success).toBe(false);
+        expect(data.error).toContain("threadId too large");
+      });
+
+      test("returns HTTP 403 (not 422) when unregistered widget sends threadId: null", async () => {
+        const res = await postJson(app, "/v2/ask", {
+          widgetId: "unregistered-null-thread-client",
+          threadId: null,
+          message: "Hello",
+        });
+        expect(res.status).toBe(403);
+      });
+    });
+
+    describe("2.5 Content-Type Normalization & Upload Bypass Hardening (HTTP 413)", () => {
+      test("rejects uppercase APPLICATION/JSON >1MB chunked body with HTTP 413", async () => {
+        const payload = JSON.stringify({
+          widgetId: VALID_WIDGET_ID,
+          message: "hi",
+          pad: "U".repeat(1_150_000),
+        });
+        const res = await app.handle(
+          new Request("http://localhost/v2/ask", {
+            method: "POST",
+            headers: { "content-type": "APPLICATION/JSON" },
+            body: payload,
+          }),
+        );
+        expect(res.status).toBe(413);
+      });
+
+      test("rejects RFC 9110 OWS 'application/json ; charset=utf-8' >1MB body with HTTP 413", async () => {
+        const payload = JSON.stringify({
+          widgetId: VALID_WIDGET_ID,
+          message: "hi",
+          pad: "S".repeat(1_150_000),
+        });
+        const res = await app.handle(
+          new Request("http://localhost/v2/ask", {
+            method: "POST",
+            headers: { "content-type": "application/json ; charset=utf-8" },
+            body: payload,
+          }),
+        );
+        expect(res.status).toBe(413);
+      });
+
+      test("rejects structured +json ('application/problem+json') >1MB body with HTTP 413", async () => {
+        const payload = JSON.stringify({
+          widgetId: VALID_WIDGET_ID,
+          message: "hi",
+          pad: "P".repeat(1_150_000),
+        });
+        const res = await app.handle(
+          new Request("http://localhost/v2/ask", {
+            method: "POST",
+            headers: { "content-type": "application/problem+json" },
+            body: payload,
+          }),
+        );
+        expect(res.status).toBe(413);
+      });
+
+      test("rejects multipart/form-data parameter spoofing on /v2/ask (>1MB Content-Length) with HTTP 413", async () => {
+        const res = await app.handle(
+          new Request("http://localhost/v2/ask", {
+            method: "POST",
+            headers: {
+              "content-type": "application/json; x=multipart/form-data",
+              "content-length": "1800000",
+            },
+            body: JSON.stringify({ widgetId: VALID_WIDGET_ID, message: "hi" }),
+          }),
+        );
+        expect(res.status).toBe(413);
+      });
+    });
+
+    describe("2.6 Orphan Thread Spam Defense on /v2/widget/view & 5-Key Pool Failover", () => {
+      test("does NOT insert orphan chat_thread rows when /v2/widget/view receives unregistered or empty widgetId", async () => {
+        const beforeCalls = createThreadCalls;
+
+        const resUnreg = await postJson(app, "/v2/widget/view", {
+          widgetId: "unregistered-scraper-bot",
+        });
+        expect(resUnreg.status).toBe(200);
+        const bodyUnreg = (await resUnreg.json()) as any;
+        expect(bodyUnreg.thread_id).toBe("");
+        expect(createThreadCalls).toBe(beforeCalls);
+
+        const resEmpty = await postJson(app, "/v2/widget/view", { widgetId: "" });
+        expect(resEmpty.status).toBe(200);
+        const bodyEmpty = (await resEmpty.json()) as any;
+        expect(bodyEmpty.thread_id).toBe("");
+        expect(createThreadCalls).toBe(beforeCalls);
+
+        // Registered widget MUST still allocate a valid thread when threadId is empty
+        const resValid = await postJson(app, "/v2/widget/view", {
+          widgetId: VALID_WIDGET_ID,
+        });
+        expect(resValid.status).toBe(200);
+        const bodyValid = (await resValid.json()) as any;
+        expect(bodyValid.thread_id).toContain(`thread-${VALID_WIDGET_ID}-`);
+        expect(createThreadCalls).toBe(beforeCalls + 1);
+      });
+
+      test("RotatingLLMProvider auto-scales maxAttempts across 5-key pool and forwards perAttemptTimeoutMs", async () => {
+        const { MemoryKeyStore } = await import("../lib/llm/key-manager/stores/memory");
+        const { RotatingLLMProvider } = await import("../lib/llm/rotating-provider");
+
+        const store = new MemoryKeyStore();
+        const keyMap = new Map<string, any>([
+          ["k1", { id: "k1", apiKey: "sk-1", accountId: "acc-dead", maxConcurrency: 5, weight: 100 }],
+          ["k2", { id: "k2", apiKey: "sk-2", accountId: "acc-rl1", maxConcurrency: 5, weight: 90 }],
+          ["k3", { id: "k3", apiKey: "sk-3", accountId: "acc-rl2", maxConcurrency: 5, weight: 80 }],
+          ["k4", { id: "k4", apiKey: "sk-4", accountId: "acc-good", maxConcurrency: 5, weight: 70 }],
+          ["k5", { id: "k5", apiKey: "sk-5", accountId: "acc-good", maxConcurrency: 5, weight: 60 }],
+        ]);
+
+        const provider = new RotatingLLMProvider(store, keyMap, {
+          perAttemptTimeoutMs: 80,
+        });
+
+        const originalFetch = globalThis.fetch;
+        try {
+          globalThis.fetch = (async (_input: any, init?: RequestInit) => {
+            const auth = String((init?.headers as any)?.Authorization ?? "");
+            if (auth.includes("sk-1")) {
+              return new Response(JSON.stringify({ error: { message: "Insufficient credits", code: 402 } }), {
+                status: 402,
+                headers: { "content-type": "application/json" },
+              });
+            }
+            if (auth.includes("sk-2")) {
+              return new Response(JSON.stringify({ error: { message: "Rate limit", code: 429 } }), {
+                status: 429,
+                headers: { "content-type": "application/json", "retry-after": "5" },
+              });
+            }
+            if (auth.includes("sk-3")) {
+              // Simulate hung upstream > 80ms to verify perAttemptTimeoutMs is wired!
+              await new Promise((_, reject) => {
+                init?.signal?.addEventListener("abort", () => {
+                  reject(init.signal?.reason || new Error("ATTEMPT_TIMEOUT"));
+                });
+              });
+            }
+            return new Response("data: {\"choices\":[{\"delta\":{\"content\":\"OK\"}}]}\n\ndata: [DONE]\n\n", {
+              status: 200,
+              headers: { "content-type": "text/event-stream" },
+            });
+          }) as any;
+
+          const t0 = performance.now();
+          const hs = await provider.preStreamHandshake({
+            messages: [{ role: "user", content: "ping" }],
+          });
+          const elapsed = performance.now() - t0;
+          expect(["k4", "k5"]).toContain(hs.keyId);
+          expect(elapsed).toBeLessThan(1500); // Proves 80ms timeout fired instead of hardcoded 6000ms!
+
+          let out = "";
+          for await (const chunk of provider.streamFromHandshake(hs)) {
+            out += chunk;
+          }
+          expect(out).toBe("OK");
+          const states = await store.getAllStates();
+          expect(states.length).toBe(5);
+          for (const st of states) {
+            expect(st.inFlightRequests).toBe(0);
+          }
+        } finally {
+          globalThis.fetch = originalFetch;
+        }
       });
     });
   });
