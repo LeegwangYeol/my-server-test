@@ -6,7 +6,24 @@ export const v1VideoList = (app: any) => {
   app.post(
     "/video/list",
     async ({ body, set }: { body: any; set: any }) => {
-      const { handle, accessToken, maxResults, pageToken } = body;
+      const { maxResults, pageToken } = body;
+      const handle = String(body?.handle ?? "").trim();
+      const accessToken = String(body?.accessToken ?? "").trim();
+
+      if (!handle) {
+        set.status = 400;
+        return {
+          success: false,
+          message: "handle 값이 제공되지 않았습니다.",
+        };
+      }
+      if (!accessToken) {
+        set.status = 400;
+        return {
+          success: false,
+          message: "accessToken 값이 제공되지 않았습니다.",
+        };
+      }
 
       try {
         const oauth2Client = new google.auth.OAuth2();

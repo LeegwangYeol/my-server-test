@@ -233,7 +233,20 @@ export async function upsertWidget(
     // empty string is treated as "clear" so the playground form can
     // simply send `""` to revert to the default glyph.
     const v = input.icon_url?.trim();
-    patch.icon_url = v ? v : null;
+    if (v) {
+      if (
+        v.length > 2048 ||
+        !/^(?:https?:\/\/|\/)[^\s<>"'`\x00-\x1f]*$/i.test(v)
+      ) {
+        return {
+          row: null,
+          error: "invalid icon_url (must be http(s):// or relative / path)",
+        };
+      }
+      patch.icon_url = v;
+    } else {
+      patch.icon_url = null;
+    }
   }
   if (input.chat_bubble_size !== undefined) {
     const v = input.chat_bubble_size?.trim();

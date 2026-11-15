@@ -259,6 +259,20 @@ export async function appendMessage(
       return true;
     }
 
+    if (execRes.success && allowQueue) {
+      if (dbFallbackQueue.getReadyJobs().length > 0) {
+        await processDbQueue().catch((drainErr) => {
+          console.warn(
+            "[chat-store] opportunistic processDbQueue drain warning:",
+            drainErr?.message || drainErr,
+          );
+        });
+      }
+      if (dbFallbackQueue.size > 100) {
+        dbFallbackQueue.prune();
+      }
+    }
+
     return execRes.success;
   } catch (err: any) {
     console.error("[chat-store] appendMessage failed:", err?.message || err);

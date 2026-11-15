@@ -6,7 +6,31 @@ export const v1Comment = (app: any) => {
   app.post(
     "/comment",
     async ({ body, set }: { body: any; set: any }) => {
-      const { accessToken, videoId, commentText } = body;
+      const accessToken = String(body?.accessToken ?? "").trim();
+      const videoId = String(body?.videoId ?? "").trim();
+      const commentText = String(body?.commentText ?? "").trim();
+
+      if (!videoId) {
+        set.status = 400;
+        return {
+          success: false,
+          message: "videoId 값이 제공되지 않았습니다.",
+        };
+      }
+      if (!commentText) {
+        set.status = 400;
+        return {
+          success: false,
+          message: "댓글 내용이 제공되지 않았습니다.",
+        };
+      }
+      if (!accessToken) {
+        set.status = 400;
+        return {
+          success: false,
+          message: "accessToken 값이 제공되지 않았습니다.",
+        };
+      }
 
       try {
         const oauth2Client = new google.auth.OAuth2();

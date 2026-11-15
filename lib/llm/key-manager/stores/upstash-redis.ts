@@ -291,21 +291,29 @@ export class UpstashRedisKeyStore implements IKeyStore {
    * Manually resets an exhausted or rate-limited key back to active.
    */
   public async resetKeyToActive(keyId: string): Promise<void> {
+    const statesBefore = await this.memoryFallback.getAllStates();
+    const accountId = statesBefore.find((s) => s.id === keyId)?.accountId;
     await this.memoryFallback.resetKeyToActive(keyId);
 
     if (this.isStorageBreakerOpen()) return;
 
     try {
-      await this.execCommand(
-        'HSET',
-        `openrouter:key:${keyId}`,
-        'state',
-        'ACTIVE',
-        'consecutive_429s',
-        '0',
-        'consecutive_failures',
-        '0'
-      );
+      const pipeline: any[][] = [
+        [
+          'HSET',
+          `openrouter:key:${keyId}`,
+          'state',
+          'ACTIVE',
+          'consecutive_429s',
+          '0',
+          'consecutive_failures',
+          '0',
+        ],
+      ];
+      if (accountId) {
+        pipeline.push(['DEL', `openrouter:account:${accountId}:broken`]);
+      }
+      await this.execPipeline(pipeline);
       this.recordSuccess();
     } catch (err) {
       this.recordFailure(err);

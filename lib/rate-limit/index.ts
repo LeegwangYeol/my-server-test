@@ -316,15 +316,24 @@ export function extractClientIp(
     return record[name] ?? record[name.toLowerCase()] ?? record[name.toUpperCase()] ?? null;
   };
 
-  // Priority 1: Cloudflare Edge IP (authoritative, cannot be spoofed by client)
+  // Priority 1: Vercel Edge authoritative client IP (overwritten by Vercel Edge; blocks CF-Connecting-IP spoofing on *.vercel.app)
+  const xVercelForwardedFor = getHeader("x-vercel-forwarded-for");
+  if (xVercelForwardedFor) {
+    const vIps = xVercelForwardedFor.split(",").map((s) => s.trim()).filter(Boolean);
+    if (vIps.length > 0) {
+      return normalizeIp(vIps[0]);
+    }
+  }
+
+  // Priority 2: Cloudflare Edge IP (authoritative when proxied through Cloudflare)
   const cfConnectingIp = getHeader("cf-connecting-ip");
   if (cfConnectingIp?.trim()) return normalizeIp(cfConnectingIp);
 
-  // Priority 2: Reverse proxy header (e.g. Nginx, ALB)
+  // Priority 3: Reverse proxy header (e.g. Nginx, ALB, Vercel x-real-ip)
   const xRealIp = getHeader("x-real-ip");
   if (xRealIp?.trim()) return normalizeIp(xRealIp);
 
-  // Priority 3: X-Forwarded-For (extract first non-empty IP entry)
+  // Priority 4: X-Forwarded-For (extract first non-empty IP entry)
   const xForwardedFor = getHeader("x-forwarded-for");
   if (xForwardedFor) {
     const ips = xForwardedFor.split(",").map((s) => s.trim()).filter(Boolean);

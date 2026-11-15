@@ -208,6 +208,19 @@ export async function sendNaverMail(
     }
 
     if (execRes.result) {
+      if (allowQueue) {
+        if (mailFallbackQueue.getReadyJobs().length > 0) {
+          await processMailQueue().catch((drainErr) => {
+            console.warn(
+              "[lib/mail/naver] opportunistic processMailQueue drain warning:",
+              drainErr?.message || drainErr,
+            );
+          });
+        }
+        if (mailFallbackQueue.size > 100) {
+          mailFallbackQueue.prune();
+        }
+      }
       return execRes.result;
     }
 

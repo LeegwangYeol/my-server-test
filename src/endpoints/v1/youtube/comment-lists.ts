@@ -6,8 +6,9 @@ export const v1CommentList = (app: any) => {
   app.post(
     "/comment/list",
     async ({ body, set }: { body: any; set: any }) => {
-      const { videoId, accessToken, maxResults, pageToken, textFormat, order } =
-        body;
+      const { maxResults, pageToken, textFormat, order } = body;
+      const videoId = String(body?.videoId ?? "").trim();
+      const accessToken = String(body?.accessToken ?? "").trim();
 
       if (!videoId) {
         set.status = 400;

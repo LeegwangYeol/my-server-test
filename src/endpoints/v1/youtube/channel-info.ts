@@ -6,7 +6,8 @@ export const v1ChannelInfo = (app: any) => {
   app.post(
     "/channel/info",
     async ({ body, set }: { body: any; set: any }) => {
-      const { accessToken, maxResults, pageToken } = body;
+      const { maxResults, pageToken } = body;
+      const accessToken = String(body?.accessToken ?? "").trim();
 
       if (!accessToken) {
         set.status = 400;

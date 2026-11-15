@@ -138,8 +138,8 @@ export const v2WidgetEndpoints = async (app: any) => {
       },
       {
         body: t.Object({
-          widgetId: t.Optional(t.String({ maxLength: 100 })),
-          threadId: t.Optional(t.String({ maxLength: 100 })),
+          widgetId: t.Optional(t.Union([t.String({ maxLength: 100 }), t.Null()])),
+          threadId: t.Optional(t.Union([t.String({ maxLength: 100 }), t.Null()])),
         }),
         detail: {
           tags: ["API"],
@@ -559,7 +559,19 @@ export const v2WidgetEndpoints = async (app: any) => {
               return { success: false, error: "Client aborted request." };
             }
 
-            // 6. Generic Internal Fallback
+            // 6. Upstream Non-Retryable Client Rejection (e.g., 400 / 413 context overflow)
+            if (err?.code === "UPSTREAM_CLIENT_ERROR") {
+              set.status = err?.statusCode === 413 ? 413 : 502;
+              return {
+                success: false,
+                error:
+                  err?.message ||
+                  "Upstream AI provider rejected the request payload.",
+                code: "UPSTREAM_CLIENT_ERROR",
+              };
+            }
+
+            // 7. Generic Internal Fallback
             set.status = 500;
             return {
               success: false,
@@ -745,6 +757,20 @@ export const v2WidgetEndpoints = async (app: any) => {
             error: `id exceeds maximum length of ${MAX_WIDGET_ID_CHARS} characters`,
           };
         }
+        if (typeof body?.icon_url === "string") {
+          const trimmedIconUrl = body.icon_url.trim();
+          if (
+            trimmedIconUrl.length > 0 &&
+            (trimmedIconUrl.length > 2048 ||
+              !/^(?:https?:\/\/|\/)[^\s<>"'`\x00-\x1f]*$/i.test(trimmedIconUrl))
+          ) {
+            set.status = 400;
+            return {
+              success: false,
+              error: "invalid icon_url (must be http(s):// or relative / path)",
+            };
+          }
+        }
         const result = await upsertWidget({
           id,
           name: body?.name,
@@ -914,6 +940,13 @@ export const v2WidgetEndpoints = async (app: any) => {
         if (!widgetId) {
           set.status = 400;
           return { success: false, error: "widgetId required" };
+        }
+        if (widgetId.length > MAX_WIDGET_ID_CHARS) {
+          set.status = 400;
+          return {
+            success: false,
+            error: `widgetId exceeds maximum length of ${MAX_WIDGET_ID_CHARS} characters`,
+          };
         }
         if (!file) {
           set.status = 400;

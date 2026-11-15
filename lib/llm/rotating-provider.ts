@@ -5,7 +5,11 @@
 
 import type { LLMProvider, LLMStreamRequest } from "./types";
 import type { IKeyStore, KeyConfig } from "./key-manager/types";
-import { executeWithResilientFailover, type HandshakeResult } from "./key-manager/executor";
+import {
+  executeWithResilientFailover,
+  KeyManagerError,
+  type HandshakeResult,
+} from "./key-manager/executor";
 
 export interface RotatingProviderOptions {
   /** Default model ID when request does not specify one */
@@ -75,7 +79,7 @@ export class RotatingLLMProvider implements LLMProvider {
   ): Promise<HandshakeResult> {
     await this.ensureSynced();
 
-    return executeWithResilientFailover(
+    const handshake = await executeWithResilientFailover(
       this.keyStore,
       this.keyConfigMap,
       async (apiKey: string, attemptSignal?: AbortSignal) => {
@@ -102,6 +106,18 @@ export class RotatingLLMProvider implements LLMProvider {
       clientSignal,
       this.perAttemptTimeoutMs
     );
+
+    if (!handshake.response.ok) {
+      const errBody = await handshake.response.text().catch(() => "");
+      throw new KeyManagerError(
+        `UPSTREAM_CLIENT_ERROR (${handshake.response.status}): ${errBody.slice(0, 200) || handshake.response.statusText}`,
+        handshake.response.status,
+        undefined,
+        "UPSTREAM_CLIENT_ERROR"
+      );
+    }
+
+    return handshake;
   }
 
   /**

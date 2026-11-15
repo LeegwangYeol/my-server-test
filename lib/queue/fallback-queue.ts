@@ -489,6 +489,7 @@ export class FallbackQueue<T = any> {
  * Global singleton queues for external third-party communications.
  */
 export const mailFallbackQueue = new FallbackQueue<any>("mail", 5000);
+export const smsFallbackQueue = new FallbackQueue<any>("sms", 5000);
 export const dbFallbackQueue = new FallbackQueue<any>("db", 5000);
 export const generalFallbackQueue = new FallbackQueue<any>("general", 5000);
 

@@ -6,7 +6,8 @@ export const v1CommentDelete = (app: any) => {
   app.post(
     "/comment/delete",
     async ({ body, set }: { body: any; set: any }) => {
-      const { commentId, accessToken } = body;
+      const commentId = String(body?.commentId ?? "").trim();
+      const accessToken = String(body?.accessToken ?? "").trim();
 
       if (!commentId) {
         set.status = 400;

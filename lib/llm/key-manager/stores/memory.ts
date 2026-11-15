@@ -416,6 +416,9 @@ export class MemoryKeyStore implements IKeyStore {
       record.canaryToken = undefined;
       record.lastStatusCode = null;
       record.lastErrorMessage = null;
+      if (record.config.accountId) {
+        this.brokenAccounts.delete(record.config.accountId);
+      }
     }
   }
 

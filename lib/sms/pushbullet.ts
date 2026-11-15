@@ -22,6 +22,69 @@
 
 const DEFAULT_API_URL = "https://api.pushbullet.com";
 const DEFAULT_TIMEOUT_MS = 5000;
+const RETRYABLE_PUSHBULLET_STATUS = new Set([429, 502, 503, 504]);
+const MAX_PUSHBULLET_WAIT_MS = 2500;
+
+function parsePushbulletRetryMs(headers: Headers): number | undefined {
+  const retryAfter = headers.get("retry-after")?.trim();
+  if (retryAfter) {
+    if (/^\d+(\.\d+)?$/.test(retryAfter)) {
+      const sec = parseFloat(retryAfter);
+      if (Number.isFinite(sec) && sec >= 0) {
+        return Math.ceil(sec * 1000) + 100 + Math.floor(Math.random() * 250);
+      }
+    }
+    const parsedDate = Date.parse(retryAfter);
+    if (!Number.isNaN(parsedDate)) {
+      const diff = parsedDate - Date.now();
+      if (diff > 0) {
+        return Math.ceil(diff) + 100 + Math.floor(Math.random() * 250);
+      }
+    }
+  }
+  const reset = headers.get("x-ratelimit-reset")?.trim();
+  if (reset && /^\d+$/.test(reset)) {
+    const epochSec = parseInt(reset, 10);
+    if (Number.isFinite(epochSec) && epochSec > 1_000_000_000) {
+      const diff = epochSec * 1000 - Date.now();
+      if (diff > 0) {
+        return Math.ceil(diff) + 100 + Math.floor(Math.random() * 250);
+      }
+    }
+  }
+  return undefined;
+}
+
+async function fetchPushbulletWithRetry(
+  url: string,
+  init: Omit<RequestInit, "signal">,
+): Promise<Response> {
+  const rawMax = Number.parseInt(process.env.PUSHBULLET_RETRY_MAX ?? "2", 10);
+  const maxRetries = Number.isInteger(rawMax)
+    ? Math.max(0, Math.min(3, rawMax))
+    : 2;
+
+  for (let attempt = 0; ; attempt++) {
+    const res = await fetch(url, {
+      ...init,
+      signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
+    });
+    if (res.ok || !RETRYABLE_PUSHBULLET_STATUS.has(res.status) || attempt >= maxRetries) {
+      return res;
+    }
+    const headerWait = parsePushbulletRetryMs(res.headers);
+    const expCap = Math.min(MAX_PUSHBULLET_WAIT_MS, 300 * Math.pow(2, attempt));
+    const waitMs =
+      headerWait !== undefined
+        ? headerWait
+        : Math.max(50, Math.floor(Math.random() * expCap) + 100);
+    if (waitMs > MAX_PUSHBULLET_WAIT_MS) {
+      return res;
+    }
+    void res.body?.cancel().catch(() => {});
+    await new Promise((resolve) => setTimeout(resolve, waitMs));
+  }
+}
 
 export function getPushbulletConfig() {
   const envMode = process.env.PUSHBULLET_ENV?.trim().toLowerCase();
@@ -80,9 +143,8 @@ async function resolveDeviceIden(
 
   let res: Response;
   try {
-    res = await fetch(`${base}/v2/devices`, {
+    res = await fetchPushbulletWithRetry(`${base}/v2/devices`, {
       headers: { "access-token": token },
-      signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
     });
   } catch (err: unknown) {
     const errorObj = err as { name?: string; message?: string } | undefined;
@@ -140,6 +202,7 @@ export interface PushbulletResult {
   raw?: unknown;
   success?: boolean;
   error?: string;
+  retryAfterSeconds?: number;
 }
 
 export async function sendViaPushbullet({
@@ -182,7 +245,7 @@ export async function sendViaPushbullet({
       };
     }
 
-    const res = await fetch(`${base}/v2/texts`, {
+    const res = await fetchPushbulletWithRetry(`${base}/v2/texts`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -195,7 +258,6 @@ export async function sendViaPushbullet({
           message: text,
         },
       }),
-      signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
     });
 
     let raw: unknown;
@@ -207,11 +269,16 @@ export async function sendViaPushbullet({
     const parsed = raw as { iden?: string; error?: { message?: string } } | undefined;
 
     let errorMessage: string | undefined;
+    let retryAfterSeconds: number | undefined;
     if (!res.ok) {
       if (parsed?.error?.message) {
         errorMessage = parsed.error.message;
       } else {
         errorMessage = `Pushbullet API returned HTTP ${res.status}`;
+      }
+      if (res.status === 429) {
+        const retryMs = parsePushbulletRetryMs(res.headers);
+        retryAfterSeconds = retryMs ? Math.max(1, Math.ceil(retryMs / 1000)) : 5;
       }
     }
 
@@ -222,6 +289,7 @@ export async function sendViaPushbullet({
       iden: parsed?.iden,
       raw,
       ...(errorMessage ? { error: errorMessage } : {}),
+      ...(retryAfterSeconds !== undefined ? { retryAfterSeconds } : {}),
     };
   } catch (err: unknown) {
     const errorObj = err as { name?: string; message?: string } | undefined;

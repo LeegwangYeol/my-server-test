@@ -646,4 +646,227 @@ describe("Adversarial Reviewer Verification Suite", () => {
       else process.env.ADMIN_TOKEN = prevToken;
     }
   });
+
+  it("VULN-30: extractClientIp prioritizes Vercel Edge x-vercel-forwarded-for over spoofed cf-connecting-ip", async () => {
+    const { extractClientIp } = await import("../lib/rate-limit");
+
+    // On *.vercel.app (not behind Cloudflare), client can spoof CF-Connecting-IP;
+    // x-vercel-forwarded-for MUST win when present.
+    const vercelReq = new Request("https://my-server-mocha.vercel.app/v1/healthz", {
+      headers: {
+        "x-vercel-forwarded-for": "203.0.113.77",
+        "cf-connecting-ip": "198.51.100.99",
+        "x-real-ip": "203.0.113.77",
+        "x-forwarded-for": "10.0.0.1, 203.0.113.77",
+      },
+    });
+    expect(extractClientIp(vercelReq)).toBe("203.0.113.77");
+
+    // Behind Cloudflare without Vercel header, cf-connecting-ip still wins over x-forwarded-for
+    const cfReq = new Request("https://example.com/v1/healthz", {
+      headers: {
+        "cf-connecting-ip": "198.51.100.42",
+        "x-forwarded-for": "10.0.0.1",
+      },
+    });
+    expect(extractClientIp(cfReq)).toBe("198.51.100.42");
+  });
+
+  it("VULN-31: /v2/admin/sms/send enqueues persistent Pushbullet 429 (202 Accepted + Idempotency-Key) and opportunistically drains on recovery", async () => {
+    const { smsFallbackQueue } = await import("../lib/queue/fallback-queue");
+    const prevAdmin = process.env.ADMIN_TOKEN;
+    const prevProvider = process.env.SMS_PROVIDER;
+    const prevPbToken = process.env.PUSHBULLET_ACCESS_TOKEN;
+    const prevPbIden = process.env.PUSHBULLET_DEVICE_IDEN;
+    const prevRetryMax = process.env.PUSHBULLET_RETRY_MAX;
+    const originalFetch = globalThis.fetch;
+
+    process.env.ADMIN_TOKEN = "test-admin-secret";
+    process.env.SMS_PROVIDER = "pushbullet";
+    process.env.PUSHBULLET_ACCESS_TOKEN = "pb-test-token";
+    process.env.PUSHBULLET_DEVICE_IDEN = "pb-device-iden-1";
+    process.env.PUSHBULLET_RETRY_MAX = "1";
+    smsFallbackQueue.clear();
+
+    try {
+      const app = await createApp(true);
+      let pushbulletMode: "rate_limited" | "healthy" = "rate_limited";
+      const deliveredPayloads: string[] = [];
+
+      globalThis.fetch = (async (input: any, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input?.url || "";
+        if (url.includes("api.pushbullet.com")) {
+          if (pushbulletMode === "rate_limited") {
+            return new Response(
+              JSON.stringify({ error: { message: "Rate limit exceeded" } }),
+              {
+                status: 429,
+                headers: {
+                  "content-type": "application/json",
+                  "retry-after": "0",
+                },
+              },
+            );
+          }
+          const parsed = JSON.parse(String(init?.body || "{}"));
+          deliveredPayloads.push(parsed?.data?.message || "");
+          return new Response(JSON.stringify({ active: true }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return originalFetch(input, init);
+      }) as any;
+
+      // 1. Persistent 429 -> HTTP 202 Accepted + queued without data loss
+      const res1 = await app.handle(
+        new Request("http://localhost/v2/admin/sms/send", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-admin-token": "test-admin-secret",
+            "idempotency-key": "sms-idem-20261116-1",
+          },
+          body: JSON.stringify({ to: "010-1234-5678", text: "Queued SMS #1" }),
+        }),
+      );
+      expect(res1.status).toBe(202);
+      const body1 = (await res1.json()) as any;
+      expect(body1.queued).toBe(true);
+      expect(smsFallbackQueue.size).toBe(1);
+
+      // 2. Duplicate Idempotency-Key returns same jobId instead of duplicating queue entry
+      const resDup = await app.handle(
+        new Request("http://localhost/v2/admin/sms/send", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-admin-token": "test-admin-secret",
+            "idempotency-key": "sms-idem-20261116-1",
+          },
+          body: JSON.stringify({ to: "010-1234-5678", text: "Queued SMS #1" }),
+        }),
+      );
+      expect(resDup.status).toBe(202);
+      const bodyDup = (await resDup.json()) as any;
+      expect(bodyDup.jobId).toBe(body1.jobId);
+      expect(smsFallbackQueue.size).toBe(1);
+
+      // 3. Pushbullet recovers -> next healthy SMS automatically drains queued job too!
+      pushbulletMode = "healthy";
+      // Mark job ready immediately for deterministic test execution
+      const jobs = smsFallbackQueue.getAllJobs();
+      jobs[0].nextRetryAt = Date.now() - 10;
+
+      const resHealthy = await app.handle(
+        new Request("http://localhost/v2/admin/sms/send", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-admin-token": "test-admin-secret",
+          },
+          body: JSON.stringify({ to: "010-9999-8888", text: "Healthy SMS #2" }),
+        }),
+      );
+      expect(resHealthy.status).toBe(200);
+      expect(deliveredPayloads).toContain("Healthy SMS #2");
+      expect(deliveredPayloads).toContain("Queued SMS #1");
+      expect(smsFallbackQueue.size).toBe(0);
+    } finally {
+      globalThis.fetch = originalFetch;
+      smsFallbackQueue.clear();
+      if (prevAdmin === undefined) delete process.env.ADMIN_TOKEN;
+      else process.env.ADMIN_TOKEN = prevAdmin;
+      if (prevProvider === undefined) delete process.env.SMS_PROVIDER;
+      else process.env.SMS_PROVIDER = prevProvider;
+      if (prevPbToken === undefined) delete process.env.PUSHBULLET_ACCESS_TOKEN;
+      else process.env.PUSHBULLET_ACCESS_TOKEN = prevPbToken;
+      if (prevPbIden === undefined) delete process.env.PUSHBULLET_DEVICE_IDEN;
+      else process.env.PUSHBULLET_DEVICE_IDEN = prevPbIden;
+      if (prevRetryMax === undefined) delete process.env.PUSHBULLET_RETRY_MAX;
+      else process.env.PUSHBULLET_RETRY_MAX = prevRetryMax;
+    }
+  });
+
+  it("VULN-32: /v2/admin/widgets/upsert blocks javascript:/data: XSS schemes in icon_url with HTTP 400", async () => {
+    const prevToken = process.env.ADMIN_TOKEN;
+    process.env.ADMIN_TOKEN = "test-admin-secret";
+    try {
+      const app = await createApp(true);
+
+      for (const xssUrl of [
+        "javascript:alert(document.cookie)",
+        "data:text/html,<script>alert(1)</script>",
+        "https://evil.example.com/icon.png\" onerror=\"alert(1)",
+      ]) {
+        const res = await app.handle(
+          new Request("http://localhost/v2/admin/widgets/upsert", {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              "x-admin-token": "test-admin-secret",
+            },
+            body: JSON.stringify({ id: "safe-widget", icon_url: xssUrl }),
+          }),
+        );
+        expect(res.status).toBe(400);
+        const body = (await res.json()) as any;
+        expect(body.success).toBe(false);
+        expect(body.error).toContain("icon_url");
+      }
+    } finally {
+      if (prevToken === undefined) delete process.env.ADMIN_TOKEN;
+      else process.env.ADMIN_TOKEN = prevToken;
+    }
+  });
+
+  it("VULN-33: YouTube endpoints reject whitespace-only inputs with HTTP 400 without outbound calls, and mail endpoint caps recipient count", async () => {
+    const prevToken = process.env.ADMIN_TOKEN;
+    process.env.ADMIN_TOKEN = "test-admin-secret";
+    try {
+      const app = await createApp(true);
+
+      // 1. Whitespace-only handle/accessToken on /v1/youtube/video/list -> instant local 400
+      const t0 = performance.now();
+      const ytRes = await app.handle(
+        new Request("http://localhost/v1/youtube/video/list", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ handle: "   ", accessToken: "   " }),
+        }),
+      );
+      const elapsedMs = performance.now() - t0;
+      expect(ytRes.status).toBe(400);
+      expect(elapsedMs).toBeLessThan(150);
+      const ytBody = (await ytRes.json()) as any;
+      expect(ytBody.success).toBe(false);
+
+      // 2. /v2/admin/mail/send rejects >50 comma-separated recipients with HTTP 400
+      const tooManyRecipients = Array.from(
+        { length: 51 },
+        (_, i) => `user${i}@example.com`,
+      ).join(", ");
+      const mailRes = await app.handle(
+        new Request("http://localhost/v2/admin/mail/send", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-admin-token": "test-admin-secret",
+          },
+          body: JSON.stringify({
+            to: tooManyRecipients,
+            subject: "Bulk test",
+            text: "Hello",
+          }),
+        }),
+      );
+      expect(mailRes.status).toBe(400);
+      const mailBody = (await mailRes.json()) as any;
+      expect(mailBody.success).toBe(false);
+      expect(mailBody.error).toContain("maximum 50");
+    } finally {
+      if (prevToken === undefined) delete process.env.ADMIN_TOKEN;
+      else process.env.ADMIN_TOKEN = prevToken;
+    }
+  });
 });

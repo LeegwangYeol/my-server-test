@@ -6,7 +6,9 @@ export const v1Reply = (app: any) => {
   app.post(
     "/reply",
     async ({ body, set }: { body: any; set: any }) => {
-      const { parentId, text, accessToken } = body;
+      const parentId = String(body?.parentId ?? "").trim();
+      const text = String(body?.text ?? "").trim();
+      const accessToken = String(body?.accessToken ?? "").trim();
 
       if (!parentId) {
         set.status = 400;

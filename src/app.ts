@@ -34,11 +34,12 @@ function extractMediaType(rawContentType?: string | null): string {
     .toLowerCase();
 }
 
-async function readBoundedBodyText(
+async function readBoundedBodyBytes(
   request: Request,
   maxBytes: number,
-): Promise<string> {
-  if (!request.body) return "";
+  errToken = "PAYLOAD_TOO_LARGE",
+): Promise<Uint8Array> {
+  if (!request.body) return new Uint8Array(0);
   const reader = request.body.getReader();
   const chunks: Uint8Array[] = [];
   let totalBytes = 0;
@@ -49,8 +50,8 @@ async function readBoundedBodyText(
       if (value && value.byteLength > 0) {
         totalBytes += value.byteLength;
         if (totalBytes > maxBytes) {
-          await reader.cancel("PAYLOAD_TOO_LARGE").catch(() => {});
-          throw new Error("PAYLOAD_TOO_LARGE");
+          await reader.cancel(errToken).catch(() => {});
+          throw new Error(errToken);
         }
         chunks.push(value);
       }
@@ -62,15 +63,24 @@ async function readBoundedBodyText(
       /* noop */
     }
   }
-  if (chunks.length === 0) return "";
-  if (chunks.length === 1) return new TextDecoder("utf-8").decode(chunks[0]);
+  if (chunks.length === 0) return new Uint8Array(0);
+  if (chunks.length === 1) return chunks[0];
   const merged = new Uint8Array(totalBytes);
   let offset = 0;
   for (const chunk of chunks) {
     merged.set(chunk, offset);
     offset += chunk.byteLength;
   }
-  return new TextDecoder("utf-8").decode(merged);
+  return merged;
+}
+
+async function readBoundedBodyText(
+  request: Request,
+  maxBytes: number,
+): Promise<string> {
+  const bytes = await readBoundedBodyBytes(request, maxBytes, "PAYLOAD_TOO_LARGE");
+  if (bytes.byteLength === 0) return "";
+  return new TextDecoder("utf-8").decode(bytes);
 }
 
 export const createApp = async (serverless = false) => {
@@ -108,15 +118,35 @@ export const createApp = async (serverless = false) => {
         normPath === "/v2/admin/widgets/upload-icon";
 
       const contentLength = request.headers.get("content-length");
-      if (contentLength) {
-        const size = parseInt(contentLength, 10);
+      if (contentLength !== null) {
         const limit = isUpload ? MAX_UPLOAD_BODY_SIZE : MAX_REQUEST_BODY_SIZE;
-        if (!isNaN(size) && size > limit) {
+        const parts = contentLength
+          .split(",")
+          .map((s) => s.trim())
+          .filter((s) => s.length > 0);
+        if (parts.length === 0 || parts.some((p) => !/^\d+$/.test(p))) {
+          set.status = 400;
+          applyCorsHeaders();
+          return {
+            success: false,
+            error: "Bad Request: invalid Content-Length header",
+          };
+        }
+        const sizes = parts.map((p) => Number(p));
+        if (sizes.some((sz) => !Number.isSafeInteger(sz) || sz > limit)) {
           set.status = 413;
           applyCorsHeaders();
           return {
             success: false,
             error: `Payload Too Large: request body exceeds ${isUpload ? "2MB" : "1MB"} limit`,
+          };
+        }
+        if (new Set(sizes).size > 1) {
+          set.status = 400;
+          applyCorsHeaders();
+          return {
+            success: false,
+            error: "Bad Request: conflicting Content-Length header values",
           };
         }
       }
@@ -163,12 +193,19 @@ export const createApp = async (serverless = false) => {
         "retry-after, x-ratelimit-limit, x-ratelimit-remaining, x-ratelimit-reset";
     })
     .onError(({ request, error, code, set }: any) => {
+      const errStr = [
+        error?.message,
+        (error as any)?.cause?.message,
+        String(error),
+      ]
+        .filter(Boolean)
+        .join(" ");
+
       if (
-        (code === "PARSE" || error?.message === "PAYLOAD_TOO_LARGE") &&
-        (error?.message?.includes("PAYLOAD_TOO_LARGE") ||
-          (error as any)?.cause?.message?.includes("PAYLOAD_TOO_LARGE") ||
-          String(error).includes("PAYLOAD_TOO_LARGE"))
+        (code === "PARSE" || errStr.includes("PAYLOAD_TOO_LARGE")) &&
+        errStr.includes("PAYLOAD_TOO_LARGE")
       ) {
+        const is2Mb = errStr.includes("PAYLOAD_TOO_LARGE_2MB");
         set.status = 413;
         const origin = request?.headers?.get?.("origin");
         if (origin) {
@@ -181,7 +218,7 @@ export const createApp = async (serverless = false) => {
         }
         return {
           success: false,
-          error: "Payload Too Large: request body exceeds 1MB limit",
+          error: `Payload Too Large: request body exceeds ${is2Mb ? "2MB" : "1MB"} limit`,
         };
       }
 
@@ -219,7 +256,27 @@ export const createApp = async (serverless = false) => {
           pathname = "/";
         }
         if (normalizePathname(pathname) === "/v2/admin/widgets/upload-icon") {
-          return;
+          const rawCt =
+            request.headers.get("content-type") || "multipart/form-data";
+          const bytes = await readBoundedBodyBytes(
+            request,
+            MAX_UPLOAD_BODY_SIZE,
+            "PAYLOAD_TOO_LARGE_2MB",
+          );
+          if (bytes.byteLength === 0) return {};
+          const fd = await new Response(bytes as unknown as BodyInit, {
+            headers: { "content-type": rawCt },
+          }).formData();
+          const parsed: Record<string, unknown> = {};
+          fd.forEach((value, key) => {
+            if (key in parsed) {
+              const prev = parsed[key];
+              parsed[key] = Array.isArray(prev) ? [...prev, value] : [prev, value];
+            } else {
+              parsed[key] = value;
+            }
+          });
+          return parsed;
         }
         // Non-upload routes must never buffer >1MB multipart streams
         await readBoundedBodyText(request, MAX_REQUEST_BODY_SIZE);

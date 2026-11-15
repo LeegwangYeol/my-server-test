@@ -65,6 +65,10 @@ export const v2MailEndpoints = async (app: any) => {
           set.status = 400;
           return { success: false, error: "invalid email format" };
         }
+        if (recipients.length > 50) {
+          set.status = 400;
+          return { success: false, error: "too many recipients (maximum 50)" };
+        }
         if (!subject) {
           set.status = 400;
           return { success: false, error: "subject required" };
@@ -82,6 +86,19 @@ export const v2MailEndpoints = async (app: any) => {
           return { success: false, error: "text or html required" };
         }
 
+        const rawIdempotencyKey = (
+          headers["idempotency-key"] ||
+          headers["x-idempotency-key"] ||
+          ""
+        ).trim();
+        if (rawIdempotencyKey.length > 256) {
+          set.status = 400;
+          return {
+            success: false,
+            error: "idempotency-key exceeds maximum length of 256 characters",
+          };
+        }
+
         if (!isNaverMailConfigured()) {
           set.status = 500;
           return {
@@ -91,10 +108,7 @@ export const v2MailEndpoints = async (app: any) => {
           };
         }
 
-        const idempotencyKey =
-          (headers["idempotency-key"] ||
-            headers["x-idempotency-key"] ||
-            "").trim() || undefined;
+        const idempotencyKey = rawIdempotencyKey || undefined;
 
         try {
           const result = await sendNaverMail(

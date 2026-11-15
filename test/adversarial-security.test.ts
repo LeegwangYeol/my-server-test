@@ -559,5 +559,152 @@ describe("Adversarial Security Test Suite (Requirement R2)", () => {
         }
       });
     });
+
+    describe("2.7 2026-11-16 Hardening Regressions (Header Smuggling, Chunked Upload, Upstream 4xx, Reset Recovery)", () => {
+      test("rejects Content-Length comma-smuggling ('10, 2097152') with HTTP 413 and conflicting values ('10, 20') with HTTP 400", async () => {
+        const resSmuggled413 = await postJson(
+          app,
+          "/v2/ask",
+          { widgetId: VALID_WIDGET_ID, message: "hi" },
+          { "content-length": "10, 2097152" },
+        );
+        expect(resSmuggled413.status).toBe(413);
+
+        const resConflict400 = await postJson(
+          app,
+          "/v2/ask",
+          { widgetId: VALID_WIDGET_ID, message: "hi" },
+          { "content-length": "10, 20" },
+        );
+        expect(resConflict400.status).toBe(400);
+
+        const resNegative400 = await postJson(
+          app,
+          "/v2/ask",
+          { widgetId: VALID_WIDGET_ID, message: "hi" },
+          { "content-length": "-5" },
+        );
+        expect(resNegative400.status).toBe(400);
+      });
+
+      test("rejects chunked >2MB multipart/form-data stream on /v2/admin/widgets/upload-icon with HTTP 413", async () => {
+        const boundary = "----TokkiChunkedBoundary9912";
+        const headerBytes = new TextEncoder().encode(
+          `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="huge.png"\r\nContent-Type: image/png\r\n\r\n`,
+        );
+        const tailBytes = new TextEncoder().encode(`\r\n--${boundary}--\r\n`);
+        const chunk256k = new Uint8Array(256 * 1024).fill(0x41);
+
+        let sentChunks = 0;
+        const stream = new ReadableStream<Uint8Array>({
+          pull(controller) {
+            if (sentChunks === 0) {
+              controller.enqueue(headerBytes);
+              sentChunks++;
+              return;
+            }
+            // 9 * 256KB = 2.25MB > 2MB limit
+            if (sentChunks <= 9) {
+              controller.enqueue(chunk256k);
+              sentChunks++;
+              return;
+            }
+            controller.enqueue(tailBytes);
+            controller.close();
+          },
+        });
+
+        const res = await app.handle(
+          new Request("http://localhost/v2/admin/widgets/upload-icon", {
+            method: "POST",
+            headers: {
+              "content-type": `multipart/form-data; boundary=${boundary}`,
+            },
+            body: stream,
+            // @ts-ignore - Bun/Undici streaming request body
+            duplex: "half",
+          }),
+        );
+        expect(res.status).toBe(413);
+        const body = (await res.json()) as any;
+        expect(body.success).toBe(false);
+        expect(body.error).toContain("2MB");
+      });
+
+      test("accepts widgetId: null and threadId: null on /v2/widget/view without 422 validation error", async () => {
+        const res = await postJson(app, "/v2/widget/view", {
+          widgetId: null,
+          threadId: null,
+        });
+        expect(res.status).toBe(200);
+        const body = (await res.json()) as any;
+        expect(body.thread_id).toBe("");
+      });
+
+      test("RotatingLLMProvider.preStreamHandshake throws UPSTREAM_CLIENT_ERROR on non-200 upstream 4xx instead of silent empty 200", async () => {
+        const { MemoryKeyStore } = await import("../lib/llm/key-manager/stores/memory");
+        const { RotatingLLMProvider } = await import("../lib/llm/rotating-provider");
+        const { KeyManagerError } = await import("../lib/llm/key-manager");
+
+        const store = new MemoryKeyStore();
+        const keyMap = new Map<string, any>([
+          ["k1", { id: "k1", apiKey: "sk-1", accountId: "acc-1", maxConcurrency: 5, weight: 100 }],
+        ]);
+        const provider = new RotatingLLMProvider(store, keyMap);
+
+        const originalFetch = globalThis.fetch;
+        try {
+          globalThis.fetch = (async () =>
+            new Response(
+              JSON.stringify({ error: { message: "Context length exceeded", code: 400 } }),
+              { status: 400, headers: { "content-type": "application/json" } },
+            )) as any;
+
+          let caught: any = null;
+          try {
+            await provider.preStreamHandshake({
+              messages: [{ role: "user", content: "bad request test" }],
+            });
+          } catch (err) {
+            caught = err;
+          }
+
+          expect(caught).toBeInstanceOf(KeyManagerError);
+          expect(caught.code).toBe("UPSTREAM_CLIENT_ERROR");
+          expect(caught.statusCode).toBe(400);
+
+          const states = await store.getAllStates();
+          expect(states[0].inFlightRequests).toBe(0);
+        } finally {
+          globalThis.fetch = originalFetch;
+        }
+      });
+
+      test("MemoryKeyStore.resetKeyToActive clears brokenAccounts after 402 exhaustion so key is immediately selectable", async () => {
+        const { MemoryKeyStore } = await import("../lib/llm/key-manager/stores/memory");
+
+        const store = new MemoryKeyStore();
+        await store.syncKeys([
+          { id: "k-402", apiKey: "sk-402", accountId: "acc-topped-up", maxConcurrency: 5, weight: 100 },
+        ]);
+
+        const firstLease = await store.reserveKey();
+        expect(firstLease?.keyId).toBe("k-402");
+
+        await store.releaseKey(firstLease!.keyId, firstLease!.leaseToken, 402, 0, "Insufficient credits");
+
+        // While broken, reserveKey returns null
+        const blockedLease = await store.reserveKey();
+        expect(blockedLease).toBeNull();
+
+        // Operator tops up credits and resets key -> account-level broken flag MUST also clear
+        await store.resetKeyToActive("k-402");
+        const recoveredLease = await store.reserveKey();
+        expect(recoveredLease).not.toBeNull();
+        expect(recoveredLease?.keyId).toBe("k-402");
+
+        await store.releaseKey(recoveredLease!.keyId, recoveredLease!.leaseToken, 200);
+      });
+    });
   });
 });

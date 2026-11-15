@@ -90,9 +90,41 @@ export const v2SmsEndpoints = async (app: any) => {
           };
         }
 
+        const rawIdem = (
+          headers["idempotency-key"] ||
+          headers["x-idempotency-key"] ||
+          ""
+        ).trim();
+        if (rawIdem.length > 256) {
+          set.status = 400;
+          return {
+            success: false,
+            error: "idempotency-key exceeds maximum length of 256 characters",
+          };
+        }
+        const idempotencyKey = rawIdem || undefined;
+
         try {
-          const result = await sendSms({ phoneNumber: to, text });
-          if (!result.ok) set.status = 502;
+          const result = await sendSms(
+            { phoneNumber: to, text },
+            { idempotencyKey },
+          );
+          if (result.queued) {
+            set.status = 202;
+            return {
+              success: true,
+              queued: true,
+              jobId: result.jobId,
+              provider: result.provider,
+              status: "queued_for_retry",
+              message:
+                "SMS provider 429 rate limit encountered. SMS enqueued for automatic retry without message loss.",
+            };
+          }
+          if (!result.ok) {
+            const detailStatus = (result.detail as { status?: number } | undefined)?.status;
+            set.status = detailStatus === 504 ? 504 : 502;
+          }
           return { success: result.ok, ...result };
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);

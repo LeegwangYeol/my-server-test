@@ -6,7 +6,9 @@ export const v1ReplyList = (app: any) => {
   app.post(
     "/reply/list",
     async ({ body, set }: { body: any; set: any }) => {
-      const { parentId, accessToken, maxResults, pageToken } = body;
+      const { maxResults, pageToken } = body;
+      const parentId = String(body?.parentId ?? "").trim();
+      const accessToken = String(body?.accessToken ?? "").trim();
 
       if (!parentId) {
         set.status = 400;

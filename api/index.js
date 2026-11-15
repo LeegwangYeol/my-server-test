@@ -701922,7 +701922,30 @@ var v1Comment = (app) => {
   app.post(
     "/comment",
     async ({ body, set }) => {
-      const { accessToken, videoId, commentText } = body;
+      const accessToken = String(body?.accessToken ?? "").trim();
+      const videoId = String(body?.videoId ?? "").trim();
+      const commentText = String(body?.commentText ?? "").trim();
+      if (!videoId) {
+        set.status = 400;
+        return {
+          success: false,
+          message: "videoId \uAC12\uC774 \uC81C\uACF5\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4."
+        };
+      }
+      if (!commentText) {
+        set.status = 400;
+        return {
+          success: false,
+          message: "\uB313\uAE00 \uB0B4\uC6A9\uC774 \uC81C\uACF5\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4."
+        };
+      }
+      if (!accessToken) {
+        set.status = 400;
+        return {
+          success: false,
+          message: "accessToken \uAC12\uC774 \uC81C\uACF5\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4."
+        };
+      }
       try {
         const oauth2Client = new import_googleapis2.google.auth.OAuth2();
         oauth2Client.setCredentials({ access_token: accessToken });
@@ -702036,7 +702059,9 @@ var v1CommentList = (app) => {
   app.post(
     "/comment/list",
     async ({ body, set }) => {
-      const { videoId, accessToken, maxResults, pageToken, textFormat, order } = body;
+      const { maxResults, pageToken, textFormat, order } = body;
+      const videoId = String(body?.videoId ?? "").trim();
+      const accessToken = String(body?.accessToken ?? "").trim();
       if (!videoId) {
         set.status = 400;
         return {
@@ -702162,7 +702187,8 @@ var v1CommentDelete = (app) => {
   app.post(
     "/comment/delete",
     async ({ body, set }) => {
-      const { commentId, accessToken } = body;
+      const commentId = String(body?.commentId ?? "").trim();
+      const accessToken = String(body?.accessToken ?? "").trim();
       if (!commentId) {
         set.status = 400;
         return {
@@ -702247,7 +702273,9 @@ var v1Reply = (app) => {
   app.post(
     "/reply",
     async ({ body, set }) => {
-      const { parentId, text, accessToken } = body;
+      const parentId = String(body?.parentId ?? "").trim();
+      const text = String(body?.text ?? "").trim();
+      const accessToken = String(body?.accessToken ?? "").trim();
       if (!parentId) {
         set.status = 400;
         return {
@@ -702345,7 +702373,9 @@ var v1ReplyList = (app) => {
   app.post(
     "/reply/list",
     async ({ body, set }) => {
-      const { parentId, accessToken, maxResults, pageToken } = body;
+      const { maxResults, pageToken } = body;
+      const parentId = String(body?.parentId ?? "").trim();
+      const accessToken = String(body?.accessToken ?? "").trim();
       if (!parentId) {
         set.status = 400;
         return {
@@ -702495,7 +702525,8 @@ var v1ChannelInfo = (app) => {
   app.post(
     "/channel/info",
     async ({ body, set }) => {
-      const { accessToken, maxResults, pageToken } = body;
+      const { maxResults, pageToken } = body;
+      const accessToken = String(body?.accessToken ?? "").trim();
       if (!accessToken) {
         set.status = 400;
         return {
@@ -702596,7 +702627,23 @@ var v1VideoList = (app) => {
   app.post(
     "/video/list",
     async ({ body, set }) => {
-      const { handle, accessToken, maxResults, pageToken } = body;
+      const { maxResults, pageToken } = body;
+      const handle = String(body?.handle ?? "").trim();
+      const accessToken = String(body?.accessToken ?? "").trim();
+      if (!handle) {
+        set.status = 400;
+        return {
+          success: false,
+          message: "handle \uAC12\uC774 \uC81C\uACF5\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4."
+        };
+      }
+      if (!accessToken) {
+        set.status = 400;
+        return {
+          success: false,
+          message: "accessToken \uAC12\uC774 \uC81C\uACF5\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4."
+        };
+      }
       try {
         const oauth2Client = new import_googleapis8.google.auth.OAuth2();
         oauth2Client.setCredentials({ access_token: accessToken });
@@ -712198,6 +712245,9 @@ var MemoryKeyStore = class {
       record.canaryToken = void 0;
       record.lastStatusCode = null;
       record.lastErrorMessage = null;
+      if (record.config.accountId) {
+        this.brokenAccounts.delete(record.config.accountId);
+      }
     }
   }
   // --- Internal Utilities ---
@@ -712266,7 +712316,7 @@ var RotatingLLMProvider = class {
    */
   async preStreamHandshake(req, clientSignal) {
     await this.ensureSynced();
-    return executeWithResilientFailover(
+    const handshake = await executeWithResilientFailover(
       this.keyStore,
       this.keyConfigMap,
       async (apiKey, attemptSignal) => {
@@ -712293,6 +712343,16 @@ var RotatingLLMProvider = class {
       clientSignal,
       this.perAttemptTimeoutMs
     );
+    if (!handshake.response.ok) {
+      const errBody = await handshake.response.text().catch(() => "");
+      throw new KeyManagerError(
+        `UPSTREAM_CLIENT_ERROR (${handshake.response.status}): ${errBody.slice(0, 200) || handshake.response.statusText}`,
+        handshake.response.status,
+        void 0,
+        "UPSTREAM_CLIENT_ERROR"
+      );
+    }
+    return handshake;
   }
   /**
    * Phase 2: Stream Consumption
@@ -712864,19 +712924,27 @@ var UpstashRedisKeyStore = class {
    * Manually resets an exhausted or rate-limited key back to active.
    */
   async resetKeyToActive(keyId) {
+    const statesBefore = await this.memoryFallback.getAllStates();
+    const accountId = statesBefore.find((s) => s.id === keyId)?.accountId;
     await this.memoryFallback.resetKeyToActive(keyId);
     if (this.isStorageBreakerOpen()) return;
     try {
-      await this.execCommand(
-        "HSET",
-        `openrouter:key:${keyId}`,
-        "state",
-        "ACTIVE",
-        "consecutive_429s",
-        "0",
-        "consecutive_failures",
-        "0"
-      );
+      const pipeline = [
+        [
+          "HSET",
+          `openrouter:key:${keyId}`,
+          "state",
+          "ACTIVE",
+          "consecutive_429s",
+          "0",
+          "consecutive_failures",
+          "0"
+        ]
+      ];
+      if (accountId) {
+        pipeline.push(["DEL", `openrouter:account:${accountId}:broken`]);
+      }
+      await this.execPipeline(pipeline);
       this.recordSuccess();
     } catch (err) {
       this.recordFailure(err);
@@ -713611,6 +713679,7 @@ var FallbackQueue = class {
   }
 };
 var mailFallbackQueue = new FallbackQueue("mail", 5e3);
+var smsFallbackQueue = new FallbackQueue("sms", 5e3);
 var dbFallbackQueue = new FallbackQueue("db", 5e3);
 var generalFallbackQueue = new FallbackQueue("general", 5e3);
 var sleep3 = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -713777,6 +713846,19 @@ async function appendMessage(threadId, role, content, options) {
       );
       return true;
     }
+    if (execRes.success && allowQueue) {
+      if (dbFallbackQueue.getReadyJobs().length > 0) {
+        await processDbQueue().catch((drainErr) => {
+          console.warn(
+            "[chat-store] opportunistic processDbQueue drain warning:",
+            drainErr?.message || drainErr
+          );
+        });
+      }
+      if (dbFallbackQueue.size > 100) {
+        dbFallbackQueue.prune();
+      }
+    }
     return execRes.success;
   } catch (err) {
     console.error("[chat-store] appendMessage failed:", err?.message || err);
@@ -713817,6 +713899,17 @@ var defaultDbInsert = async (payload) => {
   }
 };
 registerDefaultDbHandler(defaultDbInsert);
+async function processDbQueue(insertFn) {
+  return dbFallbackQueue.processPending(
+    async (job) => {
+      const payload = job.payload;
+      if (insertFn) {
+        return await insertFn(payload);
+      }
+      return await defaultDbInsert(payload);
+    }
+  );
+}
 async function listWidgets(limit = 1e3) {
   const safeLimit = Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 2e3) : 1e3;
   try {
@@ -714087,7 +714180,17 @@ async function upsertWidget(input) {
     patch.suggested_questions = input.suggested_questions;
   if (input.icon_url !== void 0) {
     const v = input.icon_url?.trim();
-    patch.icon_url = v ? v : null;
+    if (v) {
+      if (v.length > 2048 || !/^(?:https?:\/\/|\/)[^\s<>"'`\x00-\x1f]*$/i.test(v)) {
+        return {
+          row: null,
+          error: "invalid icon_url (must be http(s):// or relative / path)"
+        };
+      }
+      patch.icon_url = v;
+    } else {
+      patch.icon_url = null;
+    }
   }
   if (input.chat_bubble_size !== void 0) {
     const v = input.chat_bubble_size?.trim();
@@ -714187,8 +714290,8 @@ var v2WidgetEndpoints = async (app) => {
       },
       {
         body: t.Object({
-          widgetId: t.Optional(t.String({ maxLength: 100 })),
-          threadId: t.Optional(t.String({ maxLength: 100 }))
+          widgetId: t.Optional(t.Union([t.String({ maxLength: 100 }), t.Null()])),
+          threadId: t.Optional(t.Union([t.String({ maxLength: 100 }), t.Null()]))
         }),
         detail: {
           tags: ["API"],
@@ -714497,6 +714600,14 @@ var v2WidgetEndpoints = async (app) => {
               set.status = 499;
               return { success: false, error: "Client aborted request." };
             }
+            if (err?.code === "UPSTREAM_CLIENT_ERROR") {
+              set.status = err?.statusCode === 413 ? 413 : 502;
+              return {
+                success: false,
+                error: err?.message || "Upstream AI provider rejected the request payload.",
+                code: "UPSTREAM_CLIENT_ERROR"
+              };
+            }
             set.status = 500;
             return {
               success: false,
@@ -714645,6 +714756,16 @@ var v2WidgetEndpoints = async (app) => {
             error: `id exceeds maximum length of ${MAX_WIDGET_ID_CHARS2} characters`
           };
         }
+        if (typeof body?.icon_url === "string") {
+          const trimmedIconUrl = body.icon_url.trim();
+          if (trimmedIconUrl.length > 0 && (trimmedIconUrl.length > 2048 || !/^(?:https?:\/\/|\/)[^\s<>"'`\x00-\x1f]*$/i.test(trimmedIconUrl))) {
+            set.status = 400;
+            return {
+              success: false,
+              error: "invalid icon_url (must be http(s):// or relative / path)"
+            };
+          }
+        }
         const result = await upsertWidget({
           id,
           name: body?.name,
@@ -714766,6 +714887,13 @@ var v2WidgetEndpoints = async (app) => {
         if (!widgetId) {
           set.status = 400;
           return { success: false, error: "widgetId required" };
+        }
+        if (widgetId.length > MAX_WIDGET_ID_CHARS2) {
+          set.status = 400;
+          return {
+            success: false,
+            error: `widgetId exceeds maximum length of ${MAX_WIDGET_ID_CHARS2} characters`
+          };
         }
         if (!file2) {
           set.status = 400;
@@ -715174,6 +715302,19 @@ async function sendNaverMail(input, options) {
       };
     }
     if (execRes.result) {
+      if (allowQueue) {
+        if (mailFallbackQueue.getReadyJobs().length > 0) {
+          await processMailQueue().catch((drainErr) => {
+            console.warn(
+              "[lib/mail/naver] opportunistic processMailQueue drain warning:",
+              drainErr?.message || drainErr
+            );
+          });
+        }
+        if (mailFallbackQueue.size > 100) {
+          mailFallbackQueue.prune();
+        }
+      }
       return execRes.result;
     }
     throw execRes.error || new Error("Failed to send mail");
@@ -715183,6 +715324,12 @@ async function sendNaverMail(input, options) {
     console.error("[lib/mail/naver] sendNaverMail error:", message);
     throw explainSmtpError(err);
   }
+}
+async function processMailQueue() {
+  return mailFallbackQueue.processPending(async (job) => {
+    const res = await sendNaverMail(job.payload, { allowQueue: false });
+    return res.rejected.length === 0;
+  });
 }
 
 // src/endpoints/v2/mail-endpoints.ts
@@ -715224,6 +715371,10 @@ var v2MailEndpoints = async (app) => {
           set.status = 400;
           return { success: false, error: "invalid email format" };
         }
+        if (recipients.length > 50) {
+          set.status = 400;
+          return { success: false, error: "too many recipients (maximum 50)" };
+        }
         if (!subject) {
           set.status = 400;
           return { success: false, error: "subject required" };
@@ -715240,6 +715391,14 @@ var v2MailEndpoints = async (app) => {
           set.status = 400;
           return { success: false, error: "text or html required" };
         }
+        const rawIdempotencyKey = (headers["idempotency-key"] || headers["x-idempotency-key"] || "").trim();
+        if (rawIdempotencyKey.length > 256) {
+          set.status = 400;
+          return {
+            success: false,
+            error: "idempotency-key exceeds maximum length of 256 characters"
+          };
+        }
         if (!isNaverMailConfigured()) {
           set.status = 500;
           return {
@@ -715247,7 +715406,7 @@ var v2MailEndpoints = async (app) => {
             error: "\uB124\uC774\uBC84 SMTP \uBBF8\uC124\uC815 \u2014 NAVER_ID+NAVER_APP_PASSWORD \uB610\uB294 NAVER_MAIL_USER+NAVER_MAIL_PASSWORD \uD658\uACBD\uBCC0\uC218 \uD544\uC694."
           };
         }
-        const idempotencyKey = (headers["idempotency-key"] || headers["x-idempotency-key"] || "").trim() || void 0;
+        const idempotencyKey = rawIdempotencyKey || void 0;
         try {
           const result = await sendNaverMail(
             {
@@ -715340,6 +715499,59 @@ var v2MailEndpoints = async (app) => {
 // lib/sms/pushbullet.ts
 var DEFAULT_API_URL = "https://api.pushbullet.com";
 var DEFAULT_TIMEOUT_MS = 5e3;
+var RETRYABLE_PUSHBULLET_STATUS = /* @__PURE__ */ new Set([429, 502, 503, 504]);
+var MAX_PUSHBULLET_WAIT_MS = 2500;
+function parsePushbulletRetryMs(headers) {
+  const retryAfter = headers.get("retry-after")?.trim();
+  if (retryAfter) {
+    if (/^\d+(\.\d+)?$/.test(retryAfter)) {
+      const sec = parseFloat(retryAfter);
+      if (Number.isFinite(sec) && sec >= 0) {
+        return Math.ceil(sec * 1e3) + 100 + Math.floor(Math.random() * 250);
+      }
+    }
+    const parsedDate = Date.parse(retryAfter);
+    if (!Number.isNaN(parsedDate)) {
+      const diff = parsedDate - Date.now();
+      if (diff > 0) {
+        return Math.ceil(diff) + 100 + Math.floor(Math.random() * 250);
+      }
+    }
+  }
+  const reset = headers.get("x-ratelimit-reset")?.trim();
+  if (reset && /^\d+$/.test(reset)) {
+    const epochSec = parseInt(reset, 10);
+    if (Number.isFinite(epochSec) && epochSec > 1e9) {
+      const diff = epochSec * 1e3 - Date.now();
+      if (diff > 0) {
+        return Math.ceil(diff) + 100 + Math.floor(Math.random() * 250);
+      }
+    }
+  }
+  return void 0;
+}
+async function fetchPushbulletWithRetry(url, init) {
+  const rawMax = Number.parseInt(process.env.PUSHBULLET_RETRY_MAX ?? "2", 10);
+  const maxRetries = Number.isInteger(rawMax) ? Math.max(0, Math.min(3, rawMax)) : 2;
+  for (let attempt = 0; ; attempt++) {
+    const res = await fetch(url, {
+      ...init,
+      signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS)
+    });
+    if (res.ok || !RETRYABLE_PUSHBULLET_STATUS.has(res.status) || attempt >= maxRetries) {
+      return res;
+    }
+    const headerWait = parsePushbulletRetryMs(res.headers);
+    const expCap = Math.min(MAX_PUSHBULLET_WAIT_MS, 300 * Math.pow(2, attempt));
+    const waitMs = headerWait !== void 0 ? headerWait : Math.max(50, Math.floor(Math.random() * expCap) + 100);
+    if (waitMs > MAX_PUSHBULLET_WAIT_MS) {
+      return res;
+    }
+    void res.body?.cancel().catch(() => {
+    });
+    await new Promise((resolve) => setTimeout(resolve, waitMs));
+  }
+}
 function getPushbulletConfig() {
   const envMode = process.env.PUSHBULLET_ENV?.trim().toLowerCase();
   const mode = envMode === "prod" ? "PROD" : "TEST";
@@ -715365,9 +715577,8 @@ async function resolveDeviceIden(base, token, conf) {
   }
   let res;
   try {
-    res = await fetch(`${base}/v2/devices`, {
-      headers: { "access-token": token },
-      signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS)
+    res = await fetchPushbulletWithRetry(`${base}/v2/devices`, {
+      headers: { "access-token": token }
     });
   } catch (err) {
     const errorObj = err;
@@ -715426,7 +715637,7 @@ async function sendViaPushbullet({
         error: err instanceof Error ? err.message : String(err)
       };
     }
-    const res = await fetch(`${base}/v2/texts`, {
+    const res = await fetchPushbulletWithRetry(`${base}/v2/texts`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -715438,8 +715649,7 @@ async function sendViaPushbullet({
           addresses: [phoneNumber],
           message: text
         }
-      }),
-      signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS)
+      })
     });
     let raw;
     try {
@@ -715448,11 +715658,16 @@ async function sendViaPushbullet({
     }
     const parsed = raw;
     let errorMessage;
+    let retryAfterSeconds;
     if (!res.ok) {
       if (parsed?.error?.message) {
         errorMessage = parsed.error.message;
       } else {
         errorMessage = `Pushbullet API returned HTTP ${res.status}`;
+      }
+      if (res.status === 429) {
+        const retryMs = parsePushbulletRetryMs(res.headers);
+        retryAfterSeconds = retryMs ? Math.max(1, Math.ceil(retryMs / 1e3)) : 5;
       }
     }
     return {
@@ -715461,7 +715676,8 @@ async function sendViaPushbullet({
       status: res.status,
       iden: parsed?.iden,
       raw,
-      ...errorMessage ? { error: errorMessage } : {}
+      ...errorMessage ? { error: errorMessage } : {},
+      ...retryAfterSeconds !== void 0 ? { retryAfterSeconds } : {}
     };
   } catch (err) {
     const errorObj = err;
@@ -715493,10 +715709,7 @@ function isSmsConfigured() {
   if (provider in LOCAL_ONLY) return false;
   return isPushbulletConfigured();
 }
-async function sendSms({
-  phoneNumber,
-  text
-}) {
+async function sendSms({ phoneNumber, text }, options) {
   const provider = activeProvider();
   const localOnly = LOCAL_ONLY[provider];
   if (localOnly) {
@@ -715504,8 +715717,57 @@ async function sendSms({
       `SMS_PROVIDER=${provider} \uB294 \uB9E5 \uB85C\uCEEC \uC804\uC6A9\uC774\uB77C \uC11C\uBC84\uC5D0\uC11C \uC2E4\uD589\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4. \uAD6C\uD604\uCCB4: ${localOnly}. \uC77C\uAD04 \uBC1C\uC1A1\uC740 \uB85C\uCEEC\uC5D0\uC11C npm run greetings \uB97C \uC4F0\uACE0, \uC11C\uBC84\uC5D0\uC11C \uBCF4\uB0B4\uC57C \uD558\uBA74 SMS_PROVIDER=pushbullet \uC744 \uC4F0\uC138\uC694.`
     );
   }
+  const allowQueue = options?.allowQueue !== false;
   const detail = await sendViaPushbullet({ phoneNumber, text });
+  if (!detail.ok && detail.status === 429 && allowQueue) {
+    const initialDelayMs = detail.retryAfterSeconds ? Math.min(3e4, detail.retryAfterSeconds * 1e3) : void 0;
+    const job = smsFallbackQueue.enqueue(
+      { phoneNumber, text },
+      {
+        type: "sms",
+        idempotencyKey: options?.idempotencyKey,
+        initialDelayMs,
+        lastError: detail.error ?? "Pushbullet HTTP 429"
+      }
+    );
+    return {
+      ok: true,
+      provider,
+      detail,
+      queued: true,
+      jobId: job.id
+    };
+  }
+  if (detail.ok && allowQueue) {
+    if (smsFallbackQueue.getReadyJobs().length > 0) {
+      await processSmsQueue().catch((drainErr) => {
+        console.warn(
+          "[lib/sms] opportunistic processSmsQueue drain warning:",
+          drainErr?.message || drainErr
+        );
+      });
+    }
+    if (smsFallbackQueue.size > 100) {
+      smsFallbackQueue.prune();
+    }
+  }
   return { ok: detail.ok, provider, detail };
+}
+async function processSmsQueue() {
+  return smsFallbackQueue.processPending(async (job) => {
+    const res = await sendSms(job.payload, { allowQueue: false });
+    if (!res.ok) {
+      const detail = res.detail;
+      if (detail?.status === 429) {
+        const err = new Error(detail.error || "Pushbullet HTTP 429");
+        err.status = 429;
+        if (detail.retryAfterSeconds) err.retryAfterSeconds = detail.retryAfterSeconds;
+        throw err;
+      }
+      return false;
+    }
+    return true;
+  });
 }
 
 // src/endpoints/v2/sms-endpoints.ts
@@ -715567,9 +715829,35 @@ var v2SmsEndpoints = async (app) => {
             error: `SMS provider(${activeProvider()}) \uD658\uACBD\uBCC0\uC218 \uBBF8\uC124\uC815 \u2014 PUSHBULLET_ACCESS_TOKEN \uACFC (PUSHBULLET_DEVICE_NICKNAME \uB610\uB294 PUSHBULLET_DEVICE_IDEN) \uC744 \uD655\uC778\uD558\uC138\uC694.`
           };
         }
+        const rawIdem = (headers["idempotency-key"] || headers["x-idempotency-key"] || "").trim();
+        if (rawIdem.length > 256) {
+          set.status = 400;
+          return {
+            success: false,
+            error: "idempotency-key exceeds maximum length of 256 characters"
+          };
+        }
+        const idempotencyKey = rawIdem || void 0;
         try {
-          const result = await sendSms({ phoneNumber: to, text });
-          if (!result.ok) set.status = 502;
+          const result = await sendSms(
+            { phoneNumber: to, text },
+            { idempotencyKey }
+          );
+          if (result.queued) {
+            set.status = 202;
+            return {
+              success: true,
+              queued: true,
+              jobId: result.jobId,
+              provider: result.provider,
+              status: "queued_for_retry",
+              message: "SMS provider 429 rate limit encountered. SMS enqueued for automatic retry without message loss."
+            };
+          }
+          if (!result.ok) {
+            const detailStatus = result.detail?.status;
+            set.status = detailStatus === 504 ? 504 : 502;
+          }
           return { success: result.ok, ...result };
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
@@ -715990,6 +716278,13 @@ function extractClientIp(req) {
     const record = headers;
     return record[name] ?? record[name.toLowerCase()] ?? record[name.toUpperCase()] ?? null;
   };
+  const xVercelForwardedFor = getHeader("x-vercel-forwarded-for");
+  if (xVercelForwardedFor) {
+    const vIps = xVercelForwardedFor.split(",").map((s) => s.trim()).filter(Boolean);
+    if (vIps.length > 0) {
+      return normalizeIp(vIps[0]);
+    }
+  }
   const cfConnectingIp = getHeader("cf-connecting-ip");
   if (cfConnectingIp?.trim()) return normalizeIp(cfConnectingIp);
   const xRealIp = getHeader("x-real-ip");
@@ -716056,8 +716351,8 @@ function normalizePathname(rawPathname) {
 function extractMediaType(rawContentType) {
   return String(rawContentType ?? "").split(";")[0].trim().toLowerCase();
 }
-async function readBoundedBodyText(request, maxBytes) {
-  if (!request.body) return "";
+async function readBoundedBodyBytes(request, maxBytes, errToken = "PAYLOAD_TOO_LARGE") {
+  if (!request.body) return new Uint8Array(0);
   const reader = request.body.getReader();
   const chunks = [];
   let totalBytes = 0;
@@ -716068,9 +716363,9 @@ async function readBoundedBodyText(request, maxBytes) {
       if (value && value.byteLength > 0) {
         totalBytes += value.byteLength;
         if (totalBytes > maxBytes) {
-          await reader.cancel("PAYLOAD_TOO_LARGE").catch(() => {
+          await reader.cancel(errToken).catch(() => {
           });
-          throw new Error("PAYLOAD_TOO_LARGE");
+          throw new Error(errToken);
         }
         chunks.push(value);
       }
@@ -716081,15 +716376,20 @@ async function readBoundedBodyText(request, maxBytes) {
     } catch {
     }
   }
-  if (chunks.length === 0) return "";
-  if (chunks.length === 1) return new TextDecoder("utf-8").decode(chunks[0]);
+  if (chunks.length === 0) return new Uint8Array(0);
+  if (chunks.length === 1) return chunks[0];
   const merged = new Uint8Array(totalBytes);
   let offset = 0;
   for (const chunk of chunks) {
     merged.set(chunk, offset);
     offset += chunk.byteLength;
   }
-  return new TextDecoder("utf-8").decode(merged);
+  return merged;
+}
+async function readBoundedBodyText(request, maxBytes) {
+  const bytes = await readBoundedBodyBytes(request, maxBytes, "PAYLOAD_TOO_LARGE");
+  if (bytes.byteLength === 0) return "";
+  return new TextDecoder("utf-8").decode(bytes);
 }
 var createApp = async (serverless = false) => {
   const app = new Elysia({
@@ -716119,15 +716419,32 @@ var createApp = async (serverless = false) => {
     const mediaType = extractMediaType(request.headers.get("content-type"));
     const isUpload = mediaType === "multipart/form-data" && normPath === "/v2/admin/widgets/upload-icon";
     const contentLength = request.headers.get("content-length");
-    if (contentLength) {
-      const size = parseInt(contentLength, 10);
+    if (contentLength !== null) {
       const limit = isUpload ? MAX_UPLOAD_BODY_SIZE : MAX_REQUEST_BODY_SIZE;
-      if (!isNaN(size) && size > limit) {
+      const parts = contentLength.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
+      if (parts.length === 0 || parts.some((p) => !/^\d+$/.test(p))) {
+        set.status = 400;
+        applyCorsHeaders();
+        return {
+          success: false,
+          error: "Bad Request: invalid Content-Length header"
+        };
+      }
+      const sizes = parts.map((p) => Number(p));
+      if (sizes.some((sz) => !Number.isSafeInteger(sz) || sz > limit)) {
         set.status = 413;
         applyCorsHeaders();
         return {
           success: false,
           error: `Payload Too Large: request body exceeds ${isUpload ? "2MB" : "1MB"} limit`
+        };
+      }
+      if (new Set(sizes).size > 1) {
+        set.status = 400;
+        applyCorsHeaders();
+        return {
+          success: false,
+          error: "Bad Request: conflicting Content-Length header values"
         };
       }
     }
@@ -716165,7 +716482,13 @@ var createApp = async (serverless = false) => {
     set.headers["x-ratelimit-reset"] = String(rateLimitRes.resetEpochSec);
     set.headers["access-control-expose-headers"] = "retry-after, x-ratelimit-limit, x-ratelimit-remaining, x-ratelimit-reset";
   }).onError(({ request, error, code, set }) => {
-    if ((code === "PARSE" || error?.message === "PAYLOAD_TOO_LARGE") && (error?.message?.includes("PAYLOAD_TOO_LARGE") || error?.cause?.message?.includes("PAYLOAD_TOO_LARGE") || String(error).includes("PAYLOAD_TOO_LARGE"))) {
+    const errStr = [
+      error?.message,
+      error?.cause?.message,
+      String(error)
+    ].filter(Boolean).join(" ");
+    if ((code === "PARSE" || errStr.includes("PAYLOAD_TOO_LARGE")) && errStr.includes("PAYLOAD_TOO_LARGE")) {
+      const is2Mb = errStr.includes("PAYLOAD_TOO_LARGE_2MB");
       set.status = 413;
       const origin = request?.headers?.get?.("origin");
       if (origin) {
@@ -716177,7 +716500,7 @@ var createApp = async (serverless = false) => {
       }
       return {
         success: false,
-        error: "Payload Too Large: request body exceeds 1MB limit"
+        error: `Payload Too Large: request body exceeds ${is2Mb ? "2MB" : "1MB"} limit`
       };
     }
     if (code === "NOT_FOUND" || code === "VALIDATION" || code === "PARSE") {
@@ -716201,7 +716524,26 @@ var createApp = async (serverless = false) => {
         pathname = "/";
       }
       if (normalizePathname(pathname) === "/v2/admin/widgets/upload-icon") {
-        return;
+        const rawCt = request.headers.get("content-type") || "multipart/form-data";
+        const bytes = await readBoundedBodyBytes(
+          request,
+          MAX_UPLOAD_BODY_SIZE,
+          "PAYLOAD_TOO_LARGE_2MB"
+        );
+        if (bytes.byteLength === 0) return {};
+        const fd = await new Response(bytes, {
+          headers: { "content-type": rawCt }
+        }).formData();
+        const parsed = {};
+        fd.forEach((value, key) => {
+          if (key in parsed) {
+            const prev = parsed[key];
+            parsed[key] = Array.isArray(prev) ? [...prev, value] : [prev, value];
+          } else {
+            parsed[key] = value;
+          }
+        });
+        return parsed;
       }
       await readBoundedBodyText(request, MAX_REQUEST_BODY_SIZE);
       return {};
