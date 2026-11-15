@@ -2838,3 +2838,23 @@ This document serves as the shared communication channel between the AI Team (Ge
   4. **YouTube Outbound Quota Guard & LLM Handshake/Key-Store Hardening (`src/endpoints/v1/youtube/*.ts`, `lib/llm/rotating-provider.ts`, `lib/llm/key-manager/stores/{memory,upstash-redis}.ts`)**: Trimmed all required YouTube string parameters and rejected whitespace-only inputs (`"   "`) locally (`HTTP 400`) with zero wasted `youtube.googleapis.com` calls; ensured `RotatingLLMProvider.preStreamHandshake` throws `UPSTREAM_CLIENT_ERROR` on non-200 4xx responses (`413`/`502`), cleared `brokenAccounts` on `resetKeyToActive`, and replaced O(N) Redis `SMEMBERS` on every `reserveKey()` with 5s TTL caching.
   5. **Expanded Adversarial Regression Suite (`test/adversarial-security.test.ts`, `test/reviewer-adversarial.test.ts`)**: Added `2.7` hardening regressions + `VULN-30`..`VULN-33`.
 - **Status**: **295 / 295 PASS (`bun test`, 1,833 `expect()` assertions across 13 files), Local 34/34 & Remote 34/34 PASS (`morning-audit-runner.ts`), 0 TypeScript errors, `api/index.js` synchronized & committed with `[skip ci]`.**
+
+
+---
+
+## 81. Daily Quota-Safe Controlled Load & Adversarial Perimeter Audit (2026-11-16)
+
+- **Session**: `[세션명: 토키 위젯 일일 부하 테스트]` (Single-Agent Focused Mode — Zero External Cloud Quota Burn).
+- **R1 Controlled Concurrency & 429/402 Failover Verification**:
+  - Executed Wave 1 (18 concurrent `/v2/ask` requests via `/usr/bin/curl`: 16 full SSE streams + 2 mid-stream client aborts) + Wave 2 (12 warm steady-state concurrent requests) across a 5-key / 4-account ZSET pool (`acc-bankrupt` 2 sibling keys returning Mock 402, `acc-ratelim-1` & `acc-ratelim-2` returning Mock 429 with delta-seconds & RFC 9110 HTTP-date, `acc-healthy` returning 200 SSE).
+  - Wave 1 completed in **90.10ms** (`p50: 86.26ms`, `p95/max: 89.45ms` vs 60,000ms Vercel limit) with **100% failover** and **0 upstream calls** to sibling bankrupt key `k2-dead-b`; Wave 2 completed in **85.93ms** (`p50: 84.40ms`, `p95/max: 85.33ms`) with **0 upstream calls** to all 4 broken/cooling-down keys and post-wave $\text{ZCARD} \equiv 0$.
+- **R2 Adversarial Perimeter & DOM XSS Hardening (5 Patches Applied Across Frontend & Backend)**:
+  1. `tokki-widget/lib/utils/sanitize-url.ts` & `lib/components/MarkdownPreview.tsx`: Neutralized `@uiw/react-markdown-preview` `rehype-raw` + permissive `urlTransform` host-DOM XSS by enforcing `sanitizeMarkdownUrl`, strict `ALLOWED_HTML_TAGS` allowlist, and `rehypeRewrite` (`on*`, `srcdoc`, `formaction` stripping + `rel="noopener noreferrer"`).
+  2. `tokki-widget/lib/components/FunctionCall.tsx`: Blocked `javascript:` / `data:` URI schemes inside `[[FUNCTION-CALL]]` blocks via `sanitizeHttpUrl`.
+  3. `my-server-test/src/app.ts`: Hardened `Content-Length` comma-smuggling (`10, 2097152` -> `413`, conflicting `10, 20` -> `400` per RFC 9112 §6.3) and added `readBoundedBodyBytes` on `/v2/admin/widgets/upload-icon` so chunked `multipart/form-data` streams `>2MB` are cancelled immediately with `HTTP 413`.
+  4. `my-server-test/lib/llm/rotating-provider.ts` & `src/endpoints/v2/widget-endpoints.ts`: Threw `UPSTREAM_CLIENT_ERROR` on pre-stream non-200 upstream 4xx responses instead of returning an empty `200 text/event-stream`, and permitted `null` on `/v2/widget/view` (`widgetId` / `threadId`).
+  5. `my-server-test/lib/llm/key-manager/stores/memory.ts` & `upstash-redis.ts`: Cleared `brokenAccounts` (`openrouter:account:<accountId>:broken`) inside `resetKeyToActive(keyId)` so topped-up `402` accounts immediately resume serving traffic.
+- **R3 Verification**:
+  - `bun test`: **295 / 295 PASS** (`my-server-test`, 1,833 assertions) + **33 / 33 PASS** (`tokki-widget`, 136 assertions) = **328 / 328 PASS (1,969 assertions)**.
+  - Pre-flight builds: `bundle:api` (`api/index.js` 26.9MB), `type-check` (0 errors), `build` (2.65s), `build:embed` (2.04s), `export-playground` (2.45s).
+  - Korean report generated at `stress_test_audit.md` (`v6.4.0-DAILY-KO`). Committed locally with `[skip ci]`.
