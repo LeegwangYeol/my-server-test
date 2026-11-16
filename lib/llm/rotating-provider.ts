@@ -56,9 +56,12 @@ export class RotatingLLMProvider implements LLMProvider {
    */
   public async ensureSynced(): Promise<void> {
     if (!this.syncPromise) {
-      this.syncPromise = this.keyStore.syncKeys(
-        Array.from(this.keyConfigMap.values())
-      );
+      this.syncPromise = this.keyStore
+        .syncKeys(Array.from(this.keyConfigMap.values()))
+        .catch((err) => {
+          this.syncPromise = null;
+          throw err;
+        });
     }
     await this.syncPromise;
   }
@@ -165,7 +168,24 @@ export class RotatingLLMProvider implements LLMProvider {
         }
 
         const { done, value } = await reader.read();
-        if (done) break;
+        if (done) {
+          buffer += decoder.decode();
+          if (buffer.trim()) {
+            const tailLine = buffer.trim();
+            if (tailLine.startsWith("data:")) {
+              const payload = tailLine.slice(5).trim();
+              if (payload === "[DONE]") return;
+              try {
+                const json = JSON.parse(payload);
+                const token = json?.choices?.[0]?.delta?.content;
+                if (token) yield token;
+              } catch {
+                // Ignore partial or unparseable SSE frame
+              }
+            }
+          }
+          break;
+        }
 
         buffer += decoder.decode(value, { stream: true });
         let nl: number;
@@ -174,11 +194,12 @@ export class RotatingLLMProvider implements LLMProvider {
           buffer = buffer.slice(nl + 1);
 
           if (!line || line.startsWith(":")) continue;
-          if (line === "data: [DONE]") return;
 
-          if (line.startsWith("data: ")) {
+          if (line.startsWith("data:")) {
+            const payload = line.slice(5).trim();
+            if (payload === "[DONE]") return;
             try {
-              const json = JSON.parse(line.slice(6));
+              const json = JSON.parse(payload);
               const token = json?.choices?.[0]?.delta?.content;
               if (token) yield token;
             } catch {

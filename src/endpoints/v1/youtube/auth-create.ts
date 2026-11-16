@@ -69,8 +69,9 @@ export const v1AuthCreate = (app: any) => {
     .get(
       "/auth/confirm",
       async ({ query, set }: { query: any; set: any }) => {
-        const { code, state } = query;
-        if (!code || !state) {
+        const code = String(query?.code ?? "").trim();
+        const state = String(query?.state ?? "").trim();
+        if (!code || !state || state.length > 4096) {
           set.status = 400;
           return {
             success: false,
@@ -80,17 +81,20 @@ export const v1AuthCreate = (app: any) => {
 
         try {
           const authState = JSON.parse(
-            Buffer.from(state as string, "base64").toString(),
+            Buffer.from(state, "base64").toString(),
           );
           if (
             !authState ||
             typeof authState !== "object" ||
             typeof authState.clientId !== "string" ||
             !authState.clientId.trim() ||
+            authState.clientId.trim().length > 512 ||
             typeof authState.clientSecret !== "string" ||
             !authState.clientSecret.trim() ||
+            authState.clientSecret.trim().length > 512 ||
             typeof authState.redirectUri !== "string" ||
             !authState.redirectUri.trim() ||
+            authState.redirectUri.trim().length > 2048 ||
             !/^https?:\/\/[\w.-]+(?::\d+)?\/.*$/.test(
               authState.redirectUri.trim(),
             )

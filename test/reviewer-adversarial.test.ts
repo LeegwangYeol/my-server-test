@@ -869,4 +869,213 @@ describe("Adversarial Reviewer Verification Suite", () => {
       else process.env.ADMIN_TOKEN = prevToken;
     }
   });
+
+  it("VULN-34: UpstashRedisKeyStore.syncKeys emits valid 3-arg HSETNX + variadic HSET and surfaces pipeline sub-errors", async () => {
+    const { UpstashRedisKeyStore } = await import("../lib/llm/key-manager/stores/upstash-redis");
+    const store = new UpstashRedisKeyStore("https://mock-upstash.local", "mock-token");
+
+    const capturedPipelines: any[][][] = [];
+    const originalFetch = globalThis.fetch;
+    try {
+      globalThis.fetch = (async (input: any, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/pipeline")) {
+          const cmds = JSON.parse(String(init?.body ?? "[]"));
+          capturedPipelines.push(cmds);
+          return new Response(
+            JSON.stringify(cmds.map(() => ({ result: 1 }))),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
+        return new Response(JSON.stringify({ result: "OK" }), { status: 200 });
+      }) as any;
+
+      await store.syncKeys([
+        {
+          id: "k-sync-1",
+          apiKey: "sk-1",
+          accountId: "acc-1",
+          tier: 0,
+          weight: 20,
+          maxConcurrency: 8,
+        },
+      ]);
+
+      expect(capturedPipelines.length).toBe(1);
+      const cmds = capturedPipelines[0];
+      // Every HSETNX command in Redis MUST have strictly 4 elements: ['HSETNX', key, field, value]
+      const hsetnxCmds = cmds.filter((c) => c[0] === "HSETNX");
+      expect(hsetnxCmds.length).toBe(2);
+      for (const c of hsetnxCmds) {
+        expect(c.length).toBe(4);
+      }
+      // Static config fields must use variadic HSET
+      const hsetCmd = cmds.find((c) => c[0] === "HSET");
+      expect(hsetCmd).toBeDefined();
+      expect(hsetCmd).toContain("max_concurrency");
+      expect(hsetCmd).toContain("8");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("VULN-35: All 11 /v2/admin/* endpoints return HTTP 401 (never 422 TypeBox schema leak) on unauthenticated empty/malformed payloads", async () => {
+    const prevAdmin = process.env.ADMIN_TOKEN;
+    const prevMail = process.env.MAIL_SEND_TOKEN;
+    process.env.ADMIN_TOKEN = "test-admin-secret";
+    process.env.MAIL_SEND_TOKEN = "test-mail-secret";
+
+    try {
+      const app = await createApp(true);
+      const adminPaths = [
+        "/v2/admin/widgets",
+        "/v2/admin/widgets/upsert",
+        "/v2/admin/widgets/delete",
+        "/v2/admin/widgets/upload-icon",
+        "/v2/admin/threads",
+        "/v2/admin/threads/update",
+        "/v2/admin/threads/rename",
+        "/v2/admin/messages",
+        "/v2/admin/db/migrate",
+        "/v2/admin/mail/send",
+        "/v2/admin/sms/send",
+      ];
+
+      for (const p of adminPaths) {
+        const res = await app.handle(
+          new Request(`http://localhost${p}`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({}),
+          }),
+        );
+        expect(res.status).toBe(401);
+        const text = await res.text();
+        expect(text).not.toContain('"type":"validation"');
+        expect(text).not.toContain("Expected property");
+      }
+
+      // Authenticated admin sending empty {} to /v2/admin/sms/send MUST still receive 422 validation feedback
+      const authedInvalidRes = await app.handle(
+        new Request("http://localhost/v2/admin/sms/send", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-admin-token": "test-admin-secret",
+          },
+          body: JSON.stringify({}),
+        }),
+      );
+      expect(authedInvalidRes.status).toBe(422);
+    } finally {
+      if (prevAdmin === undefined) delete process.env.ADMIN_TOKEN;
+      else process.env.ADMIN_TOKEN = prevAdmin;
+      if (prevMail === undefined) delete process.env.MAIL_SEND_TOKEN;
+      else process.env.MAIL_SEND_TOKEN = prevMail;
+    }
+  });
+
+  it("VULN-36: /v2/admin/widgets/upsert and isValidWidgetBubbleSize block CSS injection in chat_bubble_size with HTTP 400", async () => {
+    const { isValidWidgetBubbleSize } = await import("../lib/url-guard");
+    expect(isValidWidgetBubbleSize("48px")).toBe(true);
+    expect(isValidWidgetBubbleSize("3.5rem")).toBe(true);
+    expect(isValidWidgetBubbleSize("64")).toBe(true);
+    expect(isValidWidgetBubbleSize("48px; background:url(javascript:alert(1))")).toBe(false);
+    expect(isValidWidgetBubbleSize("</style><script>alert(1)</script>")).toBe(false);
+
+    const prevToken = process.env.ADMIN_TOKEN;
+    process.env.ADMIN_TOKEN = "test-admin-secret";
+    try {
+      const app = await createApp(true);
+      for (const maliciousCss of [
+        "48px; background:url(javascript:alert(1))",
+        "</style><script>alert(1)</script>",
+        "calc(100vw); position:fixed; inset:0",
+      ]) {
+        const res = await app.handle(
+          new Request("http://localhost/v2/admin/widgets/upsert", {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              "x-admin-token": "test-admin-secret",
+            },
+            body: JSON.stringify({
+              id: "safe-widget",
+              chat_bubble_size: maliciousCss,
+            }),
+          }),
+        );
+        expect(res.status).toBe(400);
+        const body = (await res.json()) as any;
+        expect(body.success).toBe(false);
+        expect(body.error).toContain("chat_bubble_size");
+      }
+    } finally {
+      if (prevToken === undefined) delete process.env.ADMIN_TOKEN;
+      else process.env.ADMIN_TOKEN = prevToken;
+    }
+  });
+
+  it("VULN-37: RotatingLLMProvider & OpenAICompatibleProvider parse W3C no-space SSE frames and flush non-newline trailing chunks", async () => {
+    const { MemoryKeyStore } = await import("../lib/llm/key-manager/stores/memory");
+    const { RotatingLLMProvider } = await import("../lib/llm/rotating-provider");
+    const { OpenAICompatibleProvider } = await import("../lib/llm/openai-compatible");
+
+    const store = new MemoryKeyStore();
+    const keyMap = new Map<string, any>([
+      ["k1", { id: "k1", apiKey: "sk-1", tier: 0, weight: 100, maxConcurrency: 5 }],
+    ]);
+    const rotating = new RotatingLLMProvider(store, keyMap);
+    const compat = new OpenAICompatibleProvider({
+      name: "test-compat",
+      baseUrl: "https://mock-llm.local/v1",
+      apiKey: "sk-compat",
+      defaultModel: "mock-model",
+    });
+
+    const originalFetch = globalThis.fetch;
+    try {
+      // Upstream sends no-space "data:{...}" AND final frame without trailing "\n"
+      globalThis.fetch = (async () =>
+        new Response(
+          'data:{"choices":[{"delta":{"content":"Hel"}}]}\ndata:{"choices":[{"delta":{"content":"lo!"}}]}',
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        )) as any;
+
+      let outRot = "";
+      for await (const ch of rotating.stream({ messages: [{ role: "user", content: "hi" }] })) {
+        outRot += ch;
+      }
+      expect(outRot).toBe("Hello!");
+
+      let outCompat = "";
+      for await (const ch of compat.stream({ messages: [{ role: "user", content: "hi" }] })) {
+        outCompat += ch;
+      }
+      expect(outCompat).toBe("Hello!");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("VULN-38: HealthAndCooldownEngine honors fractional Retry-After headers and YouTube OAuth confirm rejects whitespace queries", async () => {
+    const { HealthAndCooldownEngine } = await import("../lib/llm/key-manager/engine");
+
+    // Fractional Retry-After: "2.5" -> 2500ms + jitter [500..1500] = [3000..4000]ms
+    const cd = HealthAndCooldownEngine.calculate429Cooldown(
+      { "retry-after": "2.5" },
+      1,
+      1_700_000_000_000,
+    );
+    expect(cd).toBeGreaterThanOrEqual(3000);
+    expect(cd).toBeLessThanOrEqual(4000);
+
+    const app = await createApp(true);
+    const ytRes = await app.handle(
+      new Request("http://localhost/v1/youtube/auth/confirm?code=%20%20&state=%20%20"),
+    );
+    expect(ytRes.status).toBe(400);
+    const ytData = (await ytRes.json()) as any;
+    expect(ytData.success).toBe(false);
+  });
 });

@@ -38,11 +38,16 @@ export const v1ChannelInfo = (app: any) => {
           }
         }
 
+        const cleanPageToken =
+          typeof pageToken === "string" && pageToken.trim()
+            ? pageToken.trim()
+            : undefined;
+
         const response = await youtube.channels.list({
           part: ["snippet", "contentDetails", "statistics"],
           mine: true,
           maxResults: max,
-          pageToken: pageToken,
+          pageToken: cleanPageToken,
         });
 
         return {

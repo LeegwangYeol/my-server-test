@@ -43,10 +43,12 @@ export interface ChatThreadRow {
 /* ─── threads ──────────────────────────────────────────────────────── */
 
 export async function createThread(widgetId: string): Promise<string | null> {
+  const wid = (widgetId ?? "").trim();
+  if (!wid) return null;
   try {
     const { data, error } = await supabaseUntyped
       .from("chat_thread")
-      .insert({ widget_id: widgetId })
+      .insert({ widget_id: wid })
       .select("id")
       .single();
     if (error) {
@@ -167,13 +169,15 @@ export async function listMessages(
   threadId: string,
   limit = 50,
 ): Promise<ChatMessageRow[]> {
+  const tid = (threadId ?? "").trim();
+  if (!tid) return [];
   const safeLimit = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 50;
   let rows: ChatMessageRow[] = [];
   try {
     const { data, error } = await supabaseUntyped
       .from("chat_message")
       .select("*")
-      .eq("thread_id", threadId)
+      .eq("thread_id", tid)
       .order("created_at", { ascending: true })
       .limit(safeLimit);
 
@@ -191,7 +195,7 @@ export async function listMessages(
   }
 
   // Merge any pending unpersisted messages in dbFallbackQueue for this thread
-  const queuedRows = getQueuedMessagesForThread(threadId);
+  const queuedRows = getQueuedMessagesForThread(tid);
   if (queuedRows.length > 0) {
     rows = [...rows, ...(queuedRows as ChatMessageRow[])];
     rows.sort(
@@ -216,20 +220,21 @@ export async function appendMessage(
     idempotencyKey?: string;
   },
 ): Promise<boolean> {
-  if (!threadId) return false;
+  const tid = (threadId ?? "").trim();
+  if (!tid) return false;
 
   const allowQueue = options?.allowQueue !== false;
   const maxRetries = options?.maxRetries ?? 3;
   const idempotencyKey =
     options?.idempotencyKey ??
-    `${threadId}:${role}:${Date.now()}:${Math.random().toString(36).slice(2, 6)}`;
+    `${tid}:${role}:${Date.now()}:${Math.random().toString(36).slice(2, 6)}`;
 
   try {
     const execRes = await executeWithFallback(
       async () => {
         const { error } = await supabaseUntyped
           .from("chat_message")
-          .insert({ thread_id: threadId, role, content });
+          .insert({ thread_id: tid, role, content });
         if (error) {
           throw error;
         }
@@ -238,7 +243,7 @@ export async function appendMessage(
       {
         queue: allowQueue ? dbFallbackQueue : undefined,
         fallbackPayload: {
-          threadId,
+          threadId: tid,
           role,
           content,
           createdAt: new Date().toISOString(),
@@ -536,14 +541,17 @@ export async function renameThread(
   widgetId: string,
   title: string | null,
 ): Promise<boolean> {
+  const tid = (threadId ?? "").trim();
+  const wid = (widgetId ?? "").trim();
+  if (!tid || !wid) return false;
   const normalized =
     title && title.trim().length > 0 ? title.trim().slice(0, 200) : null;
   try {
     const { error } = await supabaseUntyped
       .from("chat_thread")
       .update({ title: normalized })
-      .eq("id", threadId)
-      .eq("widget_id", widgetId)
+      .eq("id", tid)
+      .eq("widget_id", wid)
       .eq("is_deleted", false);
     if (error) {
       console.error("[chat-store] renameThread failed:", error.message);
@@ -570,6 +578,9 @@ export async function updateThreadPrompt(
     context_text?: string | null;
   },
 ): Promise<boolean> {
+  const tid = (threadId ?? "").trim();
+  const wid = (widgetId ?? "").trim();
+  if (!tid || !wid) return false;
   const update: Record<string, unknown> = {};
   if (patch.system_prompt !== undefined) {
     const v = patch.system_prompt?.trim() ?? "";
@@ -586,8 +597,8 @@ export async function updateThreadPrompt(
     const { error } = await supabaseUntyped
       .from("chat_thread")
       .update(update)
-      .eq("id", threadId)
-      .eq("widget_id", widgetId)
+      .eq("id", tid)
+      .eq("widget_id", wid)
       .eq("is_deleted", false);
     if (error) {
       console.error("[chat-store] updateThreadPrompt failed:", error.message);

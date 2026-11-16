@@ -209,6 +209,40 @@ export class MemoryKeyStore implements IKeyStore {
   }
 
   /**
+   * Mirrors an authoritative reservation issued by Redis into this L1 MemoryKeyStore
+   * so WARMUP canary graduation, L1 telemetry (getAllStates), and mid-stream fail-open
+   * releases remain strictly synchronized with Redis.
+   */
+  public mirrorReservation(keyId: string, leaseToken: string): void {
+    const now = this.now();
+    this.pruneKeyLeases(keyId, now);
+
+    const record = this.records.get(keyId);
+    if (!record) return;
+
+    if (
+      (record.state === 'RATE_LIMITED' || record.state === 'TRANSIENT_BACKOFF') &&
+      now >= record.cooldownUntil
+    ) {
+      record.state = 'WARMUP';
+    }
+
+    let keyLeases = this.leases.get(keyId);
+    if (!keyLeases) {
+      keyLeases = new Map<string, number>();
+      this.leases.set(keyId, keyLeases);
+    }
+
+    keyLeases.set(leaseToken, now + this.leaseTimeoutMs);
+    record.totalRequests++;
+    record.lastUsedAt = now;
+
+    if (record.state === 'WARMUP') {
+      record.canaryToken = leaseToken;
+    }
+  }
+
+  /**
    * Phase 1: Immediately graduates WARMUP keys to ACTIVE upon receiving HTTP 200 headers (<500ms).
    * Unlocks full concurrency ceiling for subsequent requests.
    */

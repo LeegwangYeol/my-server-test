@@ -706,5 +706,213 @@ describe("Adversarial Security Test Suite (Requirement R2)", () => {
         await store.releaseKey(recoveredLease!.keyId, recoveredLease!.leaseToken, 200);
       });
     });
+
+    describe("2.8 2026-11-17 Hardening Regressions (icon_url Bypass, Upstash L1/L2 Mirror Sync, 408 Failover, Sync Recovery)", () => {
+      test("isValidWidgetIconUrl blocks protocol-relative (//evil), backslash (/\\evil), empty host, and credentialed URLs while allowing valid paths", async () => {
+        const { isValidWidgetIconUrl } = await import("../lib/url-guard");
+
+        expect(isValidWidgetIconUrl("//evil.attacker.com/icon.svg")).toBe(false);
+        expect(isValidWidgetIconUrl("/\\evil.attacker.com/icon.svg")).toBe(false);
+        expect(isValidWidgetIconUrl("https:///")).toBe(false);
+        expect(isValidWidgetIconUrl("https://admin:secret@evil.com/icon.png")).toBe(false);
+        expect(isValidWidgetIconUrl("javascript:alert(1)")).toBe(false);
+        expect(isValidWidgetIconUrl("data:image/svg+xml,<svg/>")).toBe(false);
+
+        expect(isValidWidgetIconUrl("/icons/widget-launcher.png")).toBe(true);
+        expect(isValidWidgetIconUrl("https://cdn.tokki.app/icons/bot.webp")).toBe(true);
+
+        const prevAdminToken = process.env.ADMIN_TOKEN;
+        process.env.ADMIN_TOKEN = "test-admin-secret-20261117";
+        try {
+          const resProtoRel = await postJson(
+            app,
+            "/v2/admin/widgets/upsert",
+            { id: VALID_WIDGET_ID, icon_url: "//evil.attacker.com/phish.svg" },
+            { "x-admin-token": "test-admin-secret-20261117" },
+          );
+          expect(resProtoRel.status).toBe(400);
+
+          const resBackslash = await postJson(
+            app,
+            "/v2/admin/widgets/upsert",
+            { id: VALID_WIDGET_ID, icon_url: "/\\evil.attacker.com/phish.svg" },
+            { "x-admin-token": "test-admin-secret-20261117" },
+          );
+          expect(resBackslash.status).toBe(400);
+        } finally {
+          if (prevAdminToken === undefined) {
+            delete process.env.ADMIN_TOKEN;
+          } else {
+            process.env.ADMIN_TOKEN = prevAdminToken;
+          }
+        }
+      });
+
+      test("UpstashRedisKeyStore mirrors Redis reservations into L1 MemoryKeyStore so WARMUP canary graduation and getAllStates stay synchronized", async () => {
+        const { MemoryKeyStore } = await import("../lib/llm/key-manager/stores/memory");
+        const { UpstashRedisKeyStore } = await import("../lib/llm/key-manager/stores/upstash-redis");
+
+        let nowMs = 1_700_000_000_000;
+        const memoryFallback = new MemoryKeyStore({ clock: () => nowMs });
+        const store = new UpstashRedisKeyStore("https://mock-upstash.local", "mock-token", {
+          memoryFallback,
+        });
+
+        const originalFetch = globalThis.fetch;
+        try {
+          globalThis.fetch = (async (input: any, init?: RequestInit) => {
+            const url = String(input);
+            if (url.endsWith("/pipeline")) {
+              return new Response(JSON.stringify([{ result: 1 }, { result: 1 }]), {
+                status: 200,
+                headers: { "content-type": "application/json" },
+              });
+            }
+            if (url.endsWith("/eval")) {
+              const body = JSON.parse(String(init?.body ?? "[]"));
+              const script = String(body[0] ?? "");
+              if (script.includes("ERR_NO_ELIGIBLE_KEYS")) {
+                return new Response(
+                  JSON.stringify({ result: ["k-redis-1", `k-redis-1:${nowMs}:canary-1`] }),
+                  { status: 200, headers: { "content-type": "application/json" } },
+                );
+              }
+              if (script.includes("GRADUATED_ACTIVE")) {
+                return new Response(
+                  JSON.stringify({ result: "GRADUATED_ACTIVE" }),
+                  { status: 200, headers: { "content-type": "application/json" } },
+                );
+              }
+              return new Response(JSON.stringify({ result: "OK" }), {
+                status: 200,
+                headers: { "content-type": "application/json" },
+              });
+            }
+            return new Response(JSON.stringify({ result: "OK" }), { status: 200 });
+          }) as any;
+
+          await store.syncKeys([
+            { id: "k-redis-1", apiKey: "sk-r1", tier: 0, weight: 100, maxConcurrency: 5 },
+          ]);
+
+          // Step 1: Key hits 429 cooldown for 1000ms
+          await store.releaseKey("k-redis-1", "initial-lease", 429, 1000, "Rate limit");
+          let states = await store.getAllStates();
+          expect(states[0].status).toBe("RATE_LIMITED");
+          expect(states[0].consecutive429s).toBe(1);
+
+          // Step 2: Advance clock past cooldown; Redis issues WARMUP canary reservation
+          nowMs += 1500;
+          const res = await store.reserveKey();
+          expect(res?.keyId).toBe("k-redis-1");
+
+          states = await store.getAllStates();
+          expect(states[0].status).toBe("WARMUP");
+          expect(states[0].inFlightRequests).toBe(1);
+
+          // Step 3: HTTP 200 headers arrive -> acknowledgeHandshake graduates BOTH Redis & L1 MemoryKeyStore!
+          const graduated = await store.acknowledgeHandshake(res!.keyId, res!.leaseToken);
+          expect(graduated).toBe(true);
+
+          states = await store.getAllStates();
+          expect(states[0].status).toBe("ACTIVE");
+          expect(states[0].consecutive429s).toBe(0);
+          expect(states[0].inFlightRequests).toBe(1);
+
+          // Step 4: Stream completes -> ZSET lease drops to 0 in L1 as well
+          await store.releaseKey(res!.keyId, res!.leaseToken, 200, 0);
+          states = await store.getAllStates();
+          expect(states[0].inFlightRequests).toBe(0);
+        } finally {
+          globalThis.fetch = originalFetch;
+        }
+      });
+
+      test("executor rotates past upstream HTTP 408 Request Timeout and RotatingLLMProvider recovers after transient syncKeys rejection", async () => {
+        const { MemoryKeyStore } = await import("../lib/llm/key-manager/stores/memory");
+        const { RotatingLLMProvider } = await import("../lib/llm/rotating-provider");
+
+        const store = new MemoryKeyStore();
+        let failSyncOnce = true;
+        const origSync = store.syncKeys.bind(store);
+        store.syncKeys = async (keys) => {
+          if (failSyncOnce) {
+            failSyncOnce = false;
+            throw new Error("Transient syncKeys failure");
+          }
+          return origSync(keys);
+        };
+
+        const keyMap = new Map<string, any>([
+          ["k-timeout", { id: "k-timeout", apiKey: "sk-408", tier: 0, weight: 100, maxConcurrency: 5 }],
+          ["k-good", { id: "k-good", apiKey: "sk-200", tier: 0, weight: 80, maxConcurrency: 5 }],
+        ]);
+        const provider = new RotatingLLMProvider(store, keyMap);
+
+        // First call rejects due to transient syncKeys error, clearing syncPromise
+        let firstErr: any = null;
+        try {
+          await provider.ensureSynced();
+        } catch (e) {
+          firstErr = e;
+        }
+        expect(firstErr).not.toBeNull();
+
+        const originalFetch = globalThis.fetch;
+        try {
+          globalThis.fetch = (async (_input: any, init?: RequestInit) => {
+            const auth = String((init?.headers as any)?.Authorization ?? "");
+            if (auth.includes("sk-408")) {
+              return new Response("Request Timeout", { status: 408 });
+            }
+            return new Response(
+              'data: {"choices":[{"delta":{"content":"RECOVERED"}}]}\n\ndata: [DONE]\n\n',
+              { status: 200, headers: { "content-type": "text/event-stream" } },
+            );
+          }) as any;
+
+          // Second call succeeds in syncing AND fails over cleanly past HTTP 408 -> k-good!
+          const hs = await provider.preStreamHandshake({
+            messages: [{ role: "user", content: "test 408 failover" }],
+          });
+          expect(hs.keyId).toBe("k-good");
+
+          let output = "";
+          for await (const tok of provider.streamFromHandshake(hs)) {
+            output += tok;
+          }
+          expect(output).toBe("RECOVERED");
+
+          const states = await store.getAllStates();
+          for (const st of states) {
+            expect(st.inFlightRequests).toBe(0);
+          }
+        } finally {
+          globalThis.fetch = originalFetch;
+        }
+      });
+
+      test("POST /v2/ask rejects empty or whitespace-only message with HTTP 400 without creating orphan threads", async () => {
+        const beforeCalls = createThreadCalls;
+        const beforeMsgs = mockMessages.length;
+
+        const resEmpty = await postJson(app, "/v2/ask", {
+          widgetId: VALID_WIDGET_ID,
+          message: "",
+        });
+        expect(resEmpty.status).toBe(400);
+        const bodyEmpty = (await resEmpty.json()) as any;
+        expect(bodyEmpty.success).toBe(false);
+        expect(bodyEmpty.error).toContain("message required");
+
+        const resWhitespace = await postJson(app, "/v2/ask", {
+          widgetId: VALID_WIDGET_ID,
+          message: "   \t\n\r  ",
+        });
+        expect(resWhitespace.status).toBe(400);
+        expect(createThreadCalls).toBe(beforeCalls);
+        expect(mockMessages.length).toBe(beforeMsgs);
+      });
+    });
   });
 });

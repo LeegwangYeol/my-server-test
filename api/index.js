@@ -701836,8 +701836,9 @@ var v1AuthCreate = (app) => {
   ).get(
     "/auth/confirm",
     async ({ query, set }) => {
-      const { code, state } = query;
-      if (!code || !state) {
+      const code = String(query?.code ?? "").trim();
+      const state = String(query?.state ?? "").trim();
+      if (!code || !state || state.length > 4096) {
         set.status = 400;
         return {
           success: false,
@@ -701848,7 +701849,7 @@ var v1AuthCreate = (app) => {
         const authState = JSON.parse(
           Buffer.from(state, "base64").toString()
         );
-        if (!authState || typeof authState !== "object" || typeof authState.clientId !== "string" || !authState.clientId.trim() || typeof authState.clientSecret !== "string" || !authState.clientSecret.trim() || typeof authState.redirectUri !== "string" || !authState.redirectUri.trim() || !/^https?:\/\/[\w.-]+(?::\d+)?\/.*$/.test(
+        if (!authState || typeof authState !== "object" || typeof authState.clientId !== "string" || !authState.clientId.trim() || authState.clientId.trim().length > 512 || typeof authState.clientSecret !== "string" || !authState.clientSecret.trim() || authState.clientSecret.trim().length > 512 || typeof authState.redirectUri !== "string" || !authState.redirectUri.trim() || authState.redirectUri.trim().length > 2048 || !/^https?:\/\/[\w.-]+(?::\d+)?\/.*$/.test(
           authState.redirectUri.trim()
         )) {
           set.status = 400;
@@ -702090,11 +702091,12 @@ var v1CommentList = (app) => {
             max = parsed;
           }
         }
+        const cleanPageToken = typeof pageToken === "string" && pageToken.trim() ? pageToken.trim() : void 0;
         const response = await youtube.commentThreads.list({
           part: ["snippet", "replies"],
           videoId,
           maxResults: max,
-          pageToken,
+          pageToken: cleanPageToken,
           textFormat: textFormat || "html",
           order: order || "time"
         });
@@ -702404,12 +702406,13 @@ var v1ReplyList = (app) => {
             max = parsed;
           }
         }
+        const cleanPageToken = typeof pageToken === "string" && pageToken.trim() ? pageToken.trim() : void 0;
         const response = await youtube.comments.list({
           part: ["snippet"],
           // part 파라미터 추가
           parentId,
           maxResults: max,
-          pageToken: pageToken || void 0
+          pageToken: cleanPageToken
         });
         return {
           success: true,
@@ -702548,11 +702551,12 @@ var v1ChannelInfo = (app) => {
             max = parsed;
           }
         }
+        const cleanPageToken = typeof pageToken === "string" && pageToken.trim() ? pageToken.trim() : void 0;
         const response = await youtube.channels.list({
           part: ["snippet", "contentDetails", "statistics"],
           mine: true,
           maxResults: max,
-          pageToken
+          pageToken: cleanPageToken
         });
         return {
           success: true,
@@ -702676,11 +702680,12 @@ var v1VideoList = (app) => {
             max = parsed;
           }
         }
+        const cleanPageToken = typeof pageToken === "string" && pageToken.trim() ? pageToken.trim() : void 0;
         const response = await youtube.playlistItems.list({
           part: ["snippet", "contentDetails"],
           playlistId: uploadsPlaylistId,
           maxResults: max,
-          pageToken: pageToken || void 0
+          pageToken: cleanPageToken
         });
         return {
           success: true,
@@ -711404,8 +711409,9 @@ var OpenAICompatibleProvider = class {
     this.extraHeaders = opts.extraHeaders ?? {};
   }
   async *stream(req, signal) {
-    const resp = await this.fetchWithRetry(req, signal);
+    const { resp, cleanupAttempt } = await this.fetchWithRetry(req, signal);
     if (!resp.body) {
+      cleanupAttempt();
       throw new Error(`[${this.name}] empty response body`);
     }
     const reader = resp.body.getReader();
@@ -711414,7 +711420,23 @@ var OpenAICompatibleProvider = class {
     try {
       while (true) {
         const { value, done } = await reader.read();
-        if (done) break;
+        if (done) {
+          buffer += decoder.decode();
+          if (buffer.trim()) {
+            const tailLine = buffer.trim();
+            if (tailLine.startsWith("data:")) {
+              const payload = tailLine.slice(5).trim();
+              if (payload === "[DONE]") return;
+              try {
+                const json = JSON.parse(payload);
+                const delta = json?.choices?.[0]?.delta?.content;
+                if (delta) yield delta;
+              } catch {
+              }
+            }
+          }
+          break;
+        }
         buffer += decoder.decode(value, { stream: true });
         let nl;
         while ((nl = buffer.indexOf("\n")) !== -1) {
@@ -711432,6 +711454,7 @@ var OpenAICompatibleProvider = class {
         }
       }
     } finally {
+      cleanupAttempt();
       try {
         await reader.cancel().catch(() => {
         });
@@ -711449,6 +711472,7 @@ var OpenAICompatibleProvider = class {
   async fetchWithRetry(req, signal) {
     const maxRetries = envInt("LLM_RETRY_MAX", 3, 0, 5);
     const maxWaitMs = envInt("LLM_RETRY_MAX_WAIT_MS", 5e3, 0, 8e3);
+    const handshakeTimeoutMs = envInt("LLM_HANDSHAKE_TIMEOUT_MS", 15e3, 50, 55e3);
     const body = JSON.stringify({
       model: req.model ?? this.defaultModel,
       messages: req.messages,
@@ -711457,11 +711481,31 @@ var OpenAICompatibleProvider = class {
       max_tokens: req.maxTokens ?? envInt("LLM_MAX_TOKENS", 512, 1, 4096)
     });
     for (let attempt = 0; ; attempt++) {
+      const attemptCtrl = new AbortController();
+      let timedOut = false;
+      const timer = setTimeout(() => {
+        timedOut = true;
+        attemptCtrl.abort(new Error("LLM_HANDSHAKE_TIMEOUT"));
+      }, handshakeTimeoutMs);
+      const onClientAbort = () => attemptCtrl.abort(signal?.reason);
+      if (signal) {
+        if (signal.aborted) {
+          clearTimeout(timer);
+          throw abortError();
+        }
+        signal.addEventListener("abort", onClientAbort, { once: true });
+      }
+      const cleanupAttempt = () => {
+        clearTimeout(timer);
+        if (signal) {
+          signal.removeEventListener("abort", onClientAbort);
+        }
+      };
       let resp;
       try {
         resp = await fetch(`${this.baseUrl}/chat/completions`, {
           method: "POST",
-          signal,
+          signal: attemptCtrl.signal,
           headers: {
             "Content-Type": "application/json",
             Authorization: `Bearer ${this.apiKey}`,
@@ -711469,18 +711513,23 @@ var OpenAICompatibleProvider = class {
           },
           body
         });
+        clearTimeout(timer);
       } catch (err) {
-        if (signal?.aborted || isAbortError(err) || attempt >= maxRetries) {
+        cleanupAttempt();
+        if (signal?.aborted || !timedOut && isAbortError(err) || attempt >= maxRetries) {
           throw err;
         }
         const wait = backoffMs(attempt);
         console.warn(
-          `[${this.name}] network error \u2192 retry ${attempt + 1}/${maxRetries} in ${wait}ms`
+          `[${this.name}] ${timedOut ? "handshake timeout" : "network error"} \u2192 retry ${attempt + 1}/${maxRetries} in ${wait}ms`
         );
         await sleep2(wait, signal);
         continue;
       }
-      if (resp.ok) return resp;
+      if (resp.ok) {
+        return { resp, cleanupAttempt };
+      }
+      cleanupAttempt();
       const retryable = RETRYABLE_STATUS.has(resp.status);
       if (retryable && attempt < maxRetries) {
         const wait = parseRetryAfterMs(
@@ -711655,25 +711704,27 @@ var HealthAndCooldownEngine = class {
     const retryAfter = getHeader("retry-after");
     if (retryAfter) {
       const trimmed = retryAfter.trim();
-      if (/^\d+$/.test(trimmed)) {
-        const deltaSec = parseInt(trimmed, 10);
-        if (!isNaN(deltaSec) && deltaSec >= 0) {
-          return Math.max(1e3, deltaSec * 1e3 + this.getJitterMs(500, 1500));
+      if (/^(?:\d+(?:\.\d*)?|\.\d+)s?$/i.test(trimmed)) {
+        const deltaSec = parseFloat(trimmed);
+        if (!isNaN(deltaSec) && Number.isFinite(deltaSec) && deltaSec >= 0) {
+          return Math.max(1e3, Math.ceil(deltaSec * 1e3) + this.getJitterMs(500, 1500));
         }
       }
-      const parsedDate = Date.parse(trimmed);
-      if (!isNaN(parsedDate)) {
-        const serverDateStr = getHeader("date");
-        let skew = 0;
-        if (serverDateStr) {
-          const parsedServerDate = Date.parse(serverDateStr);
-          if (!isNaN(parsedServerDate)) {
-            skew = parsedServerDate - now;
+      if (isNaN(Number(trimmed))) {
+        const parsedDate = Date.parse(trimmed);
+        if (!isNaN(parsedDate)) {
+          const serverDateStr = getHeader("date");
+          let skew = 0;
+          if (serverDateStr) {
+            const parsedServerDate = Date.parse(serverDateStr);
+            if (!isNaN(parsedServerDate)) {
+              skew = parsedServerDate - now;
+            }
           }
-        }
-        const diffMs = parsedDate - (now + skew);
-        if (!isNaN(diffMs) && diffMs > 0) {
-          return Math.max(1e3, diffMs + this.getJitterMs(500, 1500));
+          const diffMs = parsedDate - (now + skew);
+          if (!isNaN(diffMs) && diffMs > 0) {
+            return Math.max(1e3, diffMs + this.getJitterMs(500, 1500));
+          }
         }
       }
     }
@@ -711878,7 +711929,7 @@ async function executeWithResilientFailover(keyStore, keyConfigMap, requestFacto
         await keyStore.releaseKey(keyId, leaseToken, 429, cooldownMs, errText);
         continue;
       }
-      if (response.status >= 500) {
+      if (response.status >= 500 || response.status === 408) {
         lastStatusCode = response.status;
         await keyStore.releaseKey(keyId, leaseToken, response.status, 2500, errText);
         continue;
@@ -712067,6 +712118,31 @@ var MemoryKeyStore = class {
       selectedRecord.canaryToken = leaseToken;
     }
     return { keyId: bestKey, leaseToken };
+  }
+  /**
+   * Mirrors an authoritative reservation issued by Redis into this L1 MemoryKeyStore
+   * so WARMUP canary graduation, L1 telemetry (getAllStates), and mid-stream fail-open
+   * releases remain strictly synchronized with Redis.
+   */
+  mirrorReservation(keyId, leaseToken) {
+    const now = this.now();
+    this.pruneKeyLeases(keyId, now);
+    const record = this.records.get(keyId);
+    if (!record) return;
+    if ((record.state === "RATE_LIMITED" || record.state === "TRANSIENT_BACKOFF") && now >= record.cooldownUntil) {
+      record.state = "WARMUP";
+    }
+    let keyLeases = this.leases.get(keyId);
+    if (!keyLeases) {
+      keyLeases = /* @__PURE__ */ new Map();
+      this.leases.set(keyId, keyLeases);
+    }
+    keyLeases.set(leaseToken, now + this.leaseTimeoutMs);
+    record.totalRequests++;
+    record.lastUsedAt = now;
+    if (record.state === "WARMUP") {
+      record.canaryToken = leaseToken;
+    }
   }
   /**
    * Phase 1: Immediately graduates WARMUP keys to ACTIVE upon receiving HTTP 200 headers (<500ms).
@@ -712298,9 +712374,10 @@ var RotatingLLMProvider = class {
    */
   async ensureSynced() {
     if (!this.syncPromise) {
-      this.syncPromise = this.keyStore.syncKeys(
-        Array.from(this.keyConfigMap.values())
-      );
+      this.syncPromise = this.keyStore.syncKeys(Array.from(this.keyConfigMap.values())).catch((err) => {
+        this.syncPromise = null;
+        throw err;
+      });
     }
     await this.syncPromise;
   }
@@ -712391,17 +712468,34 @@ var RotatingLLMProvider = class {
           break;
         }
         const { done, value } = await reader.read();
-        if (done) break;
+        if (done) {
+          buffer += decoder.decode();
+          if (buffer.trim()) {
+            const tailLine = buffer.trim();
+            if (tailLine.startsWith("data:")) {
+              const payload = tailLine.slice(5).trim();
+              if (payload === "[DONE]") return;
+              try {
+                const json = JSON.parse(payload);
+                const token = json?.choices?.[0]?.delta?.content;
+                if (token) yield token;
+              } catch {
+              }
+            }
+          }
+          break;
+        }
         buffer += decoder.decode(value, { stream: true });
         let nl;
         while ((nl = buffer.indexOf("\n")) !== -1) {
           const line = buffer.slice(0, nl).trim();
           buffer = buffer.slice(nl + 1);
           if (!line || line.startsWith(":")) continue;
-          if (line === "data: [DONE]") return;
-          if (line.startsWith("data: ")) {
+          if (line.startsWith("data:")) {
+            const payload = line.slice(5).trim();
+            if (payload === "[DONE]") return;
             try {
-              const json = JSON.parse(line.slice(6));
+              const json = JSON.parse(payload);
               const token = json?.choices?.[0]?.delta?.content;
               if (token) yield token;
             } catch {
@@ -712746,9 +712840,10 @@ var UpstashRedisKeyStore = class {
       const keyIds = keys.map((k) => k.id);
       pipeline.push(["SADD", "openrouter:keys:list", ...keyIds]);
       for (const k of keys) {
+        const hashKey = `openrouter:key:${k.id}`;
         pipeline.push([
-          "HSETNX",
-          `openrouter:key:${k.id}`,
+          "HSET",
+          hashKey,
           "tier",
           k.tier.toString(),
           "weight",
@@ -712756,12 +712851,10 @@ var UpstashRedisKeyStore = class {
           "max_concurrency",
           k.maxConcurrency.toString(),
           "account_id",
-          k.accountId || "",
-          "state",
-          "ACTIVE",
-          "total_requests",
-          "0"
+          k.accountId || ""
         ]);
+        pipeline.push(["HSETNX", hashKey, "state", "ACTIVE"]);
+        pipeline.push(["HSETNX", hashKey, "total_requests", "0"]);
         if (k.accountId) {
           pipeline.push(["SADD", `openrouter:account:${k.accountId}:keys`, k.id]);
         }
@@ -712798,6 +712891,7 @@ var UpstashRedisKeyStore = class {
       }
       const keyId = result[0];
       const leaseToken = result[1];
+      this.memoryFallback.mirrorReservation(keyId, leaseToken);
       return { keyId, leaseToken };
     } catch (err) {
       this.recordFailure(err);
@@ -712929,17 +713023,21 @@ var UpstashRedisKeyStore = class {
     await this.memoryFallback.resetKeyToActive(keyId);
     if (this.isStorageBreakerOpen()) return;
     try {
+      const hashKey = `openrouter:key:${keyId}`;
       const pipeline = [
         [
           "HSET",
-          `openrouter:key:${keyId}`,
+          hashKey,
           "state",
           "ACTIVE",
+          "cooldown_until",
+          "0",
           "consecutive_429s",
           "0",
           "consecutive_failures",
           "0"
-        ]
+        ],
+        ["HDEL", hashKey, "canary_token", "last_error_code", "last_error_message"]
       ];
       if (accountId) {
         pipeline.push(["DEL", `openrouter:account:${accountId}:broken`]);
@@ -713019,6 +713117,12 @@ var UpstashRedisKeyStore = class {
       throw new Error(`Upstash HTTP ${res.status}: ${res.statusText}`);
     }
     const data = await res.json();
+    if (Array.isArray(data)) {
+      const cmdErr = data.find((entry) => entry && typeof entry === "object" && entry.error);
+      if (cmdErr) {
+        throw new Error(`Upstash Pipeline Command Error: ${cmdErr.error}`);
+      }
+    }
     return data;
   }
 };
@@ -713747,8 +713851,10 @@ function getQueuedMessagesForThread(threadId) {
 
 // lib/chat-store.ts
 async function createThread(widgetId) {
+  const wid = (widgetId ?? "").trim();
+  if (!wid) return null;
   try {
-    const { data, error } = await supabaseUntyped.from("chat_thread").insert({ widget_id: widgetId }).select("id").single();
+    const { data, error } = await supabaseUntyped.from("chat_thread").insert({ widget_id: wid }).select("id").single();
     if (error) {
       console.error("[chat-store] createThread failed:", error.message);
       return null;
@@ -713782,10 +713888,12 @@ async function getThread(threadId, widgetId) {
   }
 }
 async function listMessages(threadId, limit = 50) {
+  const tid = (threadId ?? "").trim();
+  if (!tid) return [];
   const safeLimit = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 50;
   let rows = [];
   try {
-    const { data, error } = await supabaseUntyped.from("chat_message").select("*").eq("thread_id", threadId).order("created_at", { ascending: true }).limit(safeLimit);
+    const { data, error } = await supabaseUntyped.from("chat_message").select("*").eq("thread_id", tid).order("created_at", { ascending: true }).limit(safeLimit);
     if (data) {
       rows = data;
     }
@@ -713798,7 +713906,7 @@ async function listMessages(threadId, limit = 50) {
       err?.message || err
     );
   }
-  const queuedRows = getQueuedMessagesForThread(threadId);
+  const queuedRows = getQueuedMessagesForThread(tid);
   if (queuedRows.length > 0) {
     rows = [...rows, ...queuedRows];
     rows.sort(
@@ -713811,14 +713919,15 @@ async function listMessages(threadId, limit = 50) {
   return rows;
 }
 async function appendMessage(threadId, role, content, options) {
-  if (!threadId) return false;
+  const tid = (threadId ?? "").trim();
+  if (!tid) return false;
   const allowQueue = options?.allowQueue !== false;
   const maxRetries = options?.maxRetries ?? 3;
-  const idempotencyKey = options?.idempotencyKey ?? `${threadId}:${role}:${Date.now()}:${Math.random().toString(36).slice(2, 6)}`;
+  const idempotencyKey = options?.idempotencyKey ?? `${tid}:${role}:${Date.now()}:${Math.random().toString(36).slice(2, 6)}`;
   try {
     const execRes = await executeWithFallback(
       async () => {
-        const { error } = await supabaseUntyped.from("chat_message").insert({ thread_id: threadId, role, content });
+        const { error } = await supabaseUntyped.from("chat_message").insert({ thread_id: tid, role, content });
         if (error) {
           throw error;
         }
@@ -713827,7 +713936,7 @@ async function appendMessage(threadId, role, content, options) {
       {
         queue: allowQueue ? dbFallbackQueue : void 0,
         fallbackPayload: {
-          threadId,
+          threadId: tid,
           role,
           content,
           createdAt: (/* @__PURE__ */ new Date()).toISOString()
@@ -714003,9 +714112,12 @@ async function listThreads(widgetId, limit = 100) {
   }
 }
 async function renameThread(threadId, widgetId, title) {
+  const tid = (threadId ?? "").trim();
+  const wid = (widgetId ?? "").trim();
+  if (!tid || !wid) return false;
   const normalized = title && title.trim().length > 0 ? title.trim().slice(0, 200) : null;
   try {
-    const { error } = await supabaseUntyped.from("chat_thread").update({ title: normalized }).eq("id", threadId).eq("widget_id", widgetId).eq("is_deleted", false);
+    const { error } = await supabaseUntyped.from("chat_thread").update({ title: normalized }).eq("id", tid).eq("widget_id", wid).eq("is_deleted", false);
     if (error) {
       console.error("[chat-store] renameThread failed:", error.message);
       return false;
@@ -714017,6 +714129,9 @@ async function renameThread(threadId, widgetId, title) {
   }
 }
 async function updateThreadPrompt(threadId, widgetId, patch) {
+  const tid = (threadId ?? "").trim();
+  const wid = (widgetId ?? "").trim();
+  if (!tid || !wid) return false;
   const update = {};
   if (patch.system_prompt !== void 0) {
     const v = patch.system_prompt?.trim() ?? "";
@@ -714028,7 +714143,7 @@ async function updateThreadPrompt(threadId, widgetId, patch) {
   }
   if (Object.keys(update).length === 0) return true;
   try {
-    const { error } = await supabaseUntyped.from("chat_thread").update(update).eq("id", threadId).eq("widget_id", widgetId).eq("is_deleted", false);
+    const { error } = await supabaseUntyped.from("chat_thread").update(update).eq("id", tid).eq("widget_id", wid).eq("is_deleted", false);
     if (error) {
       console.error("[chat-store] updateThreadPrompt failed:", error.message);
       return false;
@@ -714044,6 +714159,33 @@ async function updateThreadPrompt(threadId, widgetId, patch) {
 }
 function toWidgetMessage(row) {
   return { role: row.role, content: row.content };
+}
+
+// lib/url-guard.ts
+function isValidWidgetIconUrl(raw) {
+  const trimmed = raw.trim();
+  if (!trimmed || trimmed.length > 2048) return false;
+  if (/[\s<>"'`\\\x00-\x1f\x7f]/.test(trimmed)) return false;
+  if (trimmed.startsWith("//")) return false;
+  if (trimmed.startsWith("/")) {
+    try {
+      const resolved = new URL(trimmed, "https://relative.tokki.local");
+      return resolved.origin === "https://relative.tokki.local";
+    } catch {
+      return false;
+    }
+  }
+  try {
+    const parsed = new URL(trimmed);
+    return (parsed.protocol === "http:" || parsed.protocol === "https:") && Boolean(parsed.hostname) && !parsed.username && !parsed.password;
+  } catch {
+    return false;
+  }
+}
+function isValidWidgetBubbleSize(raw) {
+  const trimmed = raw.trim();
+  if (!trimmed || trimmed.length > 32) return false;
+  return /^\d+(?:\.\d+)?(?:px|rem|em|vh|vw|%)?$/i.test(trimmed);
 }
 
 // lib/widget-store.ts
@@ -714181,7 +714323,7 @@ async function upsertWidget(input) {
   if (input.icon_url !== void 0) {
     const v = input.icon_url?.trim();
     if (v) {
-      if (v.length > 2048 || !/^(?:https?:\/\/|\/)[^\s<>"'`\x00-\x1f]*$/i.test(v)) {
+      if (!isValidWidgetIconUrl(v)) {
         return {
           row: null,
           error: "invalid icon_url (must be http(s):// or relative / path)"
@@ -714194,7 +714336,17 @@ async function upsertWidget(input) {
   }
   if (input.chat_bubble_size !== void 0) {
     const v = input.chat_bubble_size?.trim();
-    patch.chat_bubble_size = v ? v : null;
+    if (v) {
+      if (!isValidWidgetBubbleSize(v)) {
+        return {
+          row: null,
+          error: "invalid chat_bubble_size (must be a safe CSS size like '48px' or '3.5rem')"
+        };
+      }
+      patch.chat_bubble_size = v;
+    } else {
+      patch.chat_bubble_size = null;
+    }
   }
   try {
     const { data, error } = await supabaseUntyped.from(TABLE).upsert(patch, { onConflict: "id" }).select("*").single();
@@ -714264,10 +714416,11 @@ var v2WidgetEndpoints = async (app) => {
         let threadId = "";
         let messages = [];
         if (master) {
-          threadId = body?.threadId ?? "";
+          threadId = (body?.threadId ?? "").trim();
           if (threadId) {
             const existing = await getThread(threadId, widgetId);
             if (existing) {
+              threadId = existing.id;
               const rows = await listMessages(threadId);
               messages = rows.map(toWidgetMessage);
             } else {
@@ -714367,7 +714520,7 @@ var v2WidgetEndpoints = async (app) => {
                 error: `threadId too large (${rawThreadId.length} > ${MAX_AUX_CHARS} chars)`
               };
             }
-            threadId = rawThreadId;
+            threadId = rawThreadId.trim();
           } else {
             let raw = "";
             try {
@@ -714432,10 +714585,21 @@ var v2WidgetEndpoints = async (app) => {
             error: "unregistered widget_id \u2014 register it via /v2/admin/widgets/upsert first"
           };
         }
+        if (!userMessage.trim()) {
+          set.status = 400;
+          return {
+            success: false,
+            error: "message required"
+          };
+        }
         let existingThread = null;
         if (threadId) {
           existingThread = await getThread(threadId, widgetId);
-          if (!existingThread) threadId = "";
+          if (existingThread) {
+            threadId = existingThread.id;
+          } else {
+            threadId = "";
+          }
         }
         if (!threadId) {
           threadId = await createThread(widgetId) ?? "";
@@ -714758,11 +714922,21 @@ var v2WidgetEndpoints = async (app) => {
         }
         if (typeof body?.icon_url === "string") {
           const trimmedIconUrl = body.icon_url.trim();
-          if (trimmedIconUrl.length > 0 && (trimmedIconUrl.length > 2048 || !/^(?:https?:\/\/|\/)[^\s<>"'`\x00-\x1f]*$/i.test(trimmedIconUrl))) {
+          if (trimmedIconUrl.length > 0 && !isValidWidgetIconUrl(trimmedIconUrl)) {
             set.status = 400;
             return {
               success: false,
               error: "invalid icon_url (must be http(s):// or relative / path)"
+            };
+          }
+        }
+        if (typeof body?.chat_bubble_size === "string") {
+          const trimmedBubbleSize = body.chat_bubble_size.trim();
+          if (trimmedBubbleSize.length > 0 && !isValidWidgetBubbleSize(trimmedBubbleSize)) {
+            set.status = 400;
+            return {
+              success: false,
+              error: "invalid chat_bubble_size (must be a safe CSS size like '48px' or '3.5rem')"
             };
           }
         }
@@ -714777,6 +714951,9 @@ var v2WidgetEndpoints = async (app) => {
           icon_url: body?.icon_url,
           chat_bubble_size: body?.chat_bubble_size
         });
+        if (!result.row) {
+          set.status = result.error?.startsWith("invalid ") || result.error?.includes("required") || result.error?.includes("maximum length") ? 400 : 500;
+        }
         return {
           success: !!result.row,
           widget: result.row,
@@ -715261,7 +715438,7 @@ async function sendNaverMail(input, options) {
   }
   const transporter = getTransporter();
   const user = resolveCreds().user;
-  const fromName = process.env.NAVER_MAIL_FROM_NAME?.trim();
+  const fromName = process.env.NAVER_MAIL_FROM_NAME?.replace(/[\r\n]+/g, " ").trim();
   const defaultFrom = fromName ? `${fromName} <${user}>` : user;
   const allowQueue = options?.allowQueue !== false;
   const maxRetries = options?.maxRetries ?? 3;
@@ -715386,6 +715563,10 @@ var v2MailEndpoints = async (app) => {
         if (/[\r\n]/.test(subject) || body?.from && /[\r\n]/.test(body.from)) {
           set.status = 400;
           return { success: false, error: "invalid header characters (CRLF prohibited)" };
+        }
+        if (body?.from && body.from.trim().length > 320) {
+          set.status = 400;
+          return { success: false, error: "from exceeds maximum length of 320 characters" };
         }
         if (!body?.text?.trim() && !body?.html?.trim()) {
           set.status = 400;
@@ -716503,7 +716684,64 @@ var createApp = async (serverless = false) => {
         error: `Payload Too Large: request body exceeds ${is2Mb ? "2MB" : "1MB"} limit`
       };
     }
-    if (code === "NOT_FOUND" || code === "VALIDATION" || code === "PARSE") {
+    if (code === "VALIDATION" || code === "PARSE") {
+      let errPath = "/";
+      try {
+        errPath = normalizePathname(
+          new URL(request?.url ?? "/", "http://localhost").pathname
+        );
+      } catch {
+        errPath = "/";
+      }
+      if (errPath.startsWith("/v2/admin/")) {
+        const token = (request?.headers?.get?.("x-admin-token") || "").trim();
+        const attachOriginCors = () => {
+          const origin = request?.headers?.get?.("origin");
+          if (origin) {
+            set.headers = set.headers || {};
+            set.headers["access-control-allow-origin"] = origin;
+            set.headers["access-control-allow-credentials"] = "true";
+            set.headers["access-control-expose-headers"] = "retry-after, x-ratelimit-limit, x-ratelimit-remaining, x-ratelimit-reset";
+            set.headers["vary"] = "Origin";
+          }
+        };
+        if (errPath === "/v2/admin/mail/send") {
+          const mailToken = process.env.MAIL_SEND_TOKEN?.trim();
+          const adminToken = process.env.ADMIN_TOKEN?.trim();
+          if (!mailToken && !adminToken) {
+            set.status = 500;
+            attachOriginCors();
+            return {
+              success: false,
+              error: "neither MAIL_SEND_TOKEN nor ADMIN_TOKEN is set on server"
+            };
+          }
+          const ok = !!mailToken && timingSafeMatch(token, mailToken) || !!adminToken && timingSafeMatch(token, adminToken);
+          if (!ok) {
+            set.status = 401;
+            attachOriginCors();
+            return { success: false, error: "unauthorized" };
+          }
+        } else {
+          const adminToken = process.env.ADMIN_TOKEN?.trim();
+          if (!adminToken) {
+            set.status = 500;
+            attachOriginCors();
+            return {
+              success: false,
+              error: "ADMIN_TOKEN env var not set on server"
+            };
+          }
+          if (!timingSafeMatch(token, adminToken)) {
+            set.status = 401;
+            attachOriginCors();
+            return { success: false, error: "unauthorized" };
+          }
+        }
+      }
+      return;
+    }
+    if (code === "NOT_FOUND") {
       return;
     }
     const isProd = process.env.NODE_ENV === "production" || process.env.VERCEL_ENV === "production";

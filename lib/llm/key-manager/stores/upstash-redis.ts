@@ -75,9 +75,10 @@ export class UpstashRedisKeyStore implements IKeyStore {
       pipeline.push(['SADD', 'openrouter:keys:list', ...keyIds]);
 
       for (const k of keys) {
+        const hashKey = `openrouter:key:${k.id}`;
         pipeline.push([
-          'HSETNX',
-          `openrouter:key:${k.id}`,
+          'HSET',
+          hashKey,
           'tier',
           k.tier.toString(),
           'weight',
@@ -86,11 +87,9 @@ export class UpstashRedisKeyStore implements IKeyStore {
           k.maxConcurrency.toString(),
           'account_id',
           k.accountId || '',
-          'state',
-          'ACTIVE',
-          'total_requests',
-          '0',
         ]);
+        pipeline.push(['HSETNX', hashKey, 'state', 'ACTIVE']);
+        pipeline.push(['HSETNX', hashKey, 'total_requests', '0']);
         if (k.accountId) {
           pipeline.push(['SADD', `openrouter:account:${k.accountId}:keys`, k.id]);
         }
@@ -138,6 +137,10 @@ export class UpstashRedisKeyStore implements IKeyStore {
 
       const keyId = result[0];
       const leaseToken = result[1];
+
+      // Mirror reservation into L1 memory store so WARMUP graduation, getAllStates(),
+      // and mid-stream breaker fail-open stay synchronized with Redis ZSET leases.
+      this.memoryFallback.mirrorReservation(keyId, leaseToken);
 
       return { keyId, leaseToken };
     } catch (err) {
@@ -298,17 +301,21 @@ export class UpstashRedisKeyStore implements IKeyStore {
     if (this.isStorageBreakerOpen()) return;
 
     try {
+      const hashKey = `openrouter:key:${keyId}`;
       const pipeline: any[][] = [
         [
           'HSET',
-          `openrouter:key:${keyId}`,
+          hashKey,
           'state',
           'ACTIVE',
+          'cooldown_until',
+          '0',
           'consecutive_429s',
           '0',
           'consecutive_failures',
           '0',
         ],
+        ['HDEL', hashKey, 'canary_token', 'last_error_code', 'last_error_message'],
       ];
       if (accountId) {
         pipeline.push(['DEL', `openrouter:account:${accountId}:broken`]);
@@ -401,6 +408,12 @@ export class UpstashRedisKeyStore implements IKeyStore {
     }
 
     const data = (await res.json()) as any[];
+    if (Array.isArray(data)) {
+      const cmdErr = data.find((entry) => entry && typeof entry === 'object' && entry.error);
+      if (cmdErr) {
+        throw new Error(`Upstash Pipeline Command Error: ${cmdErr.error}`);
+      }
+    }
     return data;
   }
 }

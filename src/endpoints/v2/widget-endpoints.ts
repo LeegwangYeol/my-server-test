@@ -21,6 +21,10 @@ import {
   upsertWidget,
   type WidgetRow,
 } from "../../../lib/widget-store";
+import {
+  isValidWidgetBubbleSize,
+  isValidWidgetIconUrl,
+} from "../../../lib/url-guard";
 
 const MAX_WIDGET_ID_CHARS = 100;
 
@@ -109,10 +113,11 @@ export const v2WidgetEndpoints = async (app: any) => {
         let messages: { role: string; content: string }[] = [];
 
         if (master) {
-          threadId = body?.threadId ?? "";
+          threadId = (body?.threadId ?? "").trim();
           if (threadId) {
             const existing = await getThread(threadId, widgetId);
             if (existing) {
+              threadId = existing.id;
               const rows = await listMessages(threadId);
               messages = rows.map(toWidgetMessage);
             } else {
@@ -233,7 +238,7 @@ export const v2WidgetEndpoints = async (app: any) => {
                 error: `threadId too large (${rawThreadId.length} > ${MAX_AUX_CHARS} chars)`,
               };
             }
-            threadId = rawThreadId;
+            threadId = rawThreadId.trim();
           } else {
             let raw = "";
             try {
@@ -315,11 +320,24 @@ export const v2WidgetEndpoints = async (app: any) => {
           };
         }
 
+        // ── Guard 2b: 빈/공백 전용 메시지 차단 (불필요한 DB 행 생성 및 LLM 쿼터 소모 방지) ──
+        if (!userMessage.trim()) {
+          set.status = 400;
+          return {
+            success: false,
+            error: "message required",
+          };
+        }
+
         // Make sure we have a thread on file before persisting anything.
         let existingThread = null;
         if (threadId) {
           existingThread = await getThread(threadId, widgetId);
-          if (!existingThread) threadId = "";
+          if (existingThread) {
+            threadId = existingThread.id;
+          } else {
+            threadId = "";
+          }
         }
         if (!threadId) {
           threadId = (await createThread(widgetId)) ?? "";
@@ -759,15 +777,25 @@ export const v2WidgetEndpoints = async (app: any) => {
         }
         if (typeof body?.icon_url === "string") {
           const trimmedIconUrl = body.icon_url.trim();
-          if (
-            trimmedIconUrl.length > 0 &&
-            (trimmedIconUrl.length > 2048 ||
-              !/^(?:https?:\/\/|\/)[^\s<>"'`\x00-\x1f]*$/i.test(trimmedIconUrl))
-          ) {
+          if (trimmedIconUrl.length > 0 && !isValidWidgetIconUrl(trimmedIconUrl)) {
             set.status = 400;
             return {
               success: false,
               error: "invalid icon_url (must be http(s):// or relative / path)",
+            };
+          }
+        }
+        if (typeof body?.chat_bubble_size === "string") {
+          const trimmedBubbleSize = body.chat_bubble_size.trim();
+          if (
+            trimmedBubbleSize.length > 0 &&
+            !isValidWidgetBubbleSize(trimmedBubbleSize)
+          ) {
+            set.status = 400;
+            return {
+              success: false,
+              error:
+                "invalid chat_bubble_size (must be a safe CSS size like '48px' or '3.5rem')",
             };
           }
         }
@@ -784,6 +812,14 @@ export const v2WidgetEndpoints = async (app: any) => {
           icon_url: body?.icon_url,
           chat_bubble_size: body?.chat_bubble_size,
         });
+        if (!result.row) {
+          set.status =
+            result.error?.startsWith("invalid ") ||
+            result.error?.includes("required") ||
+            result.error?.includes("maximum length")
+              ? 400
+              : 500;
+        }
         return {
           success: !!result.row,
           widget: result.row,

@@ -73,12 +73,17 @@ export const v1VideoList = (app: any) => {
           }
         }
 
+        const cleanPageToken =
+          typeof pageToken === "string" && pageToken.trim()
+            ? pageToken.trim()
+            : undefined;
+
         // 업로드 플레이리스트에서 동영상 리스트 가져오기
         const response = await youtube.playlistItems.list({
           part: ["snippet", "contentDetails"],
           playlistId: uploadsPlaylistId,
           maxResults: max,
-          pageToken: pageToken || undefined,
+          pageToken: cleanPageToken,
         });
 
         return {

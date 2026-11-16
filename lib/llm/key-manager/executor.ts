@@ -259,8 +259,8 @@ export async function executeWithResilientFailover(
         continue;
       }
 
-      // --- CASE 5: TRANSIENT SERVER ERROR (500, 502, 503, 504) ---
-      if (response.status >= 500) {
+      // --- CASE 5: TRANSIENT SERVER / GATEWAY TIMEOUT ERROR (408, 500, 502, 503, 504) ---
+      if (response.status >= 500 || response.status === 408) {
         lastStatusCode = response.status;
         await keyStore.releaseKey(keyId, leaseToken, response.status, 2500, errText);
         continue;

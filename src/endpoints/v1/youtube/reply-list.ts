@@ -45,11 +45,16 @@ export const v1ReplyList = (app: any) => {
           }
         }
 
+        const cleanPageToken =
+          typeof pageToken === "string" && pageToken.trim()
+            ? pageToken.trim()
+            : undefined;
+
         const response = await youtube.comments.list({
           part: ["snippet"], // part 파라미터 추가
           parentId: parentId,
           maxResults: max,
-          pageToken: pageToken || undefined,
+          pageToken: cleanPageToken,
         });
 
         return {

@@ -262,31 +262,33 @@ export class HealthAndCooldownEngine {
 
     const now = nowMs;
 
-    // 1. Check standard 'retry-after' header (delta-seconds or RFC 9110 HTTP-Date)
+    // 1. Check standard 'retry-after' header (delta-seconds, fractional seconds, or RFC 9110 HTTP-Date)
     const retryAfter = getHeader('retry-after');
     if (retryAfter) {
       const trimmed = retryAfter.trim();
-      // Handle pure numeric delta-seconds
-      if (/^\d+$/.test(trimmed)) {
-        const deltaSec = parseInt(trimmed, 10);
-        if (!isNaN(deltaSec) && deltaSec >= 0) {
-          return Math.max(1000, deltaSec * 1000 + this.getJitterMs(500, 1500));
+      // Handle integer or fractional delta-seconds (e.g. "3", "1.5", "0.5s")
+      if (/^(?:\d+(?:\.\d*)?|\.\d+)s?$/i.test(trimmed)) {
+        const deltaSec = parseFloat(trimmed);
+        if (!isNaN(deltaSec) && Number.isFinite(deltaSec) && deltaSec >= 0) {
+          return Math.max(1000, Math.ceil(deltaSec * 1000) + this.getJitterMs(500, 1500));
         }
       }
-      // Handle RFC 9110 HTTP-Date
-      const parsedDate = Date.parse(trimmed);
-      if (!isNaN(parsedDate)) {
-        const serverDateStr = getHeader('date');
-        let skew = 0;
-        if (serverDateStr) {
-          const parsedServerDate = Date.parse(serverDateStr);
-          if (!isNaN(parsedServerDate)) {
-            skew = parsedServerDate - now;
+      // Handle RFC 9110 HTTP-Date (skip pure numeric strings like "-1" so Date.parse doesn't misinterpret as year)
+      if (isNaN(Number(trimmed))) {
+        const parsedDate = Date.parse(trimmed);
+        if (!isNaN(parsedDate)) {
+          const serverDateStr = getHeader('date');
+          let skew = 0;
+          if (serverDateStr) {
+            const parsedServerDate = Date.parse(serverDateStr);
+            if (!isNaN(parsedServerDate)) {
+              skew = parsedServerDate - now;
+            }
           }
-        }
-        const diffMs = parsedDate - (now + skew);
-        if (!isNaN(diffMs) && diffMs > 0) {
-          return Math.max(1000, diffMs + this.getJitterMs(500, 1500));
+          const diffMs = parsedDate - (now + skew);
+          if (!isNaN(diffMs) && diffMs > 0) {
+            return Math.max(1000, diffMs + this.getJitterMs(500, 1500));
+          }
         }
       }
     }

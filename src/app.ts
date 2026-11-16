@@ -1,7 +1,10 @@
 import { Elysia } from "elysia";
 import { swagger } from "@elysiajs/swagger";
 import { v1Endpoints } from "./endpoints/v1/v1-endpoints";
-import { v2WidgetEndpoints } from "./endpoints/v2/widget-endpoints";
+import {
+  v2WidgetEndpoints,
+  timingSafeMatch,
+} from "./endpoints/v2/widget-endpoints";
 import { v2MailEndpoints } from "./endpoints/v2/mail-endpoints";
 import { v2SmsEndpoints } from "./endpoints/v2/sms-endpoints";
 import { healthzEndpoint } from "./endpoints/healthz";
@@ -222,7 +225,69 @@ export const createApp = async (serverless = false) => {
         };
       }
 
-      if (code === "NOT_FOUND" || code === "VALIDATION" || code === "PARSE") {
+      if (code === "VALIDATION" || code === "PARSE") {
+        let errPath = "/";
+        try {
+          errPath = normalizePathname(
+            new URL(request?.url ?? "/", "http://localhost").pathname,
+          );
+        } catch {
+          errPath = "/";
+        }
+        if (errPath.startsWith("/v2/admin/")) {
+          const token = (request?.headers?.get?.("x-admin-token") || "").trim();
+          const attachOriginCors = () => {
+            const origin = request?.headers?.get?.("origin");
+            if (origin) {
+              set.headers = set.headers || {};
+              set.headers["access-control-allow-origin"] = origin;
+              set.headers["access-control-allow-credentials"] = "true";
+              set.headers["access-control-expose-headers"] =
+                "retry-after, x-ratelimit-limit, x-ratelimit-remaining, x-ratelimit-reset";
+              set.headers["vary"] = "Origin";
+            }
+          };
+
+          if (errPath === "/v2/admin/mail/send") {
+            const mailToken = process.env.MAIL_SEND_TOKEN?.trim();
+            const adminToken = process.env.ADMIN_TOKEN?.trim();
+            if (!mailToken && !adminToken) {
+              set.status = 500;
+              attachOriginCors();
+              return {
+                success: false,
+                error: "neither MAIL_SEND_TOKEN nor ADMIN_TOKEN is set on server",
+              };
+            }
+            const ok =
+              (!!mailToken && timingSafeMatch(token, mailToken)) ||
+              (!!adminToken && timingSafeMatch(token, adminToken));
+            if (!ok) {
+              set.status = 401;
+              attachOriginCors();
+              return { success: false, error: "unauthorized" };
+            }
+          } else {
+            const adminToken = process.env.ADMIN_TOKEN?.trim();
+            if (!adminToken) {
+              set.status = 500;
+              attachOriginCors();
+              return {
+                success: false,
+                error: "ADMIN_TOKEN env var not set on server",
+              };
+            }
+            if (!timingSafeMatch(token, adminToken)) {
+              set.status = 401;
+              attachOriginCors();
+              return { success: false, error: "unauthorized" };
+            }
+          }
+        }
+        return;
+      }
+
+      if (code === "NOT_FOUND") {
         return;
       }
 

@@ -46,11 +46,16 @@ export const v1CommentList = (app: any) => {
           }
         }
 
+        const cleanPageToken =
+          typeof pageToken === "string" && pageToken.trim()
+            ? pageToken.trim()
+            : undefined;
+
         const response = await youtube.commentThreads.list({
           part: ["snippet", "replies"],
           videoId: videoId,
           maxResults: max,
-          pageToken: pageToken,
+          pageToken: cleanPageToken,
           textFormat: textFormat || "html",
           order: order || "time",
         });

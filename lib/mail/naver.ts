@@ -160,7 +160,7 @@ export async function sendNaverMail(
 
   const transporter = getTransporter();
   const user = resolveCreds().user!;
-  const fromName = process.env.NAVER_MAIL_FROM_NAME?.trim();
+  const fromName = process.env.NAVER_MAIL_FROM_NAME?.replace(/[\r\n]+/g, " ").trim();
   // Naver rejects a From that doesn't match the authenticated account, so we
   // only ever vary the display name — the address stays NAVER_MAIL_USER.
   const defaultFrom = fromName ? `${fromName} <${user}>` : user;

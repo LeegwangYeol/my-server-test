@@ -10,6 +10,9 @@
  */
 
 import { supabaseUntyped } from "./supabase/client";
+import { isValidWidgetIconUrl, isValidWidgetBubbleSize } from "./url-guard";
+
+export { isValidWidgetIconUrl, isValidWidgetBubbleSize };
 
 export interface WidgetRow {
   id: string;
@@ -234,10 +237,7 @@ export async function upsertWidget(
     // simply send `""` to revert to the default glyph.
     const v = input.icon_url?.trim();
     if (v) {
-      if (
-        v.length > 2048 ||
-        !/^(?:https?:\/\/|\/)[^\s<>"'`\x00-\x1f]*$/i.test(v)
-      ) {
+      if (!isValidWidgetIconUrl(v)) {
         return {
           row: null,
           error: "invalid icon_url (must be http(s):// or relative / path)",
@@ -250,7 +250,18 @@ export async function upsertWidget(
   }
   if (input.chat_bubble_size !== undefined) {
     const v = input.chat_bubble_size?.trim();
-    patch.chat_bubble_size = v ? v : null;
+    if (v) {
+      if (!isValidWidgetBubbleSize(v)) {
+        return {
+          row: null,
+          error:
+            "invalid chat_bubble_size (must be a safe CSS size like '48px' or '3.5rem')",
+        };
+      }
+      patch.chat_bubble_size = v;
+    } else {
+      patch.chat_bubble_size = null;
+    }
   }
 
   try {

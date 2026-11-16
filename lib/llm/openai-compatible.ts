@@ -56,9 +56,10 @@ export class OpenAICompatibleProvider implements LLMProvider {
     req: LLMStreamRequest,
     signal?: AbortSignal,
   ): AsyncIterable<string> {
-    const resp = await this.fetchWithRetry(req, signal);
+    const { resp, cleanupAttempt } = await this.fetchWithRetry(req, signal);
 
     if (!resp.body) {
+      cleanupAttempt();
       throw new Error(`[${this.name}] empty response body`);
     }
 
@@ -69,7 +70,25 @@ export class OpenAICompatibleProvider implements LLMProvider {
     try {
       while (true) {
         const { value, done } = await reader.read();
-        if (done) break;
+        if (done) {
+          buffer += decoder.decode();
+          if (buffer.trim()) {
+            const tailLine = buffer.trim();
+            if (tailLine.startsWith("data:")) {
+              const payload = tailLine.slice(5).trim();
+              if (payload === "[DONE]") return;
+              try {
+                const json = JSON.parse(payload);
+                const delta: string | undefined =
+                  json?.choices?.[0]?.delta?.content;
+                if (delta) yield delta;
+              } catch {
+                /* Skip malformed/keep-alive frames silently. */
+              }
+            }
+          }
+          break;
+        }
         buffer += decoder.decode(value, { stream: true });
 
         // Process complete SSE events (separated by \n\n or \n).
@@ -91,6 +110,7 @@ export class OpenAICompatibleProvider implements LLMProvider {
         }
       }
     } finally {
+      cleanupAttempt();
       try {
         await reader.cancel().catch(() => {});
         reader.releaseLock();
@@ -109,9 +129,10 @@ export class OpenAICompatibleProvider implements LLMProvider {
   private async fetchWithRetry(
     req: LLMStreamRequest,
     signal?: AbortSignal,
-  ): Promise<Response> {
+  ): Promise<{ resp: Response; cleanupAttempt: () => void }> {
     const maxRetries = envInt("LLM_RETRY_MAX", 3, 0, 5);
     const maxWaitMs = envInt("LLM_RETRY_MAX_WAIT_MS", 5000, 0, 8000);
+    const handshakeTimeoutMs = envInt("LLM_HANDSHAKE_TIMEOUT_MS", 15000, 50, 55000);
     const body = JSON.stringify({
       model: req.model ?? this.defaultModel,
       messages: req.messages,
@@ -121,11 +142,32 @@ export class OpenAICompatibleProvider implements LLMProvider {
     });
 
     for (let attempt = 0; ; attempt++) {
+      const attemptCtrl = new AbortController();
+      let timedOut = false;
+      const timer = setTimeout(() => {
+        timedOut = true;
+        attemptCtrl.abort(new Error("LLM_HANDSHAKE_TIMEOUT"));
+      }, handshakeTimeoutMs);
+      const onClientAbort = () => attemptCtrl.abort(signal?.reason);
+      if (signal) {
+        if (signal.aborted) {
+          clearTimeout(timer);
+          throw abortError();
+        }
+        signal.addEventListener("abort", onClientAbort, { once: true });
+      }
+      const cleanupAttempt = () => {
+        clearTimeout(timer);
+        if (signal) {
+          signal.removeEventListener("abort", onClientAbort);
+        }
+      };
+
       let resp: Response;
       try {
         resp = await fetch(`${this.baseUrl}/chat/completions`, {
           method: "POST",
-          signal,
+          signal: attemptCtrl.signal,
           headers: {
             "Content-Type": "application/json",
             Authorization: `Bearer ${this.apiKey}`,
@@ -133,20 +175,26 @@ export class OpenAICompatibleProvider implements LLMProvider {
           },
           body,
         });
+        // Clear handshake timeout once headers arrive so long SSE streams can run freely
+        clearTimeout(timer);
       } catch (err) {
-        // 취소는 재시도 대상이 아니다. 네트워크 오류만 한정 재시도.
-        if (signal?.aborted || isAbortError(err) || attempt >= maxRetries) {
+        cleanupAttempt();
+        // 취소는 재시도 대상이 아니다. 네트워크 오류 또는 핸드셰이크 타임아웃만 한정 재시도.
+        if (signal?.aborted || (!timedOut && isAbortError(err)) || attempt >= maxRetries) {
           throw err;
         }
         const wait = backoffMs(attempt);
         console.warn(
-          `[${this.name}] network error → retry ${attempt + 1}/${maxRetries} in ${wait}ms`,
+          `[${this.name}] ${timedOut ? "handshake timeout" : "network error"} → retry ${attempt + 1}/${maxRetries} in ${wait}ms`,
         );
         await sleep(wait, signal);
         continue;
       }
 
-      if (resp.ok) return resp;
+      if (resp.ok) {
+        return { resp, cleanupAttempt };
+      }
+      cleanupAttempt();
 
       const retryable = RETRYABLE_STATUS.has(resp.status);
       if (retryable && attempt < maxRetries) {
