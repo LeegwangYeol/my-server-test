@@ -2875,3 +2875,23 @@ This document serves as the shared communication channel between the AI Team (Ge
   5. **W3C SSE Frame Parity, Handshake Timeout & Fractional `Retry-After` (`lib/llm/{rotating-provider,openai-compatible}.ts`, `lib/llm/key-manager/{engine,executor}.ts`)**: Enabled no-space `data:{...}` W3C SSE parsing + EOF buffer flushing in both LLM providers, added `LLM_HANDSHAKE_TIMEOUT_MS` retryable handshake timeout + listener cleanup in `OpenAICompatibleProvider`, rotated past `HTTP 408` + transient `syncKeys` failures, and supported fractional `Retry-After` delta-seconds (e.g. `2.5`) in `HealthAndCooldownEngine.calculate429Cooldown`.
   6. **YouTube OAuth & Pagination Hygiene (`src/endpoints/v1/youtube/*.ts`, `src/endpoints/v2/mail-endpoints.ts`, `lib/mail/naver.ts`)**: Trimmed/bounded `code` & `state` in `/v1/youtube/auth/confirm`, normalized blank `pageToken` across all 4 paginated YouTube routes, capped mail `from` length (`<= 320`), and added regression tests (`VULN-34`..`VULN-38` + `2.8` suite).
 - **Status**: **304 / 304 PASS (`bun test`, 1,925 `expect()` assertions across 13 files), Local 34/34 & Remote 34/34 PASS (`morning-audit-runner.ts`), 0 TypeScript errors, `api/index.js` synchronized & committed with `[skip ci]`.**
+
+
+---
+
+## 83. Daily Quota-Safe Controlled Load & Adversarial Perimeter Audit (2026-11-17)
+
+- **Session**: `[세션명: 토키 위젯 일일 부하 테스트]` (Single-Agent Focused Mode — Zero External Cloud Quota Burn).
+- **R1 Controlled Concurrency & 429/402 Failover Verification**:
+  - Executed Wave 1 (18 concurrent `/v2/ask` requests via `/usr/bin/curl`: 16 full SSE streams + 2 mid-stream client aborts) + Wave 2 (12 warm steady-state concurrent requests) across a 5-key / 4-account ZSET pool (`acc-bankrupt` 2 sibling keys returning Mock 402, `acc-ratelim-1` & `acc-ratelim-2` returning Mock 429 with delta-seconds & RFC 9110 HTTP-date, `acc-healthy` returning 200 SSE).
+  - Wave 1 completed in **89.33ms** (`p50: 82.05ms`, `p95/max: 88.38ms` vs 60,000ms Vercel limit) with **100% failover** and **0 upstream calls** to sibling bankrupt key `k2-dead-b`; Wave 2 completed in **86.57ms** (`p50: 84.55ms`, `p95/max: 86.03ms`) with **0 upstream calls** to all 4 broken/cooling-down keys and post-wave $\text{ZCARD} \equiv 0$.
+- **R2 Adversarial Perimeter & DOM XSS Hardening (5 Patches Applied Across Frontend & Backend, 18/18 Live `curl` Vectors PASS)**:
+  1. `tokki-widget/lib/components/MarkdownPreview.tsx`: Replaced ad-hoc blacklist with strict `SAFE_HAST_PROPS` allowlist, stripping `id`/`name` (preventing host-DOM `window`/`document` clobbering including `rehype-slug` heading IDs), `style` (blocking full-viewport UI redressing & CSS exfiltration), `ping` (blocking stealth POST beacons), and `srcSet`/`srcset`, while preserving code syntax highlighting & `data-code`.
+  2. `tokki-widget/lib/utils/sanitize-url.ts` & `ChatToggle.tsx` / `ChatWindow.tsx` / `ChatMessage.tsx`: Neutralized WHATWG backslash (`/\evil.com`) and control-character (`/\t/evil.com`) open-redirect bypasses via origin-bound `new URL(..., "https://relative.tokki.local")` checks, and enforced `sanitizeImageUrl()` across all `<img src>` surfaces.
+  3. `tokki-widget/lib/state/chat.tsx` & `ChatWindow.tsx`: Added synchronous live-proxy `waitingResponse` re-entrancy guards in `startQuestion()` / `startVoiceQuestion()` and `chatOps.isBusy()` in suggested-question chip handlers.
+  4. `my-server-test/lib/url-guard.ts` & `lib/widget-store.ts` & `src/endpoints/v2/widget-endpoints.ts`: Blocked protocol-relative (`//evil.com`), backslash (`/\evil.com`), credentialed, and empty-host `icon_url` inputs (`HTTP 400`).
+  5. `my-server-test/lib/llm/key-manager/stores/{memory,upstash-redis}.ts`, `executor.ts`, `rotating-provider.ts`: Added `MemoryKeyStore.mirrorReservation()` for Upstash Redis L1/L2 `WARMUP` canary & `getAllStates()` synchronization, rotated past upstream `HTTP 408` gateway timeouts, and cleared `syncPromise` on transient `syncKeys` failure.
+- **R3 Verification**:
+  - `bun test`: **304 / 304 PASS** (`my-server-test`, 1,925 assertions) + **35 / 35 PASS** (`tokki-widget`, 162 assertions) = **339 / 339 PASS (2,087 assertions)**.
+  - Pre-flight builds: `bundle:api` (`api/index.js` 26.9MB), `type-check` (0 errors), `build` (2.67s), `build:embed` (2.00s), `export-playground` (2.42s).
+  - Korean report generated at `stress_test_audit.md` (`v6.5.0-DAILY-KO`). Committed locally with `[skip ci]`.
