@@ -233,13 +233,25 @@ export async function executeWithResilientFailover(
         throw new UpstreamProviderOutageError(outageCheck.provider || 'UpstreamProvider');
       }
 
-      // --- CASE 3: PERMANENT FINANCIAL EXHAUSTION (402 or 401) ---
-      if (response.status === 402 || response.status === 401) {
-        lastStatusCode = response.status;
+      // --- CASE 3: PERMANENT ACCOUNT FINANCIAL EXHAUSTION (402) ---
+      if (response.status === 402) {
+        lastStatusCode = 402;
         if (config.accountId) {
           brokenAccountIds.add(config.accountId);
         }
-        // Invalidate key and all linked keys in Redis in <5ms
+        // Invalidate key and all linked keys in shared account in <5ms
+        await keyStore.releaseKey(keyId, leaseToken, 402, Infinity, errText);
+        continue;
+      }
+
+      // --- CASE 3b: KEY-SCOPED AUTH / SPENDING LIMIT FAILURE (401 or non-moderation 403) ---
+      // Isolates blast radius strictly to this individual key so healthy sibling keys
+      // in the same organization/account remain eligible for immediate failover!
+      if (
+        response.status === 401 ||
+        (response.status === 403 && !HealthAndCooldownEngine.isPromptModerationError(errJson))
+      ) {
+        lastStatusCode = response.status;
         await keyStore.releaseKey(keyId, leaseToken, response.status, Infinity, errText);
         continue;
       }
@@ -266,9 +278,16 @@ export async function executeWithResilientFailover(
         continue;
       }
 
-      // --- CASE 6: CLIENT ERROR (400, 404, 413, 422) ---
-      // Not a key-specific failure; return directly to caller without rotating
-      await keyStore.releaseKey(keyId, leaseToken, response.status, 0, 'Client error');
+      // --- CASE 6: CLIENT / PROMPT MODERATION ERROR (400, 404, 413, 422, or Moderation 403) ---
+      // Not a key-specific failure; reclaim lease with status 0 / cooldown 0 (zero key penalty)
+      // and return response directly to caller without rotating
+      await keyStore.releaseKey(
+        keyId,
+        leaseToken,
+        0,
+        0,
+        `Client error (${response.status})`
+      );
       return { response, keyId, leaseToken };
 
     } catch (networkErr: any) {

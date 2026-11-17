@@ -319,8 +319,8 @@ export class MemoryKeyStore implements IKeyStore {
         record.lastStatusCode = 429;
         record.lastErrorMessage = errMsg;
       }
-    } else if (statusCode === 402 || statusCode === 401) {
-      // Permanent financial / authorization exhaustion
+    } else if (statusCode === 402) {
+      // Permanent account-wide financial exhaustion (shared wallet empty)
       record.state = 'EXHAUSTED';
       record.cooldownUntil = Infinity;
       record.lastStatusCode = statusCode;
@@ -343,6 +343,13 @@ export class MemoryKeyStore implements IKeyStore {
           }
         }
       }
+    } else if (statusCode === 401 || statusCode === 403) {
+      // Key-scoped permanent failure (revoked key or per-key spending limit):
+      // exhaust ONLY this key without poisoning healthy sibling keys in the same account
+      record.state = 'EXHAUSTED';
+      record.cooldownUntil = Infinity;
+      record.lastStatusCode = statusCode;
+      record.lastErrorMessage = errMsg;
     } else if (statusCode >= 500 || (statusCode === 0 && cooldown > 0) || statusCode === 408) {
       // Transient network drop, timeout, or upstream 5xx
       record.consecutiveFailures++;

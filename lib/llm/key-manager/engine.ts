@@ -13,6 +13,7 @@ export interface OpenRouterErrorPayload {
       provider_name?: string;
       model_slug?: string;
       raw?: string;
+      reasons?: string[];
     };
   };
 }
@@ -231,6 +232,18 @@ export class HealthAndCooldownEngine {
       return { isOutage: true, provider: 'UpstreamProvider' };
     }
     return { isOutage: false };
+  }
+
+  /**
+   * Distinguishes prompt-level content moderation rejections (HTTP 403) from
+   * key-scoped authorization/spending-limit failures (e.g. "Key limit exceeded").
+   */
+  public static isPromptModerationError(payload?: OpenRouterErrorPayload): boolean {
+    if (Array.isArray(payload?.error?.metadata?.reasons) && payload.error.metadata.reasons.length > 0) {
+      return true;
+    }
+    const msg = (payload?.error?.message || '').toLowerCase();
+    return msg.includes('moderation') || msg.includes('flagged');
   }
 
   /**

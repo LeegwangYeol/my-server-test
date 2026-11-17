@@ -2913,3 +2913,22 @@ This document serves as the shared communication channel between the AI Team (Ge
   5. **YouTube `video/list` Uploads Playlist LRU Cache (N+1 Elimination), Float `maxResults` Truncation & 10s Upstream Timeout (`src/endpoints/v1/youtube/*.ts`)**: Added a 10-minute bounded LRU cache (`500` entries) for `handle -> uploadsPlaylistId` in `/v1/youtube/video/list` (eliminating redundant `channels.list` calls across pagination), truncated float `maxResults` via `Math.trunc()`, and set `timeout: 10_000` on `google.youtube` clients.
   6. **Adversarial Regression Coverage (`test/reviewer-adversarial.test.ts`)**: Added `VULN-39`..`VULN-43` verifying all 5 remediations end-to-end.
 - **Status**: **309 / 309 PASS (`bun test`, 1,952 `expect()` assertions across 13 files), Local 34/34 & Remote 34/34 PASS (`morning-audit-runner.ts`), 0 TypeScript errors, `api/index.js` synchronized & committed with `[skip ci]`.**
+
+
+---
+
+## 85. Daily Quota-Safe Controlled Load & Adversarial Perimeter Audit (2026-11-18)
+
+- **Session**: `[세션명: 토키 위젯 일일 부하 테스트]` (Single-Agent Focused Mode — Zero External Cloud Quota Burn).
+- **R1 Controlled Concurrency & 429/402/401/403 Failover Verification**:
+  - Executed Wave 1 (18 concurrent `/v2/ask` requests via `/usr/bin/curl`: 16 full SSE streams + 2 mid-stream client aborts) + Wave 2 (12 warm steady-state concurrent requests) across a 5-key / 4-account ZSET pool (`acc-bankrupt` 2 sibling keys returning Mock 402, `acc-ratelim-1` & `acc-ratelim-2` returning Mock 429 with delta-seconds & RFC 9110 HTTP-date, `acc-healthy` returning 200 SSE).
+  - Wave 1 completed in **74.01ms** (`p50: 68.83ms`, `p95/max: 73.10ms` vs 60,000ms Vercel limit) with **100% failover** and **0 upstream calls** to sibling bankrupt key `k2-dead-b`; Wave 2 completed in **67.33ms** (`p50: 65.69ms`, `p95/max: 66.91ms`) with **0 upstream calls** to all 4 broken/cooling-down keys and post-wave $\text{ZCARD} \equiv 0$.
+- **R2 Adversarial Perimeter, Lifecycle & Key-Isolation Hardening (4 Patches Applied Across Frontend & Backend, 20/20 Live `curl` Vectors PASS)**:
+  1. `tokki-widget/lib/utils/get-browser-info.ts`: Bounded `currentUrl` (`<= 800` chars) and `userInput` (`<= 400` chars) to eliminate `>2,000`-char `HTTP 413` Self-DoS on long marketing UTM/campaign URLs, stripped `#hash` fragments & credentials, redacted sensitive query tokens (`access_token`, `id_token`, `api_key`, `secret`, `code`, `k`), and fixed exact loopback hostname detection (`[::1]`, `0.0.0.0`, `localhost`, `127.0.0.1`).
+  2. `tokki-widget/lib/state/chat.tsx`: Added monotonic `activeRunId` stream-lifecycle isolation and `abortRequest()` inside `cleanUp()` so clearing/stopping mid-stream aborts upstream SSE immediately without ghost token burn or stale continuation clobbering on subsequent questions, and unified `parseRetryAfterSeconds()` across `startQuestion` & `startVoiceQuestion` to fix ISO-8601 `"2026-..."` -> `2026s` misparses.
+  3. `tokki-widget/lib/utils/sanitize-css.ts`, `lib/export.tsx`, `lib/components/ChatWidget.tsx`: Added `sanitizeCssBubbleSize()` clamping launcher dimensions to `24px..160px` (`1.5rem..10rem`), blocking full-viewport clickjacking overlays (`99999px` / `100vw`).
+  4. `my-server-test/lib/llm/key-manager/{engine,executor}.ts`, `stores/memory.ts`, `lua/scripts.ts`: Isolated key-scoped `HTTP 401` (revoked key) and non-moderation `HTTP 403` (`Key limit exceeded`) to exhaust only the individual failing key and immediately fail over to healthy sibling/backup keys, reserving cross-account bulk invalidation strictly for `HTTP 402` (shared wallet exhausted), while keeping prompt content moderation `403` (`isPromptModerationError`) zero-penalty.
+- **R3 Verification**:
+  - `bun test`: **311 / 311 PASS** (`my-server-test`, 1,968 assertions) + **38 / 38 PASS** (`tokki-widget`, 185 assertions) = **349 / 349 PASS (2,153 assertions)**.
+  - Pre-flight builds: `bundle:api` (`api/index.js` 26.9MB, `104ms`), `type-check` (0 errors), `build` (2.61s), `build:embed` (2.05s), `export-playground` (2.42s).
+  - Korean report generated at `stress_test_audit.md` (`v6.6.0-DAILY-KO`). Committed locally with `[skip ci]`.

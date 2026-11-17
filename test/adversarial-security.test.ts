@@ -914,5 +914,124 @@ describe("Adversarial Security Test Suite (Requirement R2)", () => {
         expect(mockMessages.length).toBe(beforeMsgs);
       });
     });
+
+    describe("2.9 2026-11-18 Hardening Regressions (Key-Scoped 401/403 Failover vs Account-Wide 402 & Moderation 403 Discrimination)", () => {
+      test("rotates past per-key HTTP 403 spending cap and HTTP 401 revoked key WITHOUT poisoning healthy sibling keys in the same accountId", async () => {
+        const { MemoryKeyStore } = await import("../lib/llm/key-manager/stores/memory");
+        const { RotatingLLMProvider } = await import("../lib/llm/rotating-provider");
+        const { RELEASE_KEY_LUA } = await import("../lib/llm/key-manager/lua/scripts");
+
+        // Verify Lua parity: 402 bulk-invalidates account siblings while 401/403 isolate single key
+        expect(RELEASE_KEY_LUA).toContain("elseif status == 402 then");
+        expect(RELEASE_KEY_LUA).toContain("elseif status == 401 or status == 403 then");
+
+        const store = new MemoryKeyStore();
+        const keyMap = new Map<string, any>([
+          ["k-cap-403", { id: "k-cap-403", apiKey: "sk-cap-403", accountId: "acc-shared-org", tier: 0, weight: 100, maxConcurrency: 5 }],
+          ["k-rev-401", { id: "k-rev-401", apiKey: "sk-rev-401", accountId: "acc-shared-org", tier: 0, weight: 90, maxConcurrency: 5 }],
+          ["k-sib-ok", { id: "k-sib-ok", apiKey: "sk-sib-ok", accountId: "acc-shared-org", tier: 0, weight: 80, maxConcurrency: 5 }],
+        ]);
+        const provider = new RotatingLLMProvider(store, keyMap);
+
+        const originalFetch = globalThis.fetch;
+        try {
+          globalThis.fetch = (async (_input: any, init?: RequestInit) => {
+            const auth = String((init?.headers as any)?.Authorization ?? "");
+            if (auth.includes("sk-cap-403")) {
+              return new Response(
+                JSON.stringify({ error: { code: 403, message: "Key limit exceeded ($10 monthly cap)" } }),
+                { status: 403, headers: { "content-type": "application/json" } },
+              );
+            }
+            if (auth.includes("sk-rev-401")) {
+              return new Response(
+                JSON.stringify({ error: { code: 401, message: "Invalid or revoked API key" } }),
+                { status: 401, headers: { "content-type": "application/json" } },
+              );
+            }
+            return new Response(
+              'data: {"choices":[{"delta":{"content":"SIBLING_FAILOVER_OK"}}]}\n\ndata: [DONE]\n\n',
+              { status: 200, headers: { "content-type": "text/event-stream" } },
+            );
+          }) as any;
+
+          const hs = await provider.preStreamHandshake({
+            messages: [{ role: "user", content: "test key-scoped 403/401 isolation" }],
+          });
+          expect(hs.keyId).toBe("k-sib-ok");
+
+          let text = "";
+          for await (const tok of provider.streamFromHandshake(hs)) {
+            text += tok;
+          }
+          expect(text).toBe("SIBLING_FAILOVER_OK");
+
+          const states = await store.getAllStates();
+          const st403 = states.find((s) => s.id === "k-cap-403")!;
+          const st401 = states.find((s) => s.id === "k-rev-401")!;
+          const stOk = states.find((s) => s.id === "k-sib-ok")!;
+
+          expect(st403.status).toBe("EXHAUSTED");
+          expect(st403.lastStatusCode).toBe(403);
+          expect(st401.status).toBe("EXHAUSTED");
+          expect(st401.lastStatusCode).toBe(401);
+          expect(stOk.status).toBe("ACTIVE");
+          expect(states.every((s) => s.inFlightRequests === 0)).toBe(true);
+        } finally {
+          globalThis.fetch = originalFetch;
+        }
+      });
+
+      test("does NOT exhaust healthy API key when upstream HTTP 403 is a prompt content moderation rejection", async () => {
+        const { MemoryKeyStore } = await import("../lib/llm/key-manager/stores/memory");
+        const { RotatingLLMProvider } = await import("../lib/llm/rotating-provider");
+        const { KeyManagerError } = await import("../lib/llm/key-manager");
+
+        const store = new MemoryKeyStore();
+        const keyMap = new Map<string, any>([
+          ["k-mod-1", { id: "k-mod-1", apiKey: "sk-mod-1", accountId: "acc-mod", tier: 0, weight: 100, maxConcurrency: 5 }],
+          ["k-mod-2", { id: "k-mod-2", apiKey: "sk-mod-2", accountId: "acc-mod", tier: 0, weight: 80, maxConcurrency: 5 }],
+        ]);
+        const provider = new RotatingLLMProvider(store, keyMap);
+
+        let calls = 0;
+        const originalFetch = globalThis.fetch;
+        try {
+          globalThis.fetch = (async () => {
+            calls++;
+            return new Response(
+              JSON.stringify({
+                error: {
+                  code: 403,
+                  message: "Input flagged by content moderation",
+                  metadata: { reasons: ["violence"] },
+                },
+              }),
+              { status: 403, headers: { "content-type": "application/json" } },
+            );
+          }) as any;
+
+          let caught: any = null;
+          try {
+            await provider.preStreamHandshake({
+              messages: [{ role: "user", content: "flagged prompt" }],
+            });
+          } catch (e) {
+            caught = e;
+          }
+
+          expect(calls).toBe(1);
+          expect(caught).toBeInstanceOf(KeyManagerError);
+          expect(caught.code).toBe("UPSTREAM_CLIENT_ERROR");
+
+          const states = await store.getAllStates();
+          expect(states[0].status).toBe("ACTIVE");
+          expect(states[1].status).toBe("ACTIVE");
+          expect(states.every((s) => s.inFlightRequests === 0)).toBe(true);
+        } finally {
+          globalThis.fetch = originalFetch;
+        }
+      });
+    });
   });
 });

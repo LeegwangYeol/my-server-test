@@ -250,8 +250,8 @@ elseif status == 429 then
         redis.call('HSET', hash, 'last_error_message', err_msg)
     end
 
-elseif status == 402 or status == 401 then
-    -- Permanent Financial / Auth Exhaustion
+elseif status == 402 then
+    -- Permanent Account-Wide Financial Exhaustion (shared wallet empty)
     redis.call('HSET', hash, 'state', 'EXHAUSTED')
     redis.call('HSET', hash, 'last_error_code', status)
     redis.call('HSET', hash, 'last_error_message', err_msg)
@@ -269,6 +269,13 @@ elseif status == 402 or status == 401 then
             end
         end
     end
+
+elseif status == 401 or status == 403 then
+    -- Key-Scoped Permanent Failure (revoked key or per-key spending limit):
+    -- exhaust ONLY this key without poisoning healthy sibling keys in the same account
+    redis.call('HSET', hash, 'state', 'EXHAUSTED')
+    redis.call('HSET', hash, 'last_error_code', status)
+    redis.call('HSET', hash, 'last_error_message', err_msg)
 
 elseif status >= 500 or (status == 0 and cooldown_ms > 0) or status == 408 then
     -- Transient network drop, timeout, or upstream 5xx

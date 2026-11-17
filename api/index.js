@@ -712005,7 +712005,13 @@ async function executeWithResilientFailover(keyStore, keyConfigMap, requestFacto
         await keyStore.releaseKey(keyId, leaseToken, response.status, 2500, errText);
         continue;
       }
-      await keyStore.releaseKey(keyId, leaseToken, response.status, 0, "Client error");
+      await keyStore.releaseKey(
+        keyId,
+        leaseToken,
+        0,
+        0,
+        `Client error (${response.status})`
+      );
       return { response, keyId, leaseToken };
     } catch (networkErr) {
       cleanupSignal();
