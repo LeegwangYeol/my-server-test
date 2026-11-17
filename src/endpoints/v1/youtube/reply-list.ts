@@ -32,13 +32,16 @@ export const v1ReplyList = (app: any) => {
         const youtube = google.youtube({
           version: "v3",
           auth: oauth2Client,
+          timeout: 10_000,
         });
 
         let max = 20;
         if (maxResults !== undefined && maxResults !== null && maxResults !== "") {
           const parsed =
             typeof maxResults === "number"
-              ? maxResults
+              ? Number.isFinite(maxResults)
+                ? Math.trunc(maxResults)
+                : NaN
               : parseInt(String(maxResults), 10);
           if (!isNaN(parsed) && parsed >= 1 && parsed <= 100) {
             max = parsed;

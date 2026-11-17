@@ -171,18 +171,24 @@ export async function listMessages(
 ): Promise<ChatMessageRow[]> {
   const tid = (threadId ?? "").trim();
   if (!tid) return [];
-  const safeLimit = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 50;
+  const safeLimit =
+    Number.isFinite(limit) && limit > 0
+      ? Math.min(Math.floor(limit), 1000)
+      : 50;
   let rows: ChatMessageRow[] = [];
   try {
+    // Query newest `safeLimit` rows first (DESC) so threads > 50 turns never
+    // drop recent messages, then reverse into chronological ascending order.
     const { data, error } = await supabaseUntyped
       .from("chat_message")
       .select("*")
       .eq("thread_id", tid)
-      .order("created_at", { ascending: true })
+      .order("created_at", { ascending: false })
+      .order("id", { ascending: false })
       .limit(safeLimit);
 
     if (data) {
-      rows = data as ChatMessageRow[];
+      rows = (data as ChatMessageRow[]).slice().reverse();
     }
     if (error) {
       console.error("[chat-store] listMessages failed:", error.message);
@@ -584,7 +590,8 @@ export async function updateThreadPrompt(
   const update: Record<string, unknown> = {};
   if (patch.system_prompt !== undefined) {
     const v = patch.system_prompt?.trim() ?? "";
-    update.system_prompt = v.length > 0 ? v : null;
+    // Hard cap matching context_text so oversized prompts cannot blow up LLM context window.
+    update.system_prompt = v.length > 0 ? v.slice(0, 20000) : null;
   }
   if (patch.context_text !== undefined) {
     const v = patch.context_text?.trim() ?? "";

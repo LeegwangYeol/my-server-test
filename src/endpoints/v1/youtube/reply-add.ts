@@ -39,6 +39,7 @@ export const v1Reply = (app: any) => {
         const youtube = google.youtube({
           version: "v3",
           auth: oauth2Client,
+          timeout: 10_000,
         });
 
         const response = await youtube.comments.insert({

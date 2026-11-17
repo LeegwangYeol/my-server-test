@@ -33,6 +33,7 @@ export const v1CommentDelete = (app: any) => {
         const youtube = google.youtube({
           version: "v3",
           auth: oauth2Client,
+          timeout: 10_000,
         });
 
         // 댓글 삭제 요청 - 삭제 성공 시 HTTP 204(No Content) 응답이 발생함

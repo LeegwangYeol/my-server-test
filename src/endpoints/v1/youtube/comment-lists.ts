@@ -32,14 +32,17 @@ export const v1CommentList = (app: any) => {
         const youtube = google.youtube({
           version: "v3",
           auth: oauth2Client,
+          timeout: 10_000,
         });
 
-        // maxResults 처리 (기본값: 20, 허용 범위: 1~100)
+        // maxResults 처리 (기본값: 20, 허용 범위: 1~100, 실수 입력 시 정수 절삭)
         let max = 20;
         if (maxResults !== undefined && maxResults !== null && maxResults !== "") {
           const parsed =
             typeof maxResults === "number"
-              ? maxResults
+              ? Number.isFinite(maxResults)
+                ? Math.trunc(maxResults)
+                : NaN
               : parseInt(String(maxResults), 10);
           if (!isNaN(parsed) && parsed >= 1 && parsed <= 100) {
             max = parsed;

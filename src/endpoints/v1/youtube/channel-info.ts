@@ -24,14 +24,17 @@ export const v1ChannelInfo = (app: any) => {
         const youtube = google.youtube({
           version: "v3",
           auth: oauth2Client,
+          timeout: 10_000,
         });
 
-        // maxResults 처리 (기본값: 5, 허용 범위: 0~50)
+        // maxResults 처리 (기본값: 5, 허용 범위: 0~50, 실수 입력 시 정수 절삭)
         let max = 5;
         if (maxResults !== undefined && maxResults !== null && maxResults !== "") {
           const parsed =
             typeof maxResults === "number"
-              ? maxResults
+              ? Number.isFinite(maxResults)
+                ? Math.trunc(maxResults)
+                : NaN
               : parseInt(String(maxResults), 10);
           if (!isNaN(parsed) && parsed >= 0 && parsed <= 50) {
             max = parsed;

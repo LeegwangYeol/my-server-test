@@ -1078,4 +1078,414 @@ describe("Adversarial Reviewer Verification Suite", () => {
     const ytData = (await ytRes.json()) as any;
     expect(ytData.success).toBe(false);
   });
+
+  it("VULN-39: Serverless handler sanitizes hostile X-Forwarded-Host, X-Forwarded-Proto, and protocol-relative // paths without 500 or route hijacking", async () => {
+    const http = await import("node:http");
+    const { default: serverlessHandler } = await import("../lambda-src/handler");
+
+    const invoke = async (headers: Record<string, string>, url: string) => {
+      const req = Object.assign(Object.create(http.IncomingMessage.prototype), {
+        url,
+        method: "GET",
+        headers,
+        on() {
+          return this;
+        },
+        complete: true,
+      });
+      let body = "";
+      const res: any = {
+        statusCode: 0,
+        headersSent: false,
+        writableEnded: false,
+        destroyed: false,
+        headers: {} as Record<string, any>,
+        setHeader(k: string, v: any) {
+          this.headers[k.toLowerCase()] = v;
+        },
+        getHeader(k: string) {
+          return this.headers[k.toLowerCase()];
+        },
+        on() {
+          return this;
+        },
+        once() {
+          return this;
+        },
+        off() {
+          return this;
+        },
+        write(chunk: any) {
+          this.headersSent = true;
+          body += Buffer.isBuffer(chunk) || chunk instanceof Uint8Array
+            ? Buffer.from(chunk).toString("utf8")
+            : String(chunk);
+          return true;
+        },
+        end(chunk?: any) {
+          this.headersSent = true;
+          if (chunk) {
+            body += Buffer.isBuffer(chunk) || chunk instanceof Uint8Array
+              ? Buffer.from(chunk).toString("utf8")
+              : String(chunk);
+          }
+          this.writableEnded = true;
+        },
+      };
+      await serverlessHandler(req, res);
+      return { statusCode: res.statusCode, body };
+    };
+
+    // 1. Host header path-smuggling + javascript: proto + //v1/healthz double-slash path -> 200 OK
+    const r1 = await invoke(
+      {
+        "x-forwarded-host": "evil.attacker.com/v1/youtube/comment/delete?x=",
+        "x-forwarded-proto": "javascript",
+      },
+      "//v1/healthz",
+    );
+    expect(r1.statusCode).toBe(200);
+    expect(r1.body).toBe("OK");
+
+    // 2. Protocol-relative //evil.attacker.com/... in req.url stays local (404, never 500 or host override)
+    const rProtoRel = await invoke(
+      { host: "my-server-mocha.vercel.app" },
+      "//evil.attacker.com/v1/healthz",
+    );
+    expect(rProtoRel.statusCode).toBe(404);
+
+    // 3. Malformed bracketed IPv6 host that previously threw TypeError: Invalid URL -> 500
+    const r2 = await invoke(
+      {
+        host: "[::1-broken-host",
+        "x-forwarded-proto": "ftp\r\n",
+      },
+      "/v1/healthz",
+    );
+    expect(r2.statusCode).toBe(200);
+    expect(r2.body).toBe("OK");
+  });
+
+  it("VULN-40: listMessages fetches newest rows (DESC + reverse) so >50-turn threads never drop recent messages, and supabaseClient invalidates on env change", async () => {
+    const { listMessages } = await import("../lib/chat-store?real-v40" as any);
+    const { supabaseClient } = await import("../lib/supabase/client");
+
+    const prevUrl = process.env.SUPABASE_URL;
+    const prevKey = process.env.SUPABASE_SERVICE_KEY;
+    const originalFetch = globalThis.fetch;
+
+    // 65 chronological messages (#1 oldest .. #65 newest)
+    const dbRows = Array.from({ length: 65 }, (_, i) => ({
+      id: i + 1,
+      thread_id: "thread-long-65",
+      role: (i % 2 === 0 ? "user" : "assistant") as "user" | "assistant",
+      content: `msg-${i + 1}`,
+      created_at: new Date(1_700_000_000_000 + i * 1000).toISOString(),
+    }));
+
+    try {
+      process.env.SUPABASE_URL = "https://mock-supabase-40.local";
+      process.env.SUPABASE_SERVICE_KEY = "mock-service-key-40";
+
+      globalThis.fetch = (async (input: any) => {
+        const rawUrl = typeof input === "string" ? input : input?.url || String(input);
+        const parsed = new URL(rawUrl);
+        if (parsed.hostname === "mock-supabase-40.local") {
+          const orderParam = parsed.searchParams.get("order") || "";
+          const limitParam = Number(parsed.searchParams.get("limit") || "50");
+          const sorted = dbRows.slice();
+          if (orderParam.includes("created_at.desc")) {
+            sorted.reverse();
+          }
+          return new Response(JSON.stringify(sorted.slice(0, limitParam)), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return originalFetch(input);
+      }) as any;
+
+      const latest50 = await listMessages("thread-long-65", 50);
+      expect(latest50.length).toBe(50);
+      // Must return #16..#65 in ascending chronological order (NOT #1..#50 dropping #51..#65!)
+      expect(latest50[0].id).toBe(16);
+      expect(latest50[49].id).toBe(65);
+      expect(latest50[49].content).toBe("msg-65");
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (prevUrl === undefined) delete process.env.SUPABASE_URL;
+      else process.env.SUPABASE_URL = prevUrl;
+      if (prevKey === undefined) delete process.env.SUPABASE_SERVICE_KEY;
+      else process.env.SUPABASE_SERVICE_KEY = prevKey;
+    }
+
+    // Verify clearing SUPABASE_URL immediately invalidates cached client instead of leaking mock URL
+    if (!process.env.SUPABASE_URL) {
+      expect(() => (supabaseClient as any).from("widget")).toThrow("SUPABASE_URL");
+    }
+  });
+
+  it("VULN-41: /v2/admin/sms/send enqueues SMS (202 Accepted) when Pushbullet /v2/devices nickname lookup hits HTTP 429 on cold start", async () => {
+    const { smsFallbackQueue } = await import("../lib/queue/fallback-queue");
+    const { clearPushbulletIdenCache } = await import("../lib/sms/pushbullet");
+
+    const prevAdmin = process.env.ADMIN_TOKEN;
+    const prevProvider = process.env.SMS_PROVIDER;
+    const prevPbToken = process.env.PUSHBULLET_ACCESS_TOKEN;
+    const prevPbIden = process.env.PUSHBULLET_DEVICE_IDEN;
+    const prevPbNick = process.env.PUSHBULLET_DEVICE_NICKNAME;
+    const prevRetryMax = process.env.PUSHBULLET_RETRY_MAX;
+    const originalFetch = globalThis.fetch;
+
+    process.env.ADMIN_TOKEN = "test-admin-secret";
+    process.env.SMS_PROVIDER = "pushbullet";
+    process.env.PUSHBULLET_ACCESS_TOKEN = "pb-nick-token";
+    delete process.env.PUSHBULLET_DEVICE_IDEN;
+    process.env.PUSHBULLET_DEVICE_NICKNAME = "GalaxyS24";
+    process.env.PUSHBULLET_RETRY_MAX = "0";
+    clearPushbulletIdenCache();
+    smsFallbackQueue.clear();
+
+    try {
+      const app = await createApp(true);
+      let devicesRateLimited = true;
+      const sentTexts: string[] = [];
+
+      globalThis.fetch = (async (input: any, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input?.url || "";
+        if (url.endsWith("/v2/devices")) {
+          if (devicesRateLimited) {
+            return new Response(
+              JSON.stringify({ error: { message: "Rate limit on /v2/devices" } }),
+              {
+                status: 429,
+                headers: {
+                  "content-type": "application/json",
+                  "retry-after": "2",
+                },
+              },
+            );
+          }
+          return new Response(
+            JSON.stringify({
+              devices: [{ iden: "iden-galaxy-24", nickname: "GalaxyS24", active: true }],
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
+        if (url.endsWith("/v2/texts")) {
+          const body = JSON.parse(String(init?.body || "{}"));
+          sentTexts.push(body?.data?.message || "");
+          return new Response(JSON.stringify({ iden: "txt-1" }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return originalFetch(input, init);
+      }) as any;
+
+      // Cold-start 429 on /v2/devices MUST return 202 queued_for_retry (NOT 502 / status 400 drop!)
+      const res429 = await app.handle(
+        new Request("http://localhost/v2/admin/sms/send", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-admin-token": "test-admin-secret",
+            "idempotency-key": "pb-devices-429-1",
+          },
+          body: JSON.stringify({ to: "010-2222-3333", text: "Cold start SMS" }),
+        }),
+      );
+      expect(res429.status).toBe(202);
+      const data429 = (await res429.json()) as any;
+      expect(data429.queued).toBe(true);
+      expect(smsFallbackQueue.size).toBe(1);
+
+      // Recovery drains queued SMS automatically
+      devicesRateLimited = false;
+      smsFallbackQueue.getAllJobs()[0].nextRetryAt = Date.now() - 10;
+
+      const resOk = await app.handle(
+        new Request("http://localhost/v2/admin/sms/send", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-admin-token": "test-admin-secret",
+          },
+          body: JSON.stringify({ to: "010-4444-5555", text: "Recovery SMS" }),
+        }),
+      );
+      expect(resOk.status).toBe(200);
+      expect(sentTexts).toContain("Cold start SMS");
+      expect(sentTexts).toContain("Recovery SMS");
+      expect(smsFallbackQueue.size).toBe(0);
+    } finally {
+      globalThis.fetch = originalFetch;
+      clearPushbulletIdenCache();
+      smsFallbackQueue.clear();
+      if (prevAdmin === undefined) delete process.env.ADMIN_TOKEN;
+      else process.env.ADMIN_TOKEN = prevAdmin;
+      if (prevProvider === undefined) delete process.env.SMS_PROVIDER;
+      else process.env.SMS_PROVIDER = prevProvider;
+      if (prevPbToken === undefined) delete process.env.PUSHBULLET_ACCESS_TOKEN;
+      else process.env.PUSHBULLET_ACCESS_TOKEN = prevPbToken;
+      if (prevPbIden === undefined) delete process.env.PUSHBULLET_DEVICE_IDEN;
+      else process.env.PUSHBULLET_DEVICE_IDEN = prevPbIden;
+      if (prevPbNick === undefined) delete process.env.PUSHBULLET_DEVICE_NICKNAME;
+      else process.env.PUSHBULLET_DEVICE_NICKNAME = prevPbNick;
+      if (prevRetryMax === undefined) delete process.env.PUSHBULLET_RETRY_MAX;
+      else process.env.PUSHBULLET_RETRY_MAX = prevRetryMax;
+    }
+  });
+
+  it("VULN-42: /v2/admin/widgets/upsert enforces persona/system_prompt bounds (HTTP 400) and upload-icon skips FormData parse when unauthenticated", async () => {
+    const prevToken = process.env.ADMIN_TOKEN;
+    process.env.ADMIN_TOKEN = "test-admin-secret";
+    try {
+      const app = await createApp(true);
+
+      // 1. Oversized system_prompt (>20,000 chars) -> 400
+      const resPrompt = await app.handle(
+        new Request("http://localhost/v2/admin/widgets/upsert", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-admin-token": "test-admin-secret",
+          },
+          body: JSON.stringify({
+            id: "bounded-widget",
+            system_prompt: "P".repeat(20_001),
+          }),
+        }),
+      );
+      expect(resPrompt.status).toBe(400);
+
+      // 2. Control-char theme or >20 suggested_questions -> 400
+      const resTheme = await app.handle(
+        new Request("http://localhost/v2/admin/widgets/upsert", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-admin-token": "test-admin-secret",
+          },
+          body: JSON.stringify({
+            id: "bounded-widget",
+            theme: "noir\u0000injected",
+          }),
+        }),
+      );
+      expect(resTheme.status).toBe(400);
+
+      const resQuestions = await app.handle(
+        new Request("http://localhost/v2/admin/widgets/upsert", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-admin-token": "test-admin-secret",
+          },
+          body: JSON.stringify({
+            id: "bounded-widget",
+            suggested_questions: Array.from({ length: 21 }, (_, i) => `Q${i}?`),
+          }),
+        }),
+      );
+      expect(resQuestions.status).toBe(400);
+
+      // 3. Unauthenticated upload-icon with boundary-less multipart returns 401 cleanly (skips FormData parse)
+      const resUnauthUpload = await app.handle(
+        new Request("http://localhost/v2/admin/widgets/upload-icon", {
+          method: "POST",
+          headers: { "content-type": "multipart/form-data" },
+          body: "raw-unauthenticated-garbage-without-boundary",
+        }),
+      );
+      expect(resUnauthUpload.status).toBe(401);
+    } finally {
+      if (prevToken === undefined) delete process.env.ADMIN_TOKEN;
+      else process.env.ADMIN_TOKEN = prevToken;
+    }
+  });
+
+  it("VULN-43: /v1/youtube/video/list caches channel uploadsPlaylistId across paginated requests (eliminating N+1 channels.list calls) and truncates float maxResults", async () => {
+    const { google } = await import("googleapis");
+    const { clearChannelUploadsCache } = await import(
+      "../src/endpoints/v1/youtube/video-list"
+    );
+
+    const origYoutube = google.youtube;
+    let channelsListCalls = 0;
+    const observedMaxResults: number[] = [];
+    clearChannelUploadsCache();
+
+    try {
+      (google as any).youtube = () => ({
+        channels: {
+          list: async () => {
+            channelsListCalls++;
+            return {
+              data: {
+                items: [
+                  {
+                    contentDetails: {
+                      relatedPlaylists: { uploads: "UU_CACHED_PLAYLIST_123" },
+                    },
+                  },
+                ],
+              },
+            };
+          },
+        },
+        playlistItems: {
+          list: async (params: any) => {
+            observedMaxResults.push(params.maxResults);
+            return {
+              data: {
+                items: [{ id: "vid-1" }],
+                nextPageToken: "NEXT_PAGE_2",
+                pageInfo: { totalResults: 10, resultsPerPage: params.maxResults },
+              },
+            };
+          },
+        },
+      });
+
+      const app = await createApp(true);
+
+      // Page 1 (with float maxResults: 12.8 -> must truncate to integer 12)
+      const page1 = await app.handle(
+        new Request("http://localhost/v1/youtube/video/list", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            handle: "@lolollol2379",
+            accessToken: "mock-valid-oauth",
+            maxResults: 12.8,
+          }),
+        }),
+      );
+      expect(page1.status).toBe(200);
+      expect(channelsListCalls).toBe(1);
+      expect(observedMaxResults[0]).toBe(12);
+
+      // Page 2 (same handle -> must hit LRU cache, 0 extra channels.list calls!)
+      const page2 = await app.handle(
+        new Request("http://localhost/v1/youtube/video/list", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            handle: "lolollol2379",
+            accessToken: "mock-valid-oauth",
+            pageToken: "NEXT_PAGE_2",
+            maxResults: 15,
+          }),
+        }),
+      );
+      expect(page2.status).toBe(200);
+      expect(channelsListCalls).toBe(1);
+      expect(observedMaxResults[1]).toBe(15);
+    } finally {
+      google.youtube = origYoutube;
+      clearChannelUploadsCache();
+    }
+  });
 });

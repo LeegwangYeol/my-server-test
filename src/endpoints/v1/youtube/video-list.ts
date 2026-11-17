@@ -1,6 +1,48 @@
 import { Elysia, t } from "elysia";
 import { google } from "googleapis";
 
+const UPLOADS_CACHE_MAX = 500;
+const UPLOADS_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+const channelUploadsCache = new Map<
+  string,
+  { playlistId: string; expiresAt: number }
+>();
+
+function getCachedUploadsPlaylistId(handleKey: string): string | undefined {
+  const entry = channelUploadsCache.get(handleKey);
+  if (!entry) return undefined;
+  if (entry.expiresAt <= Date.now()) {
+    channelUploadsCache.delete(handleKey);
+    return undefined;
+  }
+  channelUploadsCache.delete(handleKey);
+  channelUploadsCache.set(handleKey, entry);
+  return entry.playlistId;
+}
+
+function setCachedUploadsPlaylistId(handleKey: string, playlistId: string): void {
+  if (channelUploadsCache.has(handleKey)) {
+    channelUploadsCache.delete(handleKey);
+  } else if (channelUploadsCache.size >= UPLOADS_CACHE_MAX) {
+    const now = Date.now();
+    for (const [k, v] of channelUploadsCache.entries()) {
+      if (v.expiresAt <= now) channelUploadsCache.delete(k);
+    }
+    if (channelUploadsCache.size >= UPLOADS_CACHE_MAX) {
+      const oldest = channelUploadsCache.keys().next().value;
+      if (oldest !== undefined) channelUploadsCache.delete(oldest);
+    }
+  }
+  channelUploadsCache.set(handleKey, {
+    playlistId,
+    expiresAt: Date.now() + UPLOADS_CACHE_TTL_MS,
+  });
+}
+
+export function clearChannelUploadsCache(): void {
+  channelUploadsCache.clear();
+}
+
 // 타입 단언을 사용하여 타입 오류 해결
 export const v1VideoList = (app: any) => {
   app.post(
@@ -32,26 +74,38 @@ export const v1VideoList = (app: any) => {
         const youtube = google.youtube({
           version: "v3",
           auth: oauth2Client,
+          timeout: 10_000,
         });
 
-        // 핸들을 기준으로 채널 ID 가져오기 (현대 @핸들 및 레거시 forUsername 지원)
-        const isHandleFormat = handle.startsWith("@");
-        let channelResponse = await youtube.channels.list(
-          isHandleFormat
-            ? { part: ["contentDetails"], forHandle: handle }
-            : { part: ["contentDetails"], forUsername: handle },
-        );
+        // 핸들을 기준으로 채널 업로드 플레이리스트 ID 가져오기 (불변 ID이므로 10분 LRU 캐시 적용해 페이지네이션 N+1 호출 제거)
+        const normalizedHandleKey = (
+          handle.startsWith("@") ? handle : `@${handle}`
+        ).toLowerCase();
+        let uploadsPlaylistId = getCachedUploadsPlaylistId(normalizedHandleKey);
 
-        if (!channelResponse.data.items?.length && !isHandleFormat) {
-          channelResponse = await youtube.channels.list({
-            part: ["contentDetails"],
-            forHandle: `@${handle}`,
-          });
+        if (!uploadsPlaylistId) {
+          const isHandleFormat = handle.startsWith("@");
+          let channelResponse = await youtube.channels.list(
+            isHandleFormat
+              ? { part: ["contentDetails"], forHandle: handle }
+              : { part: ["contentDetails"], forUsername: handle },
+          );
+
+          if (!channelResponse.data.items?.length && !isHandleFormat) {
+            channelResponse = await youtube.channels.list({
+              part: ["contentDetails"],
+              forHandle: `@${handle}`,
+            });
+          }
+
+          uploadsPlaylistId =
+            channelResponse.data.items?.[0]?.contentDetails?.relatedPlaylists
+              ?.uploads ?? undefined;
+
+          if (uploadsPlaylistId) {
+            setCachedUploadsPlaylistId(normalizedHandleKey, uploadsPlaylistId);
+          }
         }
-
-        const uploadsPlaylistId =
-          channelResponse.data.items?.[0]?.contentDetails?.relatedPlaylists
-            ?.uploads;
 
         if (!uploadsPlaylistId) {
           set.status = 400;
@@ -61,12 +115,14 @@ export const v1VideoList = (app: any) => {
           };
         }
 
-        // maxResults 처리 (기본값: 50, 허용 범위: 0~50)
+        // maxResults 처리 (기본값: 50, 허용 범위: 0~50, 실수 입력 시 정수 절삭)
         let max = 50;
         if (maxResults !== undefined && maxResults !== null && maxResults !== "") {
           const parsed =
             typeof maxResults === "number"
-              ? maxResults
+              ? Number.isFinite(maxResults)
+                ? Math.trunc(maxResults)
+                : NaN
               : parseInt(String(maxResults), 10);
           if (!isNaN(parsed) && parsed >= 0 && parsed <= 50) {
             max = parsed;

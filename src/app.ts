@@ -329,6 +329,11 @@ export const createApp = async (serverless = false) => {
             "PAYLOAD_TOO_LARGE_2MB",
           );
           if (bytes.byteLength === 0) return {};
+          const adminToken = process.env.ADMIN_TOKEN?.trim();
+          const reqToken = (request.headers.get("x-admin-token") || "").trim();
+          if (!adminToken || !timingSafeMatch(reqToken, adminToken)) {
+            return {};
+          }
           const fd = await new Response(bytes as unknown as BodyInit, {
             headers: { "content-type": rawCt },
           }).formData();

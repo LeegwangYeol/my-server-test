@@ -392,7 +392,7 @@ export const v2WidgetEndpoints = async (app: any) => {
 
         // Prepare context & messages (reuse existingThread to avoid duplicate DB RTT)
         const threadRow = existingThread;
-        const systemContent =
+        const rawSystemContent =
           threadRow?.system_prompt?.trim() ||
           widgetMaster?.system_prompt?.trim() ||
           process.env.LLM_SYSTEM_PROMPT ||
@@ -402,6 +402,7 @@ export const v2WidgetEndpoints = async (app: any) => {
             "Keep every answer to 1–2 short sentences. Never use bullet lists, headings, or long explanations unless the user explicitly asks for detail.",
             "If you don't know, say so in one sentence — do not guess.",
           ].join(" ");
+        const systemContent = rawSystemContent.slice(0, 20000);
 
         const refText = threadRow?.context_text?.trim();
 
@@ -774,6 +775,73 @@ export const v2WidgetEndpoints = async (app: any) => {
             success: false,
             error: `id exceeds maximum length of ${MAX_WIDGET_ID_CHARS} characters`,
           };
+        }
+        if (typeof body?.name === "string" && body.name.length > 200) {
+          set.status = 400;
+          return {
+            success: false,
+            error: "name exceeds maximum length of 200 characters",
+          };
+        }
+        if (
+          typeof body?.theme === "string" &&
+          (body.theme.length > 64 || /[\x00-\x1f\x7f]/.test(body.theme))
+        ) {
+          set.status = 400;
+          return {
+            success: false,
+            error: "invalid theme (must be <= 64 characters without control chars)",
+          };
+        }
+        if (
+          typeof body?.description === "string" &&
+          body.description.length > 1000
+        ) {
+          set.status = 400;
+          return {
+            success: false,
+            error: "description exceeds maximum length of 1000 characters",
+          };
+        }
+        if (
+          typeof body?.welcome_message === "string" &&
+          body.welcome_message.length > 2000
+        ) {
+          set.status = 400;
+          return {
+            success: false,
+            error: "welcome_message exceeds maximum length of 2000 characters",
+          };
+        }
+        if (
+          typeof body?.system_prompt === "string" &&
+          body.system_prompt.length > 20000
+        ) {
+          set.status = 400;
+          return {
+            success: false,
+            error: "system_prompt exceeds maximum length of 20000 characters",
+          };
+        }
+        if (Array.isArray(body?.suggested_questions)) {
+          if (body.suggested_questions.length > 20) {
+            set.status = 400;
+            return {
+              success: false,
+              error: "suggested_questions exceeds maximum of 20 items",
+            };
+          }
+          if (
+            body.suggested_questions.some(
+              (q: unknown) => typeof q !== "string" || q.length > 300,
+            )
+          ) {
+            set.status = 400;
+            return {
+              success: false,
+              error: "suggested_questions item exceeds maximum length of 300 characters",
+            };
+          }
         }
         if (typeof body?.icon_url === "string") {
           const trimmedIconUrl = body.icon_url.trim();

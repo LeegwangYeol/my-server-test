@@ -13,20 +13,57 @@ const getApp = () => {
   return appPromise;
 };
 
+const SAFE_HOST_RE =
+  /^(?:[a-zA-Z0-9.-]+|\[[a-fA-F0-9:]+\])(?::\d{1,5})?$/;
+
+function sanitizeHost(raw?: string | string[]): string {
+  const str = Array.isArray(raw) ? raw[0] : raw;
+  const candidate = (str ?? "").split(",")[0].trim();
+  if (!candidate || candidate.length > 255 || !SAFE_HOST_RE.test(candidate)) {
+    return "localhost";
+  }
+  return candidate;
+}
+
+function sanitizeProtocol(raw?: string | string[]): "http" | "https" {
+  const str = Array.isArray(raw) ? raw[0] : raw;
+  const candidate = (str ?? "").split(",")[0].trim().toLowerCase();
+  return candidate === "http" ? "http" : "https";
+}
+
+function sanitizeRequestPath(rawUrl?: string): string {
+  if (!rawUrl) return "/";
+  let p = rawUrl.trim();
+  if (!p.startsWith("/")) {
+    try {
+      const parsed = new URL(p);
+      p = `${parsed.pathname || "/"}${parsed.search}`;
+    } catch {
+      p = `/${p}`;
+    }
+  }
+  // Prevent protocol-relative `//evil.com/path` from overriding `host` in `https://host${p}`
+  if (p.startsWith("//")) {
+    const qIdx = p.indexOf("?");
+    if (qIdx === -1) {
+      p = p.replace(/^\/+/, "/");
+    } else {
+      p = p.slice(0, qIdx).replace(/^\/+/, "/") + p.slice(qIdx);
+    }
+  }
+  return p || "/";
+}
+
 const toWebRequest = (req: IncomingMessage, res?: ServerResponse): Request => {
-  const rawHost =
-    (req.headers["x-forwarded-host"] as string | undefined) ??
-    req.headers.host ??
-    "localhost";
-  const hostStr = Array.isArray(rawHost) ? rawHost[0] : rawHost;
-  const host = (hostStr ?? "localhost").split(",")[0].trim() || "localhost";
-
-  const rawProto =
-    (req.headers["x-forwarded-proto"] as string | undefined) ?? "https";
-  const protoStr = Array.isArray(rawProto) ? rawProto[0] : rawProto;
-  const protocol = (protoStr ?? "https").split(",")[0].trim() || "https";
-
-  const url = `${protocol}://${host}${req.url ?? "/"}`;
+  const host = sanitizeHost(
+    (req.headers["x-forwarded-host"] as string | string[] | undefined) ??
+      req.headers.host,
+  );
+  const protocol = sanitizeProtocol(
+    req.headers["x-forwarded-proto"] as string | string[] | undefined,
+  );
+  const safePath = sanitizeRequestPath(req.url);
+  const url = `${protocol}://${host}${safePath}`;
 
   const headers = new Headers();
   for (const [key, value] of Object.entries(req.headers)) {

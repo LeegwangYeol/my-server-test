@@ -701952,7 +701952,8 @@ var v1Comment = (app) => {
         oauth2Client.setCredentials({ access_token: accessToken });
         const youtube = import_googleapis2.google.youtube({
           version: "v3",
-          auth: oauth2Client
+          auth: oauth2Client,
+          timeout: 1e4
         });
         const response = await youtube.commentThreads.insert({
           part: ["snippet"],
@@ -702082,11 +702083,12 @@ var v1CommentList = (app) => {
         oauth2Client.setCredentials({ access_token: accessToken });
         const youtube = import_googleapis3.google.youtube({
           version: "v3",
-          auth: oauth2Client
+          auth: oauth2Client,
+          timeout: 1e4
         });
         let max = 20;
         if (maxResults !== void 0 && maxResults !== null && maxResults !== "") {
-          const parsed = typeof maxResults === "number" ? maxResults : parseInt(String(maxResults), 10);
+          const parsed = typeof maxResults === "number" ? Number.isFinite(maxResults) ? Math.trunc(maxResults) : NaN : parseInt(String(maxResults), 10);
           if (!isNaN(parsed) && parsed >= 1 && parsed <= 100) {
             max = parsed;
           }
@@ -702210,7 +702212,8 @@ var v1CommentDelete = (app) => {
         oauth2Client.setCredentials({ access_token: accessToken });
         const youtube = import_googleapis4.google.youtube({
           version: "v3",
-          auth: oauth2Client
+          auth: oauth2Client,
+          timeout: 1e4
         });
         await youtube.comments.delete({
           id: commentId
@@ -702304,7 +702307,8 @@ var v1Reply = (app) => {
         oauth2Client.setCredentials({ access_token: accessToken });
         const youtube = import_googleapis5.google.youtube({
           version: "v3",
-          auth: oauth2Client
+          auth: oauth2Client,
+          timeout: 1e4
         });
         const response = await youtube.comments.insert({
           part: ["snippet"],
@@ -702397,11 +702401,12 @@ var v1ReplyList = (app) => {
         oauth2Client.setCredentials({ access_token: accessToken });
         const youtube = import_googleapis6.google.youtube({
           version: "v3",
-          auth: oauth2Client
+          auth: oauth2Client,
+          timeout: 1e4
         });
         let max = 20;
         if (maxResults !== void 0 && maxResults !== null && maxResults !== "") {
-          const parsed = typeof maxResults === "number" ? maxResults : parseInt(String(maxResults), 10);
+          const parsed = typeof maxResults === "number" ? Number.isFinite(maxResults) ? Math.trunc(maxResults) : NaN : parseInt(String(maxResults), 10);
           if (!isNaN(parsed) && parsed >= 1 && parsed <= 100) {
             max = parsed;
           }
@@ -702542,11 +702547,12 @@ var v1ChannelInfo = (app) => {
         oauth2Client.setCredentials({ access_token: accessToken });
         const youtube = import_googleapis7.google.youtube({
           version: "v3",
-          auth: oauth2Client
+          auth: oauth2Client,
+          timeout: 1e4
         });
         let max = 5;
         if (maxResults !== void 0 && maxResults !== null && maxResults !== "") {
-          const parsed = typeof maxResults === "number" ? maxResults : parseInt(String(maxResults), 10);
+          const parsed = typeof maxResults === "number" ? Number.isFinite(maxResults) ? Math.trunc(maxResults) : NaN : parseInt(String(maxResults), 10);
           if (!isNaN(parsed) && parsed >= 0 && parsed <= 50) {
             max = parsed;
           }
@@ -702627,6 +702633,38 @@ var v1ChannelInfo = (app) => {
 
 // src/endpoints/v1/youtube/video-list.ts
 var import_googleapis8 = __toESM(require_src8());
+var UPLOADS_CACHE_MAX = 500;
+var UPLOADS_CACHE_TTL_MS = 10 * 60 * 1e3;
+var channelUploadsCache = /* @__PURE__ */ new Map();
+function getCachedUploadsPlaylistId(handleKey) {
+  const entry = channelUploadsCache.get(handleKey);
+  if (!entry) return void 0;
+  if (entry.expiresAt <= Date.now()) {
+    channelUploadsCache.delete(handleKey);
+    return void 0;
+  }
+  channelUploadsCache.delete(handleKey);
+  channelUploadsCache.set(handleKey, entry);
+  return entry.playlistId;
+}
+function setCachedUploadsPlaylistId(handleKey, playlistId) {
+  if (channelUploadsCache.has(handleKey)) {
+    channelUploadsCache.delete(handleKey);
+  } else if (channelUploadsCache.size >= UPLOADS_CACHE_MAX) {
+    const now = Date.now();
+    for (const [k, v] of channelUploadsCache.entries()) {
+      if (v.expiresAt <= now) channelUploadsCache.delete(k);
+    }
+    if (channelUploadsCache.size >= UPLOADS_CACHE_MAX) {
+      const oldest = channelUploadsCache.keys().next().value;
+      if (oldest !== void 0) channelUploadsCache.delete(oldest);
+    }
+  }
+  channelUploadsCache.set(handleKey, {
+    playlistId,
+    expiresAt: Date.now() + UPLOADS_CACHE_TTL_MS
+  });
+}
 var v1VideoList = (app) => {
   app.post(
     "/video/list",
@@ -702653,19 +702691,27 @@ var v1VideoList = (app) => {
         oauth2Client.setCredentials({ access_token: accessToken });
         const youtube = import_googleapis8.google.youtube({
           version: "v3",
-          auth: oauth2Client
+          auth: oauth2Client,
+          timeout: 1e4
         });
-        const isHandleFormat = handle.startsWith("@");
-        let channelResponse = await youtube.channels.list(
-          isHandleFormat ? { part: ["contentDetails"], forHandle: handle } : { part: ["contentDetails"], forUsername: handle }
-        );
-        if (!channelResponse.data.items?.length && !isHandleFormat) {
-          channelResponse = await youtube.channels.list({
-            part: ["contentDetails"],
-            forHandle: `@${handle}`
-          });
+        const normalizedHandleKey = (handle.startsWith("@") ? handle : `@${handle}`).toLowerCase();
+        let uploadsPlaylistId = getCachedUploadsPlaylistId(normalizedHandleKey);
+        if (!uploadsPlaylistId) {
+          const isHandleFormat = handle.startsWith("@");
+          let channelResponse = await youtube.channels.list(
+            isHandleFormat ? { part: ["contentDetails"], forHandle: handle } : { part: ["contentDetails"], forUsername: handle }
+          );
+          if (!channelResponse.data.items?.length && !isHandleFormat) {
+            channelResponse = await youtube.channels.list({
+              part: ["contentDetails"],
+              forHandle: `@${handle}`
+            });
+          }
+          uploadsPlaylistId = channelResponse.data.items?.[0]?.contentDetails?.relatedPlaylists?.uploads ?? void 0;
+          if (uploadsPlaylistId) {
+            setCachedUploadsPlaylistId(normalizedHandleKey, uploadsPlaylistId);
+          }
         }
-        const uploadsPlaylistId = channelResponse.data.items?.[0]?.contentDetails?.relatedPlaylists?.uploads;
         if (!uploadsPlaylistId) {
           set.status = 400;
           return {
@@ -702675,7 +702721,7 @@ var v1VideoList = (app) => {
         }
         let max = 50;
         if (maxResults !== void 0 && maxResults !== null && maxResults !== "") {
-          const parsed = typeof maxResults === "number" ? maxResults : parseInt(String(maxResults), 10);
+          const parsed = typeof maxResults === "number" ? Number.isFinite(maxResults) ? Math.trunc(maxResults) : NaN : parseInt(String(maxResults), 10);
           if (!isNaN(parsed) && parsed >= 0 && parsed <= 50) {
             max = parsed;
           }
@@ -711387,8 +711433,17 @@ var createSupabaseClient = (schema) => {
   return supabase;
 };
 var _cachedClient = null;
+var _cachedSig = null;
 var getClient = () => {
-  if (!_cachedClient) _cachedClient = createSupabaseClient("public");
+  const url = process.env.SUPABASE_URL;
+  const key = process.env.SUPABASE_SERVICE_KEY;
+  const sig = url && key ? `${url}\0${key}` : null;
+  if (!_cachedClient || !sig || _cachedSig !== sig) {
+    _cachedClient = null;
+    _cachedSig = null;
+    _cachedClient = createSupabaseClient("public");
+    _cachedSig = sig;
+  }
   return _cachedClient;
 };
 var supabaseClient = new Proxy({}, {
@@ -711679,6 +711734,17 @@ var HealthAndCooldownEngine = class {
     return { isOutage: false };
   }
   /**
+   * Distinguishes prompt-level content moderation rejections (HTTP 403) from
+   * key-scoped authorization/spending-limit failures (e.g. "Key limit exceeded").
+   */
+  static isPromptModerationError(payload) {
+    if (Array.isArray(payload?.error?.metadata?.reasons) && payload.error.metadata.reasons.length > 0) {
+      return true;
+    }
+    const msg = (payload?.error?.message || "").toLowerCase();
+    return msg.includes("moderation") || msg.includes("flagged");
+  }
+  /**
    * Evaluates response headers to determine accurate 429 cooldown with jitter buffer.
    * Fully protected against NaN, malformed Date headers, and ISO 8601 strings.
    */
@@ -711909,11 +711975,16 @@ async function executeWithResilientFailover(keyStore, keyConfigMap, requestFacto
         );
         throw new UpstreamProviderOutageError(outageCheck.provider || "UpstreamProvider");
       }
-      if (response.status === 402 || response.status === 401) {
-        lastStatusCode = response.status;
+      if (response.status === 402) {
+        lastStatusCode = 402;
         if (config.accountId) {
           brokenAccountIds.add(config.accountId);
         }
+        await keyStore.releaseKey(keyId, leaseToken, 402, Infinity, errText);
+        continue;
+      }
+      if (response.status === 401 || response.status === 403 && !HealthAndCooldownEngine.isPromptModerationError(errJson)) {
+        lastStatusCode = response.status;
         await keyStore.releaseKey(keyId, leaseToken, response.status, Infinity, errText);
         continue;
       }
@@ -712205,7 +712276,7 @@ var MemoryKeyStore = class {
         record.lastStatusCode = 429;
         record.lastErrorMessage = errMsg;
       }
-    } else if (statusCode === 402 || statusCode === 401) {
+    } else if (statusCode === 402) {
       record.state = "EXHAUSTED";
       record.cooldownUntil = Infinity;
       record.lastStatusCode = statusCode;
@@ -712226,6 +712297,11 @@ var MemoryKeyStore = class {
           }
         }
       }
+    } else if (statusCode === 401 || statusCode === 403) {
+      record.state = "EXHAUSTED";
+      record.cooldownUntil = Infinity;
+      record.lastStatusCode = statusCode;
+      record.lastErrorMessage = errMsg;
     } else if (statusCode >= 500 || statusCode === 0 && cooldown > 0 || statusCode === 408) {
       record.consecutiveFailures++;
       if (record.consecutiveFailures >= 3 && record.state === "ACTIVE") {
@@ -712766,8 +712842,8 @@ elseif status == 429 then
         redis.call('HSET', hash, 'last_error_message', err_msg)
     end
 
-elseif status == 402 or status == 401 then
-    -- Permanent Financial / Auth Exhaustion
+elseif status == 402 then
+    -- Permanent Account-Wide Financial Exhaustion (shared wallet empty)
     redis.call('HSET', hash, 'state', 'EXHAUSTED')
     redis.call('HSET', hash, 'last_error_code', status)
     redis.call('HSET', hash, 'last_error_message', err_msg)
@@ -712785,6 +712861,13 @@ elseif status == 402 or status == 401 then
             end
         end
     end
+
+elseif status == 401 or status == 403 then
+    -- Key-Scoped Permanent Failure (revoked key or per-key spending limit):
+    -- exhaust ONLY this key without poisoning healthy sibling keys in the same account
+    redis.call('HSET', hash, 'state', 'EXHAUSTED')
+    redis.call('HSET', hash, 'last_error_code', status)
+    redis.call('HSET', hash, 'last_error_message', err_msg)
 
 elseif status >= 500 or (status == 0 and cooldown_ms > 0) or status == 408 then
     -- Transient network drop, timeout, or upstream 5xx
@@ -713890,12 +713973,12 @@ async function getThread(threadId, widgetId) {
 async function listMessages(threadId, limit = 50) {
   const tid = (threadId ?? "").trim();
   if (!tid) return [];
-  const safeLimit = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 50;
+  const safeLimit = Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 1e3) : 50;
   let rows = [];
   try {
-    const { data, error } = await supabaseUntyped.from("chat_message").select("*").eq("thread_id", tid).order("created_at", { ascending: true }).limit(safeLimit);
+    const { data, error } = await supabaseUntyped.from("chat_message").select("*").eq("thread_id", tid).order("created_at", { ascending: false }).order("id", { ascending: false }).limit(safeLimit);
     if (data) {
-      rows = data;
+      rows = data.slice().reverse();
     }
     if (error) {
       console.error("[chat-store] listMessages failed:", error.message);
@@ -714135,7 +714218,7 @@ async function updateThreadPrompt(threadId, widgetId, patch) {
   const update = {};
   if (patch.system_prompt !== void 0) {
     const v = patch.system_prompt?.trim() ?? "";
-    update.system_prompt = v.length > 0 ? v : null;
+    update.system_prompt = v.length > 0 ? v.slice(0, 2e4) : null;
   }
   if (patch.context_text !== void 0) {
     const v = patch.context_text?.trim() ?? "";
@@ -714209,6 +714292,13 @@ function normalizeRow(row) {
 var MAX_CACHE_ENTRIES = 500;
 var CACHE_TTL_MS = 6e4;
 var MAX_WIDGET_ID_CHARS = 100;
+var MAX_WIDGET_NAME_CHARS = 200;
+var MAX_WIDGET_THEME_CHARS = 64;
+var MAX_WIDGET_DESC_CHARS = 1e3;
+var MAX_WIDGET_WELCOME_CHARS = 2e3;
+var MAX_WIDGET_SYSTEM_PROMPT_CHARS = 2e4;
+var MAX_SUGGESTED_QUESTIONS = 20;
+var MAX_SUGGESTED_QUESTION_CHARS = 300;
 var BoundedLRUCache = class {
   constructor(max) {
     this.map = /* @__PURE__ */ new Map();
@@ -714311,15 +714401,68 @@ async function upsertWidget(input) {
     };
   }
   const patch = { id, is_deleted: false };
-  if (input.name !== void 0) patch.name = input.name;
-  if (input.theme !== void 0) patch.theme = input.theme;
-  if (input.description !== void 0) patch.description = input.description;
-  if (input.welcome_message !== void 0)
+  if (input.name !== void 0) {
+    if (input.name.length > MAX_WIDGET_NAME_CHARS) {
+      return {
+        row: null,
+        error: `name exceeds maximum length of ${MAX_WIDGET_NAME_CHARS} characters`
+      };
+    }
+    patch.name = input.name;
+  }
+  if (input.theme !== void 0) {
+    if (input.theme.length > MAX_WIDGET_THEME_CHARS || /[\x00-\x1f\x7f]/.test(input.theme)) {
+      return {
+        row: null,
+        error: `invalid theme (must be <= ${MAX_WIDGET_THEME_CHARS} characters without control chars)`
+      };
+    }
+    patch.theme = input.theme;
+  }
+  if (input.description !== void 0) {
+    if (input.description.length > MAX_WIDGET_DESC_CHARS) {
+      return {
+        row: null,
+        error: `description exceeds maximum length of ${MAX_WIDGET_DESC_CHARS} characters`
+      };
+    }
+    patch.description = input.description;
+  }
+  if (input.welcome_message !== void 0) {
+    if (input.welcome_message.length > MAX_WIDGET_WELCOME_CHARS) {
+      return {
+        row: null,
+        error: `welcome_message exceeds maximum length of ${MAX_WIDGET_WELCOME_CHARS} characters`
+      };
+    }
     patch.welcome_message = input.welcome_message;
-  if (input.system_prompt !== void 0)
+  }
+  if (input.system_prompt !== void 0) {
+    if (typeof input.system_prompt === "string" && input.system_prompt.length > MAX_WIDGET_SYSTEM_PROMPT_CHARS) {
+      return {
+        row: null,
+        error: `system_prompt exceeds maximum length of ${MAX_WIDGET_SYSTEM_PROMPT_CHARS} characters`
+      };
+    }
     patch.system_prompt = input.system_prompt;
-  if (input.suggested_questions !== void 0)
+  }
+  if (input.suggested_questions !== void 0) {
+    if (input.suggested_questions.length > MAX_SUGGESTED_QUESTIONS) {
+      return {
+        row: null,
+        error: `suggested_questions exceeds maximum of ${MAX_SUGGESTED_QUESTIONS} items`
+      };
+    }
+    if (input.suggested_questions.some(
+      (q) => typeof q !== "string" || q.length > MAX_SUGGESTED_QUESTION_CHARS
+    )) {
+      return {
+        row: null,
+        error: `suggested_questions item exceeds maximum length of ${MAX_SUGGESTED_QUESTION_CHARS} characters`
+      };
+    }
     patch.suggested_questions = input.suggested_questions;
+  }
   if (input.icon_url !== void 0) {
     const v = input.icon_url?.trim();
     if (v) {
@@ -714639,12 +714782,13 @@ var v2WidgetEndpoints = async (app) => {
           };
         }
         const threadRow = existingThread;
-        const systemContent = threadRow?.system_prompt?.trim() || widgetMaster?.system_prompt?.trim() || process.env.LLM_SYSTEM_PROMPT || [
+        const rawSystemContent = threadRow?.system_prompt?.trim() || widgetMaster?.system_prompt?.trim() || process.env.LLM_SYSTEM_PROMPT || [
           "You are a helpful assistant embedded in a website.",
           "Reply in the user's language.",
           "Keep every answer to 1\u20132 short sentences. Never use bullet lists, headings, or long explanations unless the user explicitly asks for detail.",
           "If you don't know, say so in one sentence \u2014 do not guess."
         ].join(" ");
+        const systemContent = rawSystemContent.slice(0, 2e4);
         const refText = threadRow?.context_text?.trim();
         const messages = [
           { role: "system", content: systemContent },
@@ -714919,6 +715063,59 @@ var v2WidgetEndpoints = async (app) => {
             success: false,
             error: `id exceeds maximum length of ${MAX_WIDGET_ID_CHARS2} characters`
           };
+        }
+        if (typeof body?.name === "string" && body.name.length > 200) {
+          set.status = 400;
+          return {
+            success: false,
+            error: "name exceeds maximum length of 200 characters"
+          };
+        }
+        if (typeof body?.theme === "string" && (body.theme.length > 64 || /[\x00-\x1f\x7f]/.test(body.theme))) {
+          set.status = 400;
+          return {
+            success: false,
+            error: "invalid theme (must be <= 64 characters without control chars)"
+          };
+        }
+        if (typeof body?.description === "string" && body.description.length > 1e3) {
+          set.status = 400;
+          return {
+            success: false,
+            error: "description exceeds maximum length of 1000 characters"
+          };
+        }
+        if (typeof body?.welcome_message === "string" && body.welcome_message.length > 2e3) {
+          set.status = 400;
+          return {
+            success: false,
+            error: "welcome_message exceeds maximum length of 2000 characters"
+          };
+        }
+        if (typeof body?.system_prompt === "string" && body.system_prompt.length > 2e4) {
+          set.status = 400;
+          return {
+            success: false,
+            error: "system_prompt exceeds maximum length of 20000 characters"
+          };
+        }
+        if (Array.isArray(body?.suggested_questions)) {
+          if (body.suggested_questions.length > 20) {
+            set.status = 400;
+            return {
+              success: false,
+              error: "suggested_questions exceeds maximum of 20 items"
+            };
+          }
+          if (body.suggested_questions.some(
+            (q) => typeof q !== "string" || q.length > 300
+          )) {
+            set.status = 400;
+            return {
+              success: false,
+              error: "suggested_questions item exceeds maximum length of 300 characters"
+            };
+          }
         }
         if (typeof body?.icon_url === "string") {
           const trimmedIconUrl = body.icon_url.trim();
@@ -715745,12 +715942,17 @@ function isPushbulletConfigured() {
   const conf = getPushbulletConfig();
   return Boolean(conf.token && (conf.iden || conf.nickname));
 }
+var MAX_IDEN_CACHE_ENTRIES = 100;
 var idenCache = /* @__PURE__ */ new Map();
 async function resolveDeviceIden(base, token, conf) {
   if (conf.iden) return conf.iden;
   const cacheKey = `${conf.mode}:${token}:${conf.nickname?.toLowerCase() ?? ""}:${base}`;
   const cached2 = idenCache.get(cacheKey);
-  if (cached2) return cached2;
+  if (cached2) {
+    idenCache.delete(cacheKey);
+    idenCache.set(cacheKey, cached2);
+    return cached2;
+  }
   if (!conf.nickname) {
     throw new Error(
       `[${conf.mode}] PUSHBULLET_${conf.mode}_DEVICE_IDEN \uB610\uB294 PUSHBULLET_${conf.mode}_DEVICE_NICKNAME \uC911 \uD558\uB098\uB294 \uC124\uC815\uB3FC\uC57C \uD569\uB2C8\uB2E4. (\uBAA9\uB85D \uD655\uC778: npm run sms:devices)`
@@ -715775,7 +715977,15 @@ async function resolveDeviceIden(base, token, conf) {
   if (!res.ok) {
     const errorData = await res.json().catch(() => ({}));
     const msg = errorData?.error?.message || `HTTP ${res.status}`;
-    throw new Error(`[${conf.mode}] Pushbullet \uAE30\uAE30 \uBAA9\uB85D \uC870\uD68C \uC2E4\uD328 (${msg})`);
+    const httpErr = new Error(
+      `[${conf.mode}] Pushbullet \uAE30\uAE30 \uBAA9\uB85D \uC870\uD68C \uC2E4\uD328 (${msg})`
+    );
+    httpErr.status = res.status;
+    if (res.status === 429) {
+      const retryMs = parsePushbulletRetryMs(res.headers);
+      httpErr.retryAfterSeconds = retryMs ? Math.max(1, Math.ceil(retryMs / 1e3)) : 5;
+    }
+    throw httpErr;
   }
   const data = await res.json().catch(() => ({}));
   const match = (data.devices ?? []).find(
@@ -715786,6 +715996,10 @@ async function resolveDeviceIden(base, token, conf) {
     throw new Error(
       `[${conf.mode}] Pushbullet \uAE30\uAE30 "${conf.nickname}" \uB97C \uCC3E\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4. \uD65C\uC131 \uAE30\uAE30: ${available || "(\uC5C6\uC74C)"} (\uBAA9\uB85D \uD655\uC778: npm run sms:devices)`
     );
+  }
+  if (idenCache.size >= MAX_IDEN_CACHE_ENTRIES) {
+    const oldestKey = idenCache.keys().next().value;
+    if (oldestKey !== void 0) idenCache.delete(oldestKey);
   }
   idenCache.set(cacheKey, match.iden);
   return match.iden;
@@ -715811,11 +716025,13 @@ async function sendViaPushbullet({
     } catch (err) {
       const errorObj = err;
       const isTimeout = errorObj?.name === "TimeoutError" || errorObj?.name === "AbortError" || errorObj?.message?.toLowerCase().includes("timeout") || errorObj?.message?.toLowerCase().includes("aborted") || errorObj?.message?.includes("\uC2DC\uAC04 \uCD08\uACFC");
+      const upstreamStatus = typeof errorObj?.status === "number" && errorObj.status >= 400 ? errorObj.status : void 0;
       return {
         ok: false,
         success: false,
-        status: isTimeout ? 504 : 400,
-        error: err instanceof Error ? err.message : String(err)
+        status: isTimeout ? 504 : upstreamStatus ?? 400,
+        error: err instanceof Error ? err.message : String(err),
+        ...typeof errorObj?.retryAfterSeconds === "number" ? { retryAfterSeconds: errorObj.retryAfterSeconds } : {}
       };
     }
     const res = await fetchPushbulletWithRetry(`${base}/v2/texts`, {
@@ -716769,6 +716985,11 @@ var createApp = async (serverless = false) => {
           "PAYLOAD_TOO_LARGE_2MB"
         );
         if (bytes.byteLength === 0) return {};
+        const adminToken = process.env.ADMIN_TOKEN?.trim();
+        const reqToken = (request.headers.get("x-admin-token") || "").trim();
+        if (!adminToken || !timingSafeMatch(reqToken, adminToken)) {
+          return {};
+        }
         const fd = await new Response(bytes, {
           headers: { "content-type": rawCt }
         }).formData();
@@ -716875,14 +717096,50 @@ var getApp = () => {
   }
   return appPromise;
 };
+var SAFE_HOST_RE = /^(?:[a-zA-Z0-9.-]+|\[[a-fA-F0-9:]+\])(?::\d{1,5})?$/;
+function sanitizeHost(raw) {
+  const str = Array.isArray(raw) ? raw[0] : raw;
+  const candidate = (str ?? "").split(",")[0].trim();
+  if (!candidate || candidate.length > 255 || !SAFE_HOST_RE.test(candidate)) {
+    return "localhost";
+  }
+  return candidate;
+}
+function sanitizeProtocol(raw) {
+  const str = Array.isArray(raw) ? raw[0] : raw;
+  const candidate = (str ?? "").split(",")[0].trim().toLowerCase();
+  return candidate === "http" ? "http" : "https";
+}
+function sanitizeRequestPath(rawUrl) {
+  if (!rawUrl) return "/";
+  let p = rawUrl.trim();
+  if (!p.startsWith("/")) {
+    try {
+      const parsed = new URL(p);
+      p = `${parsed.pathname || "/"}${parsed.search}`;
+    } catch {
+      p = `/${p}`;
+    }
+  }
+  if (p.startsWith("//")) {
+    const qIdx = p.indexOf("?");
+    if (qIdx === -1) {
+      p = p.replace(/^\/+/, "/");
+    } else {
+      p = p.slice(0, qIdx).replace(/^\/+/, "/") + p.slice(qIdx);
+    }
+  }
+  return p || "/";
+}
 var toWebRequest = (req, res) => {
-  const rawHost = req.headers["x-forwarded-host"] ?? req.headers.host ?? "localhost";
-  const hostStr = Array.isArray(rawHost) ? rawHost[0] : rawHost;
-  const host = (hostStr ?? "localhost").split(",")[0].trim() || "localhost";
-  const rawProto = req.headers["x-forwarded-proto"] ?? "https";
-  const protoStr = Array.isArray(rawProto) ? rawProto[0] : rawProto;
-  const protocol = (protoStr ?? "https").split(",")[0].trim() || "https";
-  const url = `${protocol}://${host}${req.url ?? "/"}`;
+  const host = sanitizeHost(
+    req.headers["x-forwarded-host"] ?? req.headers.host
+  );
+  const protocol = sanitizeProtocol(
+    req.headers["x-forwarded-proto"]
+  );
+  const safePath = sanitizeRequestPath(req.url);
+  const url = `${protocol}://${host}${safePath}`;
   const headers = new Headers();
   for (const [key, value] of Object.entries(req.headers)) {
     if (value === void 0) continue;

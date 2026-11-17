@@ -81,6 +81,13 @@ interface CacheEntry {
 export const MAX_CACHE_ENTRIES = 500;
 export const CACHE_TTL_MS = 60_000;
 export const MAX_WIDGET_ID_CHARS = 100;
+export const MAX_WIDGET_NAME_CHARS = 200;
+export const MAX_WIDGET_THEME_CHARS = 64;
+export const MAX_WIDGET_DESC_CHARS = 1000;
+export const MAX_WIDGET_WELCOME_CHARS = 2000;
+export const MAX_WIDGET_SYSTEM_PROMPT_CHARS = 20000;
+export const MAX_SUGGESTED_QUESTIONS = 20;
+export const MAX_SUGGESTED_QUESTION_CHARS = 300;
 
 /**
  * Bounded LRU cache with TTL expiration.
@@ -223,15 +230,76 @@ export async function upsertWidget(
   }
 
   const patch: Record<string, unknown> = { id, is_deleted: false };
-  if (input.name !== undefined) patch.name = input.name;
-  if (input.theme !== undefined) patch.theme = input.theme;
-  if (input.description !== undefined) patch.description = input.description;
-  if (input.welcome_message !== undefined)
+  if (input.name !== undefined) {
+    if (input.name.length > MAX_WIDGET_NAME_CHARS) {
+      return {
+        row: null,
+        error: `name exceeds maximum length of ${MAX_WIDGET_NAME_CHARS} characters`,
+      };
+    }
+    patch.name = input.name;
+  }
+  if (input.theme !== undefined) {
+    if (
+      input.theme.length > MAX_WIDGET_THEME_CHARS ||
+      /[\x00-\x1f\x7f]/.test(input.theme)
+    ) {
+      return {
+        row: null,
+        error: `invalid theme (must be <= ${MAX_WIDGET_THEME_CHARS} characters without control chars)`,
+      };
+    }
+    patch.theme = input.theme;
+  }
+  if (input.description !== undefined) {
+    if (input.description.length > MAX_WIDGET_DESC_CHARS) {
+      return {
+        row: null,
+        error: `description exceeds maximum length of ${MAX_WIDGET_DESC_CHARS} characters`,
+      };
+    }
+    patch.description = input.description;
+  }
+  if (input.welcome_message !== undefined) {
+    if (input.welcome_message.length > MAX_WIDGET_WELCOME_CHARS) {
+      return {
+        row: null,
+        error: `welcome_message exceeds maximum length of ${MAX_WIDGET_WELCOME_CHARS} characters`,
+      };
+    }
     patch.welcome_message = input.welcome_message;
-  if (input.system_prompt !== undefined)
+  }
+  if (input.system_prompt !== undefined) {
+    if (
+      typeof input.system_prompt === "string" &&
+      input.system_prompt.length > MAX_WIDGET_SYSTEM_PROMPT_CHARS
+    ) {
+      return {
+        row: null,
+        error: `system_prompt exceeds maximum length of ${MAX_WIDGET_SYSTEM_PROMPT_CHARS} characters`,
+      };
+    }
     patch.system_prompt = input.system_prompt;
-  if (input.suggested_questions !== undefined)
+  }
+  if (input.suggested_questions !== undefined) {
+    if (input.suggested_questions.length > MAX_SUGGESTED_QUESTIONS) {
+      return {
+        row: null,
+        error: `suggested_questions exceeds maximum of ${MAX_SUGGESTED_QUESTIONS} items`,
+      };
+    }
+    if (
+      input.suggested_questions.some(
+        (q) => typeof q !== "string" || q.length > MAX_SUGGESTED_QUESTION_CHARS,
+      )
+    ) {
+      return {
+        row: null,
+        error: `suggested_questions item exceeds maximum length of ${MAX_SUGGESTED_QUESTION_CHARS} characters`,
+      };
+    }
     patch.suggested_questions = input.suggested_questions;
+  }
   if (input.icon_url !== undefined) {
     // empty string is treated as "clear" so the playground form can
     // simply send `""` to revert to the default glyph.

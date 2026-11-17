@@ -109,7 +109,8 @@ export function isPushbulletConfigured(): boolean {
   return Boolean(conf.token && (conf.iden || conf.nickname));
 }
 
-/** 별명 → iden 해석 결과 캐시 (환경/토큰/별명별 격리하여 교차 오염 방지). */
+/** 별명 → iden 해석 결과 캐시 (환경/토큰/별명별 격리하여 교차 오염 및 메모리 누수 방지). */
+const MAX_IDEN_CACHE_ENTRIES = 100;
 const idenCache = new Map<string, string>();
 
 /** 캐시 초기화 (테스트 또는 환경 변수 동적 전환 시 사용). */
@@ -132,7 +133,11 @@ async function resolveDeviceIden(
   // 캐시 키: mode + token + nickname + base 조합으로 환경 간 캐시 오염 방지
   const cacheKey = `${conf.mode}:${token}:${conf.nickname?.toLowerCase() ?? ""}:${base}`;
   const cached = idenCache.get(cacheKey);
-  if (cached) return cached;
+  if (cached) {
+    idenCache.delete(cacheKey);
+    idenCache.set(cacheKey, cached);
+    return cached;
+  }
 
   if (!conf.nickname) {
     throw new Error(
@@ -168,7 +173,15 @@ async function resolveDeviceIden(
   if (!res.ok) {
     const errorData = (await res.json().catch(() => ({}))) as { error?: { message?: string } };
     const msg = errorData?.error?.message || `HTTP ${res.status}`;
-    throw new Error(`[${conf.mode}] Pushbullet 기기 목록 조회 실패 (${msg})`);
+    const httpErr: Error & { status?: number; retryAfterSeconds?: number } = new Error(
+      `[${conf.mode}] Pushbullet 기기 목록 조회 실패 (${msg})`
+    );
+    httpErr.status = res.status;
+    if (res.status === 429) {
+      const retryMs = parsePushbulletRetryMs(res.headers);
+      httpErr.retryAfterSeconds = retryMs ? Math.max(1, Math.ceil(retryMs / 1000)) : 5;
+    }
+    throw httpErr;
   }
 
   const data = (await res.json().catch(() => ({}))) as {
@@ -189,6 +202,10 @@ async function resolveDeviceIden(
         available || "(없음)"
       } ` + "(목록 확인: npm run sms:devices)"
     );
+  }
+  if (idenCache.size >= MAX_IDEN_CACHE_ENTRIES) {
+    const oldestKey = idenCache.keys().next().value;
+    if (oldestKey !== undefined) idenCache.delete(oldestKey);
   }
   idenCache.set(cacheKey, match.iden);
   return match.iden;
@@ -230,18 +247,30 @@ export async function sendViaPushbullet({
     try {
       device = await resolveDeviceIden(base, conf.token, conf);
     } catch (err: unknown) {
-      const errorObj = err as { name?: string; message?: string } | undefined;
+      const errorObj = err as {
+        name?: string;
+        message?: string;
+        status?: number;
+        retryAfterSeconds?: number;
+      } | undefined;
       const isTimeout =
         errorObj?.name === "TimeoutError" ||
         errorObj?.name === "AbortError" ||
         errorObj?.message?.toLowerCase().includes("timeout") ||
         errorObj?.message?.toLowerCase().includes("aborted") ||
         errorObj?.message?.includes("시간 초과");
+      const upstreamStatus =
+        typeof errorObj?.status === "number" && errorObj.status >= 400
+          ? errorObj.status
+          : undefined;
       return {
         ok: false,
         success: false,
-        status: isTimeout ? 504 : 400,
+        status: isTimeout ? 504 : (upstreamStatus ?? 400),
         error: err instanceof Error ? err.message : String(err),
+        ...(typeof errorObj?.retryAfterSeconds === "number"
+          ? { retryAfterSeconds: errorObj.retryAfterSeconds }
+          : {}),
       };
     }
 
