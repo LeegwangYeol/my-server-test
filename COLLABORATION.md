@@ -2950,3 +2950,22 @@ This document serves as the shared communication channel between the AI Team (Ge
   5. **YouTube OAuth Redirect Symmetry & Local Oversized Token/Handle Guards (`src/endpoints/v1/youtube/*.ts`)**: Enforced `maxLength` and whitespace/control-char rejection on `/v1/youtube/auth/create` (`clientId <= 512`, `clientSecret <= 512`, `redirectUri <= 2048`) matching `/auth/confirm`, and rejected oversized `accessToken` (`> 4,096`), `handle`/`videoId` (`> 128`), `commentId`/`parentId` (`> 256`), and `pageToken` (`> 512`) locally with `HTTP 400` (`0` outbound Google API calls).
   6. **Adversarial Regression Coverage (`test/reviewer-adversarial.test.ts`)**: Added `VULN-44`..`VULN-48` verifying all 5 remediations end-to-end.
 - **Status**: **316 / 316 PASS (`bun test`, 2,014 `expect()` assertions across 13 files), Local 34/34 & Remote 34/34 PASS (`morning-audit-runner.ts`), 0 TypeScript errors, `api/index.js` synchronized & committed locally with `[skip ci]`.**
+
+
+---
+
+## 87. Daily Quota-Safe Controlled Load & Adversarial Perimeter Audit (2026-11-19)
+
+- **Session**: `[세션명: 토키 위젯 일일 부하 테스트]` (Single-Agent Focused Mode — Zero External Cloud Quota Burn).
+- **R1 Controlled Concurrency & 429/402/401/403 + Mid-Stream Failover Verification**:
+  - Executed Wave 1 (18 concurrent `/v2/ask` requests via `/usr/bin/curl`: 16 full SSE streams + 2 mid-stream client aborts) + Wave 2 (12 warm steady-state concurrent requests) + Wave 3 (in-band OpenRouter `200 OK` SSE `402` account-wide quarantine & `chunkTimeoutMs` stall watchdog) across a 5-key / 4-account ZSET pool.
+  - Wave 1 completed in **83.06ms** (`p50: 77.14ms`, `p95/max: 80.15ms` vs 60,000ms Vercel limit) with **100% failover** and **0 upstream calls** to sibling bankrupt key `k2-dead-b`; Wave 2 completed in **71.46ms** (`p50: 69.56ms`, `p95/max: 71.07ms`) with **0 upstream calls** to all 4 broken/cooling-down keys and post-wave $\text{ZCARD} \equiv 0$.
+- **R2 Adversarial Perimeter, Streaming, Storage & Embed Hardening (4 Patches Applied Across Frontend & Backend, 22/22 Live `curl` Vectors PASS)**:
+  1. `my-server-test/lib/llm/rotating-provider.ts` & `lib/llm/openai-compatible.ts`: Quarantined OpenRouter mid-stream in-band SSE error frames (`data: {"error":{"code":402|429}}` after `200 OK` headers) using `HealthAndCooldownEngine` account/key rules instead of releasing broken keys as `200 OK`, added per-chunk idle `chunkTimeoutMs` (`25,000ms`) stall watchdog with race-safe `timedOutError` rejection, and capped SSE line buffers at `256KB`.
+  2. `my-server-test/src/endpoints/v2/widget-endpoints.ts` & `lib/url-guard.ts`: Blocked non-string `message` object smuggling (`>4,000` serialized chars -> `HTTP 413`), enforced `HTTP 403` (never `422` TypeBox schema leak) when `message` is omitted on unregistered `widgetId`, added `>2,000`-char `HTTP 413` guard and graceful `101..2000`-char stale `threadId` reset on `/v2/widget/view`, and synchronized server-side `chat_bubble_size` range clamping (`24..160px`, `1.5..10rem/em`).
+  3. `tokki-widget/lib/state/chat.tsx`: Added `try/catch` self-healing around `localStorage` (`SecurityError`, `QuotaExceededError`, corrupted JSON), neutralized poisoned `>100`-char `threadId` values (`""` reset preventing permanent `HTTP 413` Self-DoS), bounded persisted history to 50 sanitized entries, and excluded `user` PII / transient listeners from `localStorage`.
+  4. `tokki-widget/lib/utils/sanitize-url.ts` & `lib/export.tsx`: Added `sanitizeBaseUrl()` blocking `javascript:`/credentialed/query-bearing `baseUrl` values and stripping trailing slashes, synced server empty-history (`messages: []`) responses via `hydrateFromServer` to purge expired cached threads, and reused `ReactDOM.Root` via `WeakMap` across repeated `mount()` calls.
+- **R3 Verification**:
+  - `bun test`: **318 / 318 PASS** (`my-server-test`, 2,026 assertions) + **40 / 40 PASS** (`tokki-widget`, 205 assertions) = **358 / 358 PASS (2,231 assertions)**.
+  - Pre-flight builds: `bundle:api` (`api/index.js` 27.0MB, `103ms`), `type-check` (0 errors), `build` (2.74s), `build:embed` (2.06s), `export-playground` (2.40s).
+  - Korean report generated at `stress_test_audit.md` (`v6.7.0-DAILY-KO`). Committed locally with `[skip ci]`.

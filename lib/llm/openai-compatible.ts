@@ -66,6 +66,7 @@ export class OpenAICompatibleProvider implements LLMProvider {
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
+    const MAX_SSE_BUFFER_CHARS = 256_000;
 
     try {
       while (true) {
@@ -77,19 +78,32 @@ export class OpenAICompatibleProvider implements LLMProvider {
             if (tailLine.startsWith("data:")) {
               const payload = tailLine.slice(5).trim();
               if (payload === "[DONE]") return;
+              let inBandErr: Error | null = null;
+              let delta: string | undefined;
               try {
                 const json = JSON.parse(payload);
-                const delta: string | undefined =
-                  json?.choices?.[0]?.delta?.content;
-                if (delta) yield delta;
+                if (json?.error) {
+                  const errMsg =
+                    typeof json.error === "string"
+                      ? json.error
+                      : json.error?.message || JSON.stringify(json.error);
+                  inBandErr = new Error(`[${this.name}] SSE error: ${errMsg}`);
+                } else {
+                  delta = json?.choices?.[0]?.delta?.content;
+                }
               } catch {
                 /* Skip malformed/keep-alive frames silently. */
               }
+              if (inBandErr) throw inBandErr;
+              if (delta) yield delta;
             }
           }
           break;
         }
         buffer += decoder.decode(value, { stream: true });
+        if (buffer.length > MAX_SSE_BUFFER_CHARS) {
+          throw new Error(`[${this.name}] SSE frame exceeded buffer limit`);
+        }
 
         // Process complete SSE events (separated by \n\n or \n).
         let nl: number;
@@ -99,14 +113,24 @@ export class OpenAICompatibleProvider implements LLMProvider {
           if (!line.startsWith("data:")) continue;
           const payload = line.slice(5).trim();
           if (payload === "[DONE]") return;
+          let inBandErr: Error | null = null;
+          let delta: string | undefined;
           try {
             const json = JSON.parse(payload);
-            const delta: string | undefined =
-              json?.choices?.[0]?.delta?.content;
-            if (delta) yield delta;
+            if (json?.error) {
+              const errMsg =
+                typeof json.error === "string"
+                  ? json.error
+                  : json.error?.message || JSON.stringify(json.error);
+              inBandErr = new Error(`[${this.name}] SSE error: ${errMsg}`);
+            } else {
+              delta = json?.choices?.[0]?.delta?.content;
+            }
           } catch {
             /* Skip malformed/keep-alive frames silently. */
           }
+          if (inBandErr) throw inBandErr;
+          if (delta) yield delta;
         }
       }
     } finally {

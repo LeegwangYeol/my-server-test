@@ -6,10 +6,16 @@
 import type { LLMProvider, LLMStreamRequest } from "./types";
 import type { IKeyStore, KeyConfig } from "./key-manager/types";
 import {
+  HealthAndCooldownEngine,
+  type OpenRouterErrorPayload,
+} from "./key-manager/engine";
+import {
   executeWithResilientFailover,
   KeyManagerError,
   type HandshakeResult,
 } from "./key-manager/executor";
+
+const MAX_SSE_BUFFER_CHARS = 256_000;
 
 export interface RotatingProviderOptions {
   /** Default model ID when request does not specify one */
@@ -20,6 +26,8 @@ export interface RotatingProviderOptions {
   maxAttempts?: number;
   /** Per-attempt network timeout in milliseconds (default: 6000ms) */
   perAttemptTimeoutMs?: number;
+  /** Per-chunk idle stall timeout during Phase-2 SSE streaming (default: 25000ms < 45s ZSET lease) */
+  chunkTimeoutMs?: number;
 }
 
 export class RotatingLLMProvider implements LLMProvider {
@@ -31,6 +39,7 @@ export class RotatingLLMProvider implements LLMProvider {
   private readonly extraHeaders: Record<string, string>;
   private readonly maxAttempts: number;
   private readonly perAttemptTimeoutMs: number;
+  private readonly chunkTimeoutMs: number;
   private syncPromise: Promise<void> | null = null;
 
   constructor(
@@ -48,6 +57,7 @@ export class RotatingLLMProvider implements LLMProvider {
     this.maxAttempts =
       options?.maxAttempts ?? Math.max(3, Math.min(keyConfigMap.size, 5));
     this.perAttemptTimeoutMs = options?.perAttemptTimeoutMs ?? 6000;
+    this.chunkTimeoutMs = options?.chunkTimeoutMs ?? 25_000;
   }
 
   /**
@@ -143,10 +153,81 @@ export class RotatingLLMProvider implements LLMProvider {
     const decoder = new TextDecoder();
     let buffer = "";
     let streamStatusCode = 200;
+    let streamCooldownMs = 0;
     let streamErrorMessage = "";
+
+    const classifyInBandError = (json: OpenRouterErrorPayload & { error?: any }): Error => {
+      const rawCode = Number(json?.error?.code);
+      const code = Number.isFinite(rawCode) && rawCode > 0 ? rawCode : 502;
+      const errMsg =
+        typeof json?.error?.message === "string" && json.error.message.trim()
+          ? json.error.message.trim()
+          : `Upstream SSE error (${code})`;
+
+      const outage = HealthAndCooldownEngine.isUpstreamProviderOutage(json);
+      if (outage.isOutage && (code === 429 || code === 503)) {
+        streamStatusCode = 0;
+        streamCooldownMs = 0;
+        streamErrorMessage = `Provider outage: ${outage.provider || "UpstreamProvider"}`;
+      } else if (code === 402) {
+        streamStatusCode = 402;
+        streamCooldownMs = Infinity;
+        streamErrorMessage = errMsg;
+      } else if (
+        code === 401 ||
+        (code === 403 && !HealthAndCooldownEngine.isPromptModerationError(json))
+      ) {
+        streamStatusCode = code;
+        streamCooldownMs = Infinity;
+        streamErrorMessage = errMsg;
+      } else if (code === 403) {
+        streamStatusCode = 0;
+        streamCooldownMs = 0;
+        streamErrorMessage = errMsg;
+      } else if (code === 429) {
+        streamStatusCode = 429;
+        streamCooldownMs = 3000;
+        streamErrorMessage = errMsg;
+      } else {
+        streamStatusCode = code >= 500 || code === 408 ? code : 502;
+        streamCooldownMs = 2000;
+        streamErrorMessage = errMsg;
+      }
+      return new Error(`UPSTREAM_SSE_ERROR (${code}): ${errMsg}`);
+    };
+
+    const readChunkWithTimeout = async (): Promise<ReadableStreamReadResult<Uint8Array>> => {
+      if (!Number.isFinite(this.chunkTimeoutMs) || this.chunkTimeoutMs <= 0) {
+        return reader.read();
+      }
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let timedOutError: Error | null = null;
+      try {
+        const res = await Promise.race([
+          reader.read(),
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(() => {
+              streamStatusCode = 504;
+              streamCooldownMs = 2000;
+              streamErrorMessage = `SSE stream stalled > ${this.chunkTimeoutMs}ms`;
+              timedOutError = new Error(
+                `STREAM_TIMEOUT: Upstream SSE stalled for ${this.chunkTimeoutMs}ms`,
+              );
+              reject(timedOutError);
+              void reader.cancel("STREAM_TIMEOUT").catch(() => {});
+            }, this.chunkTimeoutMs);
+          }),
+        ]);
+        if (timedOutError) throw timedOutError;
+        return res;
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+      }
+    };
 
     const onAbort = () => {
       streamStatusCode = 499;
+      streamCooldownMs = 0;
       streamErrorMessage = "Client disconnected";
       void reader.cancel().catch(() => {});
     };
@@ -163,11 +244,12 @@ export class RotatingLLMProvider implements LLMProvider {
       while (true) {
         if (clientSignal?.aborted) {
           streamStatusCode = 499;
+          streamCooldownMs = 0;
           streamErrorMessage = "Client disconnected";
           break;
         }
 
-        const { done, value } = await reader.read();
+        const { done, value } = await readChunkWithTimeout();
         if (done) {
           buffer += decoder.decode();
           if (buffer.trim()) {
@@ -175,19 +257,32 @@ export class RotatingLLMProvider implements LLMProvider {
             if (tailLine.startsWith("data:")) {
               const payload = tailLine.slice(5).trim();
               if (payload === "[DONE]") return;
+              let parsedErr: Error | null = null;
+              let token: string | undefined;
               try {
                 const json = JSON.parse(payload);
-                const token = json?.choices?.[0]?.delta?.content;
-                if (token) yield token;
+                if (json?.error) {
+                  parsedErr = classifyInBandError(json);
+                } else {
+                  token = json?.choices?.[0]?.delta?.content;
+                }
               } catch {
                 // Ignore partial or unparseable SSE frame
               }
+              if (parsedErr) throw parsedErr;
+              if (token) yield token;
             }
           }
           break;
         }
 
         buffer += decoder.decode(value, { stream: true });
+        if (buffer.length > MAX_SSE_BUFFER_CHARS) {
+          streamStatusCode = 502;
+          streamCooldownMs = 2000;
+          streamErrorMessage = "Upstream SSE frame exceeded buffer limit";
+          throw new Error("STREAM_ERROR: Upstream SSE frame exceeded buffer limit");
+        }
         let nl: number;
         while ((nl = buffer.indexOf("\n")) !== -1) {
           const line = buffer.slice(0, nl).trim();
@@ -198,23 +293,36 @@ export class RotatingLLMProvider implements LLMProvider {
           if (line.startsWith("data:")) {
             const payload = line.slice(5).trim();
             if (payload === "[DONE]") return;
+            let parsedErr: Error | null = null;
+            let token: string | undefined;
             try {
               const json = JSON.parse(payload);
-              const token = json?.choices?.[0]?.delta?.content;
-              if (token) yield token;
+              if (json?.error) {
+                parsedErr = classifyInBandError(json);
+              } else {
+                token = json?.choices?.[0]?.delta?.content;
+              }
             } catch {
               // Ignore partial or unparseable SSE frame
             }
+            if (parsedErr) throw parsedErr;
+            if (token) yield token;
           }
         }
       }
     } catch (streamErr: any) {
       if (clientSignal?.aborted || streamStatusCode === 499) {
         streamStatusCode = 499;
+        streamCooldownMs = 0;
         streamErrorMessage = "Client disconnected";
       } else {
-        streamStatusCode = 500;
-        streamErrorMessage = streamErr?.message || "Stream read error";
+        if (streamStatusCode === 200) {
+          streamStatusCode = 500;
+          streamCooldownMs = 2000;
+        }
+        if (!streamErrorMessage) {
+          streamErrorMessage = streamErr?.message || "Stream read error";
+        }
         throw streamErr;
       }
     } finally {
@@ -234,7 +342,9 @@ export class RotatingLLMProvider implements LLMProvider {
         keyId,
         leaseToken,
         streamStatusCode,
-        streamStatusCode === 200 || streamStatusCode === 499 ? 0 : 2000,
+        streamStatusCode === 200 || streamStatusCode === 499 || streamStatusCode === 0
+          ? 0
+          : streamCooldownMs || 2000,
         streamErrorMessage
       );
     }

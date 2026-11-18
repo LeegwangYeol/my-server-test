@@ -1032,6 +1032,140 @@ describe("Adversarial Security Test Suite (Requirement R2)", () => {
           globalThis.fetch = originalFetch;
         }
       });
+
+      test("2026-11-19 Hardening: quarantines mid-stream in-band OpenRouter SSE 402/429 errors and aborts stalled SSE streams with ZCARD == 0", async () => {
+        const { MemoryKeyStore } = await import("../lib/llm/key-manager/stores/memory");
+        const { RotatingLLMProvider } = await import("../lib/llm/rotating-provider");
+
+        const store = new MemoryKeyStore();
+        const keyMap = new Map<string, any>([
+          ["k-inband-a", { id: "k-inband-a", apiKey: "sk-inband-a", accountId: "acc-inband", tier: 0, weight: 100, maxConcurrency: 5 }],
+          ["k-inband-b", { id: "k-inband-b", apiKey: "sk-inband-b", accountId: "acc-inband", tier: 0, weight: 90, maxConcurrency: 5 }],
+          ["k-inband-rl", { id: "k-inband-rl", apiKey: "sk-inband-rl", accountId: "acc-rl", tier: 1, weight: 80, maxConcurrency: 5 }],
+          ["k-stall-1", { id: "k-stall-1", apiKey: "sk-stall-1", accountId: "acc-stall", tier: 2, weight: 70, maxConcurrency: 5 }],
+        ]);
+        const provider = new RotatingLLMProvider(store, keyMap, { chunkTimeoutMs: 50 });
+
+        const originalFetch = globalThis.fetch;
+        try {
+          globalThis.fetch = (async (_url: any, init: any) => {
+            const auth = new Headers(init?.headers).get("authorization") || "";
+            const enc = new TextEncoder();
+            if (auth.includes("sk-inband-a")) {
+              return new Response(
+                new ReadableStream({
+                  start(c) {
+                    c.enqueue(enc.encode(": OPENROUTER PROCESSING\n\n"));
+                    c.enqueue(
+                      enc.encode(
+                        `data: ${JSON.stringify({ error: { code: 402, message: "Insufficient credits mid-stream" } })}\n\n`,
+                      ),
+                    );
+                    c.close();
+                  },
+                }),
+                { status: 200, headers: { "content-type": "text/event-stream" } },
+              );
+            }
+            if (auth.includes("sk-inband-rl")) {
+              return new Response(
+                new ReadableStream({
+                  start(c) {
+                    c.enqueue(enc.encode(": OPENROUTER PROCESSING\n\n"));
+                    c.enqueue(
+                      enc.encode(
+                        `data: ${JSON.stringify({ error: { code: 429, message: "Key rate limited mid-stream" } })}\n\n`,
+                      ),
+                    );
+                    c.close();
+                  },
+                }),
+                { status: 200, headers: { "content-type": "text/event-stream" } },
+              );
+            }
+            return new Response(
+              new ReadableStream({
+                start(c) {
+                  c.enqueue(enc.encode(": OPENROUTER PROCESSING\n\n"));
+                  // Hang indefinitely without closing to test chunkTimeoutMs watchdog
+                },
+              }),
+              { status: 200, headers: { "content-type": "text/event-stream" } },
+            );
+          }) as any;
+
+          // 1. Mid-stream 402 must throw and bulk-exhaust acc-inband (both k-inband-a and sibling k-inband-b)
+          let err1: any = null;
+          try {
+            for await (const _ of provider.stream({ messages: [{ role: "user", content: "q1" }] })) {}
+          } catch (e) {
+            err1 = e;
+          }
+          expect(String(err1?.message)).toContain("402");
+
+          // 2. Next request skips both k-inband-a & k-inband-b, hits k-inband-rl -> mid-stream 429 marks RATE_LIMITED
+          let err2: any = null;
+          try {
+            for await (const _ of provider.stream({ messages: [{ role: "user", content: "q2" }] })) {}
+          } catch (e) {
+            err2 = e;
+          }
+          expect(String(err2?.message)).toContain("429");
+
+          // 3. Next request hits k-stall-1 -> chunkTimeoutMs (50ms) aborts cleanly with STREAM_TIMEOUT
+          let err3: any = null;
+          try {
+            for await (const _ of provider.stream({ messages: [{ role: "user", content: "q3" }] })) {}
+          } catch (e) {
+            err3 = e;
+          }
+          expect(String(err3?.message)).toContain("STREAM_TIMEOUT");
+
+          const states = await store.getAllStates();
+          expect(states.find((s) => s.id === "k-inband-a")?.status).toBe("EXHAUSTED");
+          expect(states.find((s) => s.id === "k-inband-b")?.status).toBe("EXHAUSTED");
+          expect(states.find((s) => s.id === "k-inband-rl")?.status).toBe("RATE_LIMITED");
+          expect(states.every((s) => s.inFlightRequests === 0)).toBe(true);
+        } finally {
+          globalThis.fetch = originalFetch;
+        }
+      });
+
+      test("2026-11-19 Hardening: blocks non-string message smuggling (413/400), missing-message 422 leaks (403), and /v2/widget/view aux bombs (413)", async () => {
+        // 1. Missing message with unregistered widgetId -> 403 Forbidden (not 422 TypeBox leak)
+        const resUnregNoMsg = await postJson(app, "/v2/ask", {
+          widgetId: "unregistered-no-msg-probe",
+        });
+        expect(resUnregNoMsg.status).toBe(403);
+
+        // 2. Non-string message object > 4,000 serialized chars -> 413 Payload Too Large (not 422)
+        const resSmuggledMsg = await postJson(app, "/v2/ask", {
+          widgetId: VALID_WIDGET_ID,
+          message: { nestedBomb: "M".repeat(4500) },
+        });
+        expect(resSmuggledMsg.status).toBe(413);
+
+        // 3. Small non-string message with registered widgetId -> 400 Bad Request
+        const resNonStrSmall = await postJson(app, "/v2/ask", {
+          widgetId: VALID_WIDGET_ID,
+          message: { text: "short" },
+        });
+        expect(resNonStrSmall.status).toBe(400);
+
+        // 4. /v2/widget/view oversized threadId (> 2,000 chars) -> 413 Payload Too Large
+        const resViewBomb = await postJson(app, "/v2/widget/view", {
+          widgetId: VALID_WIDGET_ID,
+          threadId: "V".repeat(2500),
+        });
+        expect(resViewBomb.status).toBe(413);
+
+        // 5. /v2/widget/view 150-char stale threadId -> graceful 200 OK fresh thread (not 422)
+        const resViewStale = await postJson(app, "/v2/widget/view", {
+          widgetId: VALID_WIDGET_ID,
+          threadId: "s".repeat(150),
+        });
+        expect(resViewStale.status).toBe(200);
+      });
     });
   });
 });

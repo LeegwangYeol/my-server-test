@@ -712620,20 +712620,26 @@ var RotatingLLMProvider = class {
         return reader.read();
       }
       let timer;
+      let timedOutError = null;
       try {
-        return await Promise.race([
+        const res = await Promise.race([
           reader.read(),
           new Promise((_, reject) => {
             timer = setTimeout(() => {
               streamStatusCode = 504;
               streamCooldownMs = 2e3;
               streamErrorMessage = `SSE stream stalled > ${this.chunkTimeoutMs}ms`;
+              timedOutError = new Error(
+                `STREAM_TIMEOUT: Upstream SSE stalled for ${this.chunkTimeoutMs}ms`
+              );
+              reject(timedOutError);
               void reader.cancel("STREAM_TIMEOUT").catch(() => {
               });
-              reject(new Error(`STREAM_TIMEOUT: Upstream SSE stalled for ${this.chunkTimeoutMs}ms`));
             }, this.chunkTimeoutMs);
           })
         ]);
+        if (timedOutError) throw timedOutError;
+        return res;
       } finally {
         if (timer !== void 0) clearTimeout(timer);
       }
@@ -714742,8 +714748,70 @@ var v2WidgetEndpoints = async (app) => {
   app.group("/v2", (app2) => {
     app2.post(
       "/widget/view",
-      async ({ body }) => {
-        const widgetId = (body?.widgetId ?? "").trim();
+      async ({
+        body,
+        set
+      }) => {
+        const MAX_VIEW_AUX_CHARS = 2e3;
+        const rawWidgetId = body?.widgetId;
+        const rawThreadId = body?.threadId;
+        if (rawWidgetId !== void 0 && rawWidgetId !== null) {
+          if (typeof rawWidgetId === "string") {
+            if (rawWidgetId.length > MAX_VIEW_AUX_CHARS) {
+              set.status = 413;
+              return {
+                success: false,
+                error: `widgetId too large (${rawWidgetId.length} > ${MAX_VIEW_AUX_CHARS} chars)`
+              };
+            }
+          } else {
+            let raw = "";
+            try {
+              raw = JSON.stringify(rawWidgetId) ?? "";
+            } catch {
+              set.status = 400;
+              return { success: false, error: "malformed widgetId payload" };
+            }
+            if (raw.length > MAX_VIEW_AUX_CHARS) {
+              set.status = 413;
+              return {
+                success: false,
+                error: `widgetId too large (${raw.length} > ${MAX_VIEW_AUX_CHARS} chars)`
+              };
+            }
+            set.status = 400;
+            return { success: false, error: "widgetId must be a string" };
+          }
+        }
+        if (rawThreadId !== void 0 && rawThreadId !== null) {
+          if (typeof rawThreadId === "string") {
+            if (rawThreadId.length > MAX_VIEW_AUX_CHARS) {
+              set.status = 413;
+              return {
+                success: false,
+                error: `threadId too large (${rawThreadId.length} > ${MAX_VIEW_AUX_CHARS} chars)`
+              };
+            }
+          } else {
+            let raw = "";
+            try {
+              raw = JSON.stringify(rawThreadId) ?? "";
+            } catch {
+              set.status = 400;
+              return { success: false, error: "malformed threadId payload" };
+            }
+            if (raw.length > MAX_VIEW_AUX_CHARS) {
+              set.status = 413;
+              return {
+                success: false,
+                error: `threadId too large (${raw.length} > ${MAX_VIEW_AUX_CHARS} chars)`
+              };
+            }
+            set.status = 400;
+            return { success: false, error: "threadId must be a string" };
+          }
+        }
+        const widgetId = (typeof rawWidgetId === "string" ? rawWidgetId : "").trim();
         let master = null;
         try {
           master = widgetId && widgetId.length <= 100 ? await getWidget(widgetId) : null;
@@ -714753,7 +714821,8 @@ var v2WidgetEndpoints = async (app) => {
         let threadId = "";
         let messages = [];
         if (master) {
-          threadId = (body?.threadId ?? "").trim();
+          const candidateThreadId = (typeof rawThreadId === "string" ? rawThreadId : "").trim();
+          threadId = candidateThreadId.length <= 100 ? candidateThreadId : "";
           if (threadId) {
             const existing = await getThread(threadId, widgetId);
             if (existing) {
@@ -714768,7 +714837,7 @@ var v2WidgetEndpoints = async (app) => {
             threadId = await createThread(widgetId) ?? "";
           }
         }
-        const persona = renderPersona(master, widgetId);
+        const persona = renderPersona(master, widgetId.slice(0, 100));
         return {
           success: true,
           thread_id: threadId,
@@ -714779,10 +714848,12 @@ var v2WidgetEndpoints = async (app) => {
         };
       },
       {
-        body: t.Object({
-          widgetId: t.Optional(t.Union([t.String({ maxLength: 100 }), t.Null()])),
-          threadId: t.Optional(t.Union([t.String({ maxLength: 100 }), t.Null()]))
-        }),
+        body: t.Optional(
+          t.Object({
+            widgetId: t.Optional(t.Any()),
+            threadId: t.Optional(t.Any())
+          })
+        ),
         detail: {
           tags: ["API"],
           description: "Widget config + restored thread messages"
@@ -714836,16 +714907,37 @@ var v2WidgetEndpoints = async (app) => {
       async ({ body, set, request }) => {
         const rawWidgetId = body?.widgetId;
         const widgetId = (typeof rawWidgetId === "string" ? rawWidgetId : "").trim();
-        const userMessage = body?.message ?? "";
+        const rawMessage = body?.message;
+        let userMessage = "";
+        let hasNonStringMessage = false;
         const rawThreadId = body?.threadId;
         let threadId = "";
         const MAX_MESSAGE_CHARS = 4e3;
-        if (userMessage.length > MAX_MESSAGE_CHARS) {
-          set.status = 413;
-          return {
-            success: false,
-            error: `message too long (${userMessage.length} > ${MAX_MESSAGE_CHARS} chars)`
-          };
+        if (typeof rawMessage === "string") {
+          userMessage = rawMessage;
+          if (userMessage.length > MAX_MESSAGE_CHARS) {
+            set.status = 413;
+            return {
+              success: false,
+              error: `message too long (${userMessage.length} > ${MAX_MESSAGE_CHARS} chars)`
+            };
+          }
+        } else if (rawMessage !== void 0 && rawMessage !== null) {
+          let serializedMsg = "";
+          try {
+            serializedMsg = JSON.stringify(rawMessage) ?? "";
+          } catch {
+            set.status = 400;
+            return { success: false, error: "malformed message payload" };
+          }
+          if (serializedMsg.length > MAX_MESSAGE_CHARS) {
+            set.status = 413;
+            return {
+              success: false,
+              error: `message too long (${serializedMsg.length} > ${MAX_MESSAGE_CHARS} chars)`
+            };
+          }
+          hasNonStringMessage = true;
         }
         const MAX_AUX_CHARS = 2e3;
         if (rawThreadId !== void 0 && rawThreadId !== null) {
@@ -714920,6 +715012,13 @@ var v2WidgetEndpoints = async (app) => {
           return {
             success: false,
             error: "unregistered widget_id \u2014 register it via /v2/admin/widgets/upsert first"
+          };
+        }
+        if (hasNonStringMessage) {
+          set.status = 400;
+          return {
+            success: false,
+            error: "message must be a string"
           };
         }
         if (!userMessage.trim()) {
@@ -715177,13 +715276,15 @@ var v2WidgetEndpoints = async (app) => {
         return new Response(stream);
       },
       {
-        body: t.Object({
-          widgetId: t.Optional(t.Any()),
-          threadId: t.Optional(t.Any()),
-          message: t.String(),
-          browserInfo: t.Optional(t.Any()),
-          search: t.Optional(t.Any())
-        }),
+        body: t.Optional(
+          t.Object({
+            widgetId: t.Optional(t.Any()),
+            threadId: t.Optional(t.Any()),
+            message: t.Optional(t.Any()),
+            browserInfo: t.Optional(t.Any()),
+            search: t.Optional(t.Any())
+          })
+        ),
         detail: {
           tags: ["API"],
           description: "Stream a chat reply (SSE) + persist both turns"

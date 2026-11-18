@@ -92,8 +92,76 @@ export const v2WidgetEndpoints = async (app: any) => {
     // ──────────────────────────────────────────────────────────────────
     app.post(
       "/widget/view",
-      async ({ body }: { body: { widgetId?: string; threadId?: string } }) => {
-        const widgetId = (body?.widgetId ?? "").trim();
+      async ({
+        body,
+        set,
+      }: {
+        body?: { widgetId?: any; threadId?: any };
+        set: { status?: number | string };
+      }) => {
+        const MAX_VIEW_AUX_CHARS = 2000;
+        const rawWidgetId = body?.widgetId;
+        const rawThreadId = body?.threadId;
+
+        if (rawWidgetId !== undefined && rawWidgetId !== null) {
+          if (typeof rawWidgetId === "string") {
+            if (rawWidgetId.length > MAX_VIEW_AUX_CHARS) {
+              set.status = 413;
+              return {
+                success: false,
+                error: `widgetId too large (${rawWidgetId.length} > ${MAX_VIEW_AUX_CHARS} chars)`,
+              };
+            }
+          } else {
+            let raw = "";
+            try {
+              raw = JSON.stringify(rawWidgetId) ?? "";
+            } catch {
+              set.status = 400;
+              return { success: false, error: "malformed widgetId payload" };
+            }
+            if (raw.length > MAX_VIEW_AUX_CHARS) {
+              set.status = 413;
+              return {
+                success: false,
+                error: `widgetId too large (${raw.length} > ${MAX_VIEW_AUX_CHARS} chars)`,
+              };
+            }
+            set.status = 400;
+            return { success: false, error: "widgetId must be a string" };
+          }
+        }
+
+        if (rawThreadId !== undefined && rawThreadId !== null) {
+          if (typeof rawThreadId === "string") {
+            if (rawThreadId.length > MAX_VIEW_AUX_CHARS) {
+              set.status = 413;
+              return {
+                success: false,
+                error: `threadId too large (${rawThreadId.length} > ${MAX_VIEW_AUX_CHARS} chars)`,
+              };
+            }
+          } else {
+            let raw = "";
+            try {
+              raw = JSON.stringify(rawThreadId) ?? "";
+            } catch {
+              set.status = 400;
+              return { success: false, error: "malformed threadId payload" };
+            }
+            if (raw.length > MAX_VIEW_AUX_CHARS) {
+              set.status = 413;
+              return {
+                success: false,
+                error: `threadId too large (${raw.length} > ${MAX_VIEW_AUX_CHARS} chars)`,
+              };
+            }
+            set.status = 400;
+            return { success: false, error: "threadId must be a string" };
+          }
+        }
+
+        const widgetId = (typeof rawWidgetId === "string" ? rawWidgetId : "").trim();
 
         // Pull persona from the widget master table if it exists; otherwise
         // fall back to the hardcoded default so unregistered embeds keep
@@ -113,7 +181,8 @@ export const v2WidgetEndpoints = async (app: any) => {
         let messages: { role: string; content: string }[] = [];
 
         if (master) {
-          threadId = (body?.threadId ?? "").trim();
+          const candidateThreadId = (typeof rawThreadId === "string" ? rawThreadId : "").trim();
+          threadId = candidateThreadId.length <= 100 ? candidateThreadId : "";
           if (threadId) {
             const existing = await getThread(threadId, widgetId);
             if (existing) {
@@ -131,7 +200,7 @@ export const v2WidgetEndpoints = async (app: any) => {
           }
         }
 
-        const persona = renderPersona(master, widgetId);
+        const persona = renderPersona(master, widgetId.slice(0, 100));
 
         return {
           success: true,
@@ -142,10 +211,12 @@ export const v2WidgetEndpoints = async (app: any) => {
         };
       },
       {
-        body: t.Object({
-          widgetId: t.Optional(t.Union([t.String({ maxLength: 100 }), t.Null()])),
-          threadId: t.Optional(t.Union([t.String({ maxLength: 100 }), t.Null()])),
-        }),
+        body: t.Optional(
+          t.Object({
+            widgetId: t.Optional(t.Any()),
+            threadId: t.Optional(t.Any()),
+          }),
+        ),
         detail: {
           tags: ["API"],
           description: "Widget config + restored thread messages",
@@ -213,18 +284,39 @@ export const v2WidgetEndpoints = async (app: any) => {
       async ({ body, set, request }: any) => {
         const rawWidgetId = body?.widgetId;
         const widgetId: string = (typeof rawWidgetId === "string" ? rawWidgetId : "").trim();
-        const userMessage: string = body?.message ?? "";
+        const rawMessage = body?.message;
+        let userMessage = "";
+        let hasNonStringMessage = false;
         const rawThreadId = body?.threadId;
         let threadId = "";
 
-        // ── Guard 1: 요청당 메시지 길이 상한 — 단일 요청 토큰 폭탄 방어 ──
+        // ── Guard 1: 요청당 메시지 길이 상한 — 단일 요청 토큰 폭탄 및 비문자열 밀수 방어 ──
         const MAX_MESSAGE_CHARS = 4000;
-        if (userMessage.length > MAX_MESSAGE_CHARS) {
-          set.status = 413;
-          return {
-            success: false,
-            error: `message too long (${userMessage.length} > ${MAX_MESSAGE_CHARS} chars)`,
-          };
+        if (typeof rawMessage === "string") {
+          userMessage = rawMessage;
+          if (userMessage.length > MAX_MESSAGE_CHARS) {
+            set.status = 413;
+            return {
+              success: false,
+              error: `message too long (${userMessage.length} > ${MAX_MESSAGE_CHARS} chars)`,
+            };
+          }
+        } else if (rawMessage !== undefined && rawMessage !== null) {
+          let serializedMsg = "";
+          try {
+            serializedMsg = JSON.stringify(rawMessage) ?? "";
+          } catch {
+            set.status = 400;
+            return { success: false, error: "malformed message payload" };
+          }
+          if (serializedMsg.length > MAX_MESSAGE_CHARS) {
+            set.status = 413;
+            return {
+              success: false,
+              error: `message too long (${serializedMsg.length} > ${MAX_MESSAGE_CHARS} chars)`,
+            };
+          }
+          hasNonStringMessage = true;
         }
 
         // ── Guard 1b: 보조 필드(threadId, browserInfo, search) 페이로드 스머글링 방어 ──
@@ -320,7 +412,14 @@ export const v2WidgetEndpoints = async (app: any) => {
           };
         }
 
-        // ── Guard 2b: 빈/공백 전용 메시지 차단 (불필요한 DB 행 생성 및 LLM 쿼터 소모 방지) ──
+        // ── Guard 2b: 비문자열/빈/공백 전용 메시지 차단 (불필요한 DB 행 생성 및 LLM 쿼터 소모 방지) ──
+        if (hasNonStringMessage) {
+          set.status = 400;
+          return {
+            success: false,
+            error: "message must be a string",
+          };
+        }
         if (!userMessage.trim()) {
           set.status = 400;
           return {
@@ -666,13 +765,15 @@ export const v2WidgetEndpoints = async (app: any) => {
         return new Response(stream);
       },
       {
-        body: t.Object({
-          widgetId: t.Optional(t.Any()),
-          threadId: t.Optional(t.Any()),
-          message: t.String(),
-          browserInfo: t.Optional(t.Any()),
-          search: t.Optional(t.Any()),
-        }),
+        body: t.Optional(
+          t.Object({
+            widgetId: t.Optional(t.Any()),
+            threadId: t.Optional(t.Any()),
+            message: t.Optional(t.Any()),
+            browserInfo: t.Optional(t.Any()),
+            search: t.Optional(t.Any()),
+          }),
+        ),
         detail: {
           tags: ["API"],
           description: "Stream a chat reply (SSE) + persist both turns",
