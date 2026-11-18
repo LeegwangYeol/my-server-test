@@ -9,11 +9,18 @@ export const v1ChannelInfo = (app: any) => {
       const { maxResults, pageToken } = body;
       const accessToken = String(body?.accessToken ?? "").trim();
 
-      if (!accessToken) {
+      if (!accessToken || accessToken.length > 4096) {
         set.status = 400;
         return {
           success: false,
-          message: "accessToken 값이 제공되지 않았습니다.",
+          message: "유효한 accessToken 값이 제공되지 않았습니다.",
+        };
+      }
+      if (typeof pageToken === "string" && pageToken.trim().length > 512) {
+        set.status = 400;
+        return {
+          success: false,
+          message: "유효하지 않은 pageToken 값입니다.",
         };
       }
 

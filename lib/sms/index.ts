@@ -100,8 +100,8 @@ export async function sendSms(
   }
 
   if (detail.ok && allowQueue) {
-    if (smsFallbackQueue.getReadyJobs().length > 0) {
-      await processSmsQueue().catch((drainErr) => {
+    if (smsFallbackQueue.hasReadyJobs()) {
+      await processSmsQueue(5).catch((drainErr) => {
         console.warn(
           "[lib/sms] opportunistic processSmsQueue drain warning:",
           drainErr?.message || drainErr,
@@ -119,23 +119,27 @@ export async function sendSms(
 /**
  * Replays and processes pending SMS messages stored in the smsFallbackQueue.
  */
-export async function processSmsQueue(): Promise<{
+export async function processSmsQueue(maxBatchSize?: number): Promise<{
   processed: number;
   succeeded: number;
   failed: number;
 }> {
-  return smsFallbackQueue.processPending(async (job: FallbackJob<SendSmsInput>) => {
-    const res = await sendSms(job.payload, { allowQueue: false });
-    if (!res.ok) {
-      const detail = res.detail as { status?: number; error?: string; retryAfterSeconds?: number } | undefined;
-      if (detail?.status === 429) {
-        const err: any = new Error(detail.error || "Pushbullet HTTP 429");
-        err.status = 429;
-        if (detail.retryAfterSeconds) err.retryAfterSeconds = detail.retryAfterSeconds;
-        throw err;
+  return smsFallbackQueue.processPending(
+    async (job: FallbackJob<SendSmsInput>) => {
+      const res = await sendSms(job.payload, { allowQueue: false });
+      if (!res.ok) {
+        const detail = res.detail as { status?: number; error?: string; retryAfterSeconds?: number } | undefined;
+        if (detail?.status === 429) {
+          const err: any = new Error(detail.error || "Pushbullet HTTP 429");
+          err.status = 429;
+          if (detail.retryAfterSeconds) err.retryAfterSeconds = detail.retryAfterSeconds;
+          throw err;
+        }
+        return false;
       }
-      return false;
-    }
-    return true;
-  });
+      return true;
+    },
+    Date.now(),
+    maxBatchSize,
+  );
 }

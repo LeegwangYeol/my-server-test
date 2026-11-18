@@ -1488,4 +1488,356 @@ describe("Adversarial Reviewer Verification Suite", () => {
       clearChannelUploadsCache();
     }
   });
+
+  it("VULN-44: isValidWidgetBubbleSize blocks viewport/oversized/zero clickjacking dimensions and /v2/widget/view sanitizes poisoned DB rows on read", async () => {
+    const { isValidWidgetBubbleSize } = await import("../lib/url-guard");
+    const { renderPersona } = await import("../src/endpoints/v2/widget-endpoints");
+    const widgetStoreMod: any = await import("../lib/widget-store?real-v44" as any);
+
+    expect(isValidWidgetBubbleSize("24px")).toBe(true);
+    expect(isValidWidgetBubbleSize("48px")).toBe(true);
+    expect(isValidWidgetBubbleSize("160px")).toBe(true);
+    expect(isValidWidgetBubbleSize("1.5rem")).toBe(true);
+    expect(isValidWidgetBubbleSize("10rem")).toBe(true);
+    expect(isValidWidgetBubbleSize("4em")).toBe(true);
+
+    // Clickjacking / invisible launcher vectors must be rejected
+    for (const bad of ["0px", "0", "12px", "161px", "99999px", "100vw", "100vh", "100%", "0.5rem", "20rem"]) {
+      expect(isValidWidgetBubbleSize(bad)).toBe(false);
+    }
+
+    // 1. Direct read-time sanitization of poisoned DB row via renderPersona
+    const poisonedMaster = {
+      id: "poisoned-widget-44",
+      name: "Safe Name",
+      theme: "noir",
+      description: "Desc",
+      welcome_message: "Hi",
+      system_prompt: null,
+      suggested_questions: [],
+      icon_url: "javascript:alert(document.domain)",
+      chat_bubble_size: "100vw",
+      is_deleted: false,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    const rendered = renderPersona(poisonedMaster, "poisoned-widget-44");
+    expect(rendered.icon).toBeNull();
+    expect(rendered.widget_bubble_size).toBeNull();
+
+    const renderedProtoRel = renderPersona(
+      { ...poisonedMaster, icon_url: "//evil.attacker.com/icon.svg", chat_bubble_size: "99999px" },
+      "poisoned-widget-44",
+    );
+    expect(renderedProtoRel.icon).toBeNull();
+    expect(renderedProtoRel.widget_bubble_size).toBeNull();
+
+    const renderedSafe = renderPersona(
+      { ...poisonedMaster, icon_url: "https://cdn.tokki.app/icon.png", chat_bubble_size: "56px" },
+      "safe-widget-44",
+    );
+    expect(renderedSafe.icon).toBe("https://cdn.tokki.app/icon.png");
+    expect(renderedSafe.widget_bubble_size).toBe("56px");
+
+    // 2. End-to-end /v2/widget/view check (safe even when widget-store is module-mocked in shared test process)
+    const prevUrl = process.env.SUPABASE_URL;
+    const prevKey = process.env.SUPABASE_SERVICE_KEY;
+    const originalFetch = globalThis.fetch;
+
+    try {
+      process.env.SUPABASE_URL = "https://mock-supabase-44.local";
+      process.env.SUPABASE_SERVICE_KEY = "mock-service-key-44";
+      widgetStoreMod?.invalidateWidgetCache?.("poisoned-widget-44");
+
+      globalThis.fetch = (async (input: any, init?: RequestInit) => {
+        const rawUrl = typeof input === "string" ? input : input?.url || String(input);
+        const parsed = new URL(rawUrl);
+        if (parsed.hostname === "mock-supabase-44.local") {
+          if (parsed.pathname.endsWith("/widget")) {
+            return new Response(JSON.stringify(poisonedMaster), {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            });
+          }
+          if (parsed.pathname.endsWith("/chat_thread") && init?.method === "POST") {
+            return new Response(
+              JSON.stringify({ id: "00000000-0000-4000-8000-000000000044" }),
+              { status: 201, headers: { "content-type": "application/json" } },
+            );
+          }
+          return new Response(JSON.stringify([]), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return originalFetch(input, init);
+      }) as any;
+
+      const app = await createApp(true);
+      const res = await app.handle(
+        new Request("http://localhost/v2/widget/view", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ widgetId: "poisoned-widget-44" }),
+        }),
+      );
+      expect(res.status).toBe(200);
+      const data = (await res.json()) as any;
+      expect(data.widget.icon).toBeNull();
+      expect(data.widget.widget_bubble_size).toBeNull();
+    } finally {
+      globalThis.fetch = originalFetch;
+      widgetStoreMod?.invalidateWidgetCache?.("poisoned-widget-44");
+      if (prevUrl === undefined) delete process.env.SUPABASE_URL;
+      else process.env.SUPABASE_URL = prevUrl;
+      if (prevKey === undefined) delete process.env.SUPABASE_SERVICE_KEY;
+      else process.env.SUPABASE_SERVICE_KEY = prevKey;
+    }
+  });
+
+  it("VULN-45: /v2/admin/threads/update and /v2/admin/threads/rename enforce strict ID, prompt, context, and control-char bounds with HTTP 400", async () => {
+    const prevToken = process.env.ADMIN_TOKEN;
+    process.env.ADMIN_TOKEN = "test-admin-secret";
+    try {
+      const app = await createApp(true);
+
+      // 1. Oversized context_text (> 20,000 chars) on /v2/admin/threads/update -> HTTP 400
+      const resCtx = await app.handle(
+        new Request("http://localhost/v2/admin/threads/update", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-admin-token": "test-admin-secret",
+          },
+          body: JSON.stringify({
+            widgetId: "default",
+            threadId: "thread-1",
+            context_text: "C".repeat(20_001),
+          }),
+        }),
+      );
+      expect(resCtx.status).toBe(400);
+
+      // 2. Oversized threadId (> 100 chars) -> HTTP 400
+      const resTid = await app.handle(
+        new Request("http://localhost/v2/admin/threads/update", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-admin-token": "test-admin-secret",
+          },
+          body: JSON.stringify({
+            widgetId: "default",
+            threadId: "t".repeat(101),
+            system_prompt: "ok",
+          }),
+        }),
+      );
+      expect(resTid.status).toBe(400);
+
+      // 3. Control character or >200-char title on /v2/admin/threads/rename -> HTTP 400
+      const resTitle = await app.handle(
+        new Request("http://localhost/v2/admin/threads/rename", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-admin-token": "test-admin-secret",
+          },
+          body: JSON.stringify({
+            widgetId: "default",
+            threadId: "thread-1",
+            title: "Session\u0000Injected",
+          }),
+        }),
+      );
+      expect(resTitle.status).toBe(400);
+    } finally {
+      if (prevToken === undefined) delete process.env.ADMIN_TOKEN;
+      else process.env.ADMIN_TOKEN = prevToken;
+    }
+  });
+
+  it("VULN-46: FallbackQueue bounds opportunistic request-path drains via maxBatchSize and batches multi-thread lookup in O(Q)", async () => {
+    const {
+      FallbackQueue,
+      dbFallbackQueue,
+      getQueuedMessagesForThreads,
+    } = await import("../lib/queue/fallback-queue");
+
+    const q = new FallbackQueue<number>("batch-bound-test", 100);
+    for (let i = 0; i < 25; i++) {
+      q.enqueue(i, { initialDelayMs: 0 });
+    }
+    expect(q.hasReadyJobs(Date.now() + 10)).toBe(true);
+
+    const report = await q.processPending(async () => true, Date.now() + 10, 10);
+    expect(report.processed).toBe(10);
+    expect(report.succeeded).toBe(10);
+    expect(q.size).toBe(15);
+
+    dbFallbackQueue.clear();
+    try {
+      dbFallbackQueue.enqueue(
+        { threadId: "t-a", role: "user", content: "msg-a" },
+        { type: "db_chat_message", initialDelayMs: 0 },
+      );
+      dbFallbackQueue.enqueue(
+        { threadId: "t-b", role: "assistant", content: "msg-b" },
+        { type: "db_chat_message", initialDelayMs: 0 },
+      );
+      dbFallbackQueue.enqueue(
+        { threadId: "t-ignored", role: "user", content: "msg-c" },
+        { type: "db_chat_message", initialDelayMs: 0 },
+      );
+
+      const batch = getQueuedMessagesForThreads(new Set(["t-a", "t-b"]));
+      expect(batch.length).toBe(2);
+      expect(batch.map((m) => m.content).sort()).toEqual(["msg-a", "msg-b"]);
+    } finally {
+      dbFallbackQueue.clear();
+    }
+  });
+
+  it("VULN-47: getTransporter invalidates cached SMTP transport on credential rotation and /v2/admin/mail/send blocks recipient delimiter injection", async () => {
+    const nodemailer = require("nodemailer");
+    const { getTransporter, resetTransporterCache } = await import("../lib/mail/naver");
+
+    const prevToken = process.env.ADMIN_TOKEN;
+    const prevUser = process.env.NAVER_MAIL_USER;
+    const prevPass = process.env.NAVER_MAIL_PASSWORD;
+    const origCreate = nodemailer.createTransport;
+    let closedCount = 0;
+    const seenUsers: string[] = [];
+
+    nodemailer.createTransport = (opts: any) => {
+      seenUsers.push(opts.auth.user);
+      return {
+        sendMail: async () => ({ messageId: "m1", accepted: [], rejected: [] }),
+        close: () => {
+          closedCount++;
+        },
+        on: () => {},
+      };
+    };
+
+    try {
+      resetTransporterCache();
+      process.env.NAVER_MAIL_USER = "first@naver.com";
+      process.env.NAVER_MAIL_PASSWORD = "pw1";
+      const t1 = getTransporter();
+      const t1Again = getTransporter();
+      expect(t1).toBe(t1Again);
+
+      // Rotate credentials -> must close t1 and instantiate fresh transporter
+      process.env.NAVER_MAIL_USER = "second@naver.com";
+      process.env.NAVER_MAIL_PASSWORD = "pw2";
+      const t2 = getTransporter();
+      expect(t2).not.toBe(t1);
+      expect(closedCount).toBe(1);
+      expect(seenUsers).toEqual(["first@naver.com", "second@naver.com"]);
+
+      // Recipient delimiter/angle-bracket injection -> HTTP 400
+      process.env.ADMIN_TOKEN = "test-admin-secret";
+      const app = await createApp(true);
+      for (const badTo of [
+        'attacker"<bcc@evil.com>@example.com',
+        "semi;colon@example.com",
+        `${"a".repeat(320)}@example.com`,
+      ]) {
+        const res = await app.handle(
+          new Request("http://localhost/v2/admin/mail/send", {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              "x-admin-token": "test-admin-secret",
+            },
+            body: JSON.stringify({
+              to: badTo,
+              subject: "Test",
+              text: "Body",
+            }),
+          }),
+        );
+        expect(res.status).toBe(400);
+      }
+    } finally {
+      nodemailer.createTransport = origCreate;
+      resetTransporterCache();
+      if (prevToken === undefined) delete process.env.ADMIN_TOKEN;
+      else process.env.ADMIN_TOKEN = prevToken;
+      if (prevUser === undefined) delete process.env.NAVER_MAIL_USER;
+      else process.env.NAVER_MAIL_USER = prevUser;
+      if (prevPass === undefined) delete process.env.NAVER_MAIL_PASSWORD;
+      else process.env.NAVER_MAIL_PASSWORD = prevPass;
+    }
+  });
+
+  it("VULN-48: YouTube endpoints block whitespace/control-char redirectUri and oversized token/handle/pageToken locally without outbound API calls", async () => {
+    const { google } = await import("googleapis");
+    const origYoutube = google.youtube;
+    let outboundCalls = 0;
+
+    try {
+      (google as any).youtube = () => {
+        outboundCalls++;
+        return {};
+      };
+
+      const app = await createApp(true);
+
+      // 1. redirectUri containing space/null byte on /auth/create -> 422
+      const badCreate = await app.handle(
+        new Request("http://localhost/v1/youtube/auth/create", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            clientId: "123-abc.apps.googleusercontent.com",
+            clientSecret: "GOCSPX-secret",
+            redirectUri: "https://example.com/callback with space",
+          }),
+        }),
+      );
+      expect(badCreate.status).toBe(422);
+
+      // 2. Oversized accessToken (> 4096) or handle (> 128) or pageToken (> 512) -> instant 400, 0 outbound calls
+      const r1 = await app.handle(
+        new Request("http://localhost/v1/youtube/video/list", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            handle: "@" + "h".repeat(130),
+            accessToken: "valid-short-token",
+          }),
+        }),
+      );
+      expect(r1.status).toBe(400);
+
+      const r2 = await app.handle(
+        new Request("http://localhost/v1/youtube/channel/info", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            accessToken: "t".repeat(4097),
+          }),
+        }),
+      );
+      expect(r2.status).toBe(400);
+
+      const r3 = await app.handle(
+        new Request("http://localhost/v1/youtube/comment/list", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            videoId: "dQw4w9WgXcQ",
+            accessToken: "valid-short-token",
+            pageToken: "p".repeat(513),
+          }),
+        }),
+      );
+      expect(r3.status).toBe(400);
+      expect(outboundCalls).toBe(0);
+    } finally {
+      google.youtube = origYoutube;
+    }
+  });
 });

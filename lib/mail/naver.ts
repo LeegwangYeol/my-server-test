@@ -35,6 +35,8 @@ export const SMTP_TIMEOUTS = {
 } as const;
 
 let cached: Transporter | null = null;
+let cachedSig: string | null = null;
+const OPPORTUNISTIC_MAIL_DRAIN_BATCH = 5;
 
 /**
  * Resolve SMTP credentials from either env naming scheme, so the server works
@@ -54,8 +56,12 @@ function resolveCreds(): { user?: string; pass?: string } {
 }
 
 export function getTransporter(): Transporter {
-  if (cached) return cached;
   const { user, pass } = resolveCreds();
+  const sig = user && pass ? `${user}\0${pass}` : null;
+  if (cached && sig && cachedSig === sig) return cached;
+  if (cached) {
+    resetTransporterCache();
+  }
   if (!user || !pass) {
     throw new Error(
       "네이버 SMTP 자격증명 미설정 — NAVER_ID+NAVER_APP_PASSWORD 또는 " +
@@ -79,10 +85,12 @@ export function getTransporter(): Transporter {
     console.error("[lib/mail/naver] Transporter background error:", err?.message || err);
     if (cached === transport) {
       cached = null;
+      cachedSig = null;
     }
   });
 
   cached = transport;
+  cachedSig = sig;
   return cached;
 }
 
@@ -96,6 +104,7 @@ export function resetTransporterCache(): void {
     }
     cached = null;
   }
+  cachedSig = null;
 }
 
 import {
@@ -209,8 +218,8 @@ export async function sendNaverMail(
 
     if (execRes.result) {
       if (allowQueue) {
-        if (mailFallbackQueue.getReadyJobs().length > 0) {
-          await processMailQueue().catch((drainErr) => {
+        if (mailFallbackQueue.hasReadyJobs()) {
+          await processMailQueue(OPPORTUNISTIC_MAIL_DRAIN_BATCH).catch((drainErr) => {
             console.warn(
               "[lib/mail/naver] opportunistic processMailQueue drain warning:",
               drainErr?.message || drainErr,
@@ -236,14 +245,18 @@ export async function sendNaverMail(
 /**
  * Replays and processes pending emails stored in the mail fallback queue.
  */
-export async function processMailQueue(): Promise<{
+export async function processMailQueue(maxBatchSize?: number): Promise<{
   processed: number;
   succeeded: number;
   failed: number;
 }> {
-  return mailFallbackQueue.processPending(async (job: FallbackJob<SendMailInput>) => {
-    const res = await sendNaverMail(job.payload, { allowQueue: false });
-    return res.rejected.length === 0;
-  });
+  return mailFallbackQueue.processPending(
+    async (job: FallbackJob<SendMailInput>) => {
+      const res = await sendNaverMail(job.payload, { allowQueue: false });
+      return res.rejected.length === 0;
+    },
+    Date.now(),
+    maxBatchSize,
+  );
 }
 

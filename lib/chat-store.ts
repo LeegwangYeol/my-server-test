@@ -42,9 +42,12 @@ export interface ChatThreadRow {
 
 /* ─── threads ──────────────────────────────────────────────────────── */
 
+const MAX_STORE_ID_CHARS = 100;
+const OPPORTUNISTIC_DB_DRAIN_BATCH = 10;
+
 export async function createThread(widgetId: string): Promise<string | null> {
   const wid = (widgetId ?? "").trim();
-  if (!wid) return null;
+  if (!wid || wid.length > MAX_STORE_ID_CHARS) return null;
   try {
     const { data, error } = await supabaseUntyped
       .from("chat_thread")
@@ -77,7 +80,9 @@ export async function getThread(
 ): Promise<ChatThreadRow | null> {
   const wid = (widgetId ?? "").trim();
   const tid = (threadId ?? "").trim();
-  if (!wid || !tid) return null;
+  if (!wid || !tid || wid.length > MAX_STORE_ID_CHARS || tid.length > MAX_STORE_ID_CHARS) {
+    return null;
+  }
 
   try {
     const { data, error } = await supabaseUntyped
@@ -113,7 +118,9 @@ export async function deleteThread(
 ): Promise<boolean> {
   const wid = (widgetId ?? "").trim();
   const tid = (threadId ?? "").trim();
-  if (!wid || !tid) return false;
+  if (!wid || !tid || wid.length > MAX_STORE_ID_CHARS || tid.length > MAX_STORE_ID_CHARS) {
+    return false;
+  }
 
   try {
     const { error } = await supabaseUntyped
@@ -159,6 +166,7 @@ import {
   dbFallbackQueue,
   is429OrQuotaError,
   getQueuedMessagesForThread,
+  getQueuedMessagesForThreads,
   registerDefaultDbHandler,
   type FallbackJob,
 } from "./queue/fallback-queue";
@@ -170,7 +178,7 @@ export async function listMessages(
   limit = 50,
 ): Promise<ChatMessageRow[]> {
   const tid = (threadId ?? "").trim();
-  if (!tid) return [];
+  if (!tid || tid.length > MAX_STORE_ID_CHARS) return [];
   const safeLimit =
     Number.isFinite(limit) && limit > 0
       ? Math.min(Math.floor(limit), 1000)
@@ -271,8 +279,8 @@ export async function appendMessage(
     }
 
     if (execRes.success && allowQueue) {
-      if (dbFallbackQueue.getReadyJobs().length > 0) {
-        await processDbQueue().catch((drainErr) => {
+      if (dbFallbackQueue.hasReadyJobs()) {
+        await processDbQueue(undefined, OPPORTUNISTIC_DB_DRAIN_BATCH).catch((drainErr) => {
           console.warn(
             "[chat-store] opportunistic processDbQueue drain warning:",
             drainErr?.message || drainErr,
@@ -344,6 +352,7 @@ export async function processDbQueue(
     role: ChatRole;
     content: string;
   }) => Promise<boolean>,
+  maxBatchSize?: number,
 ): Promise<{
   processed: number;
   succeeded: number;
@@ -359,6 +368,8 @@ export async function processDbQueue(
       }
       return await defaultDbInsert(payload);
     },
+    Date.now(),
+    maxBatchSize,
   );
 }
 
@@ -446,7 +457,7 @@ export async function listThreads(
   limit = 100,
 ): Promise<ThreadSummary[]> {
   const wid = (widgetId ?? "").trim();
-  if (!wid) return [];
+  if (!wid || wid.length > MAX_STORE_ID_CHARS) return [];
   const safeLimit =
     Number.isFinite(limit) && limit > 0
       ? Math.min(Math.floor(limit), 500)
@@ -491,8 +502,8 @@ export async function listThreads(
     const combinedMsgs: ChatMessageRow[] = [
       ...(((msgs as ChatMessageRow[]) ?? []).slice()),
     ];
-    for (const id of ids) {
-      const queued = getQueuedMessagesForThread(id) as ChatMessageRow[];
+    if (dbFallbackQueue.size > 0) {
+      const queued = getQueuedMessagesForThreads(new Set(ids)) as ChatMessageRow[];
       if (queued.length > 0) {
         combinedMsgs.push(...queued);
       }
@@ -549,7 +560,9 @@ export async function renameThread(
 ): Promise<boolean> {
   const tid = (threadId ?? "").trim();
   const wid = (widgetId ?? "").trim();
-  if (!tid || !wid) return false;
+  if (!tid || !wid || tid.length > MAX_STORE_ID_CHARS || wid.length > MAX_STORE_ID_CHARS) {
+    return false;
+  }
   const normalized =
     title && title.trim().length > 0 ? title.trim().slice(0, 200) : null;
   try {
@@ -586,7 +599,9 @@ export async function updateThreadPrompt(
 ): Promise<boolean> {
   const tid = (threadId ?? "").trim();
   const wid = (widgetId ?? "").trim();
-  if (!tid || !wid) return false;
+  if (!tid || !wid || tid.length > MAX_STORE_ID_CHARS || wid.length > MAX_STORE_ID_CHARS) {
+    return false;
+  }
   const update: Record<string, unknown> = {};
   if (patch.system_prompt !== undefined) {
     const v = patch.system_prompt?.trim() ?? "";

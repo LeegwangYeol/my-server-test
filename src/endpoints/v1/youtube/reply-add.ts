@@ -10,11 +10,11 @@ export const v1Reply = (app: any) => {
       const text = String(body?.text ?? "").trim();
       const accessToken = String(body?.accessToken ?? "").trim();
 
-      if (!parentId) {
+      if (!parentId || parentId.length > 256) {
         set.status = 400;
         return {
           success: false,
-          message: "parentId 값이 제공되지 않았습니다.",
+          message: "유효한 parentId 값이 제공되지 않았습니다.",
         };
       }
       if (!text) {
@@ -24,11 +24,11 @@ export const v1Reply = (app: any) => {
           message: "댓글 내용이 제공되지 않았습니다.",
         };
       }
-      if (!accessToken) {
+      if (!accessToken || accessToken.length > 4096) {
         set.status = 400;
         return {
           success: false,
-          message: "accessToken 값이 제공되지 않았습니다.",
+          message: "유효한 accessToken 값이 제공되지 않았습니다.",
         };
       }
 

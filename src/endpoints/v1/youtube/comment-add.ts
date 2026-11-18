@@ -10,11 +10,11 @@ export const v1Comment = (app: any) => {
       const videoId = String(body?.videoId ?? "").trim();
       const commentText = String(body?.commentText ?? "").trim();
 
-      if (!videoId) {
+      if (!videoId || videoId.length > 128) {
         set.status = 400;
         return {
           success: false,
-          message: "videoId 값이 제공되지 않았습니다.",
+          message: "유효한 videoId 값이 제공되지 않았습니다.",
         };
       }
       if (!commentText) {
@@ -24,11 +24,11 @@ export const v1Comment = (app: any) => {
           message: "댓글 내용이 제공되지 않았습니다.",
         };
       }
-      if (!accessToken) {
+      if (!accessToken || accessToken.length > 4096) {
         set.status = 400;
         return {
           success: false,
-          message: "accessToken 값이 제공되지 않았습니다.",
+          message: "유효한 accessToken 값이 제공되지 않았습니다.",
         };
       }
 

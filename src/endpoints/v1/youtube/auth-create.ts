@@ -44,17 +44,20 @@ export const v1AuthCreate = (app: any) => {
           clientId: t.String({
             description: "Google OAuth Client ID",
             error: "Client ID is required",
+            maxLength: 512,
             pattern: "^[0-9]+-[a-zA-Z0-9_-]+\\.apps\\.googleusercontent\\.com$",
           }),
           clientSecret: t.String({
             description: "Google OAuth Client Secret",
             error: "Client Secret is required",
+            maxLength: 512,
             pattern: "^GOCSPX-[a-zA-Z0-9_-]+$",
           }),
           redirectUri: t.String({
             description: "OAuth Redirect URI",
             error: "Redirect URI is required",
-            pattern: "^https?://[\\w.-]+(?::\\d+)?/.*$",
+            maxLength: 2048,
+            pattern: "^https?://[\\w.-]+(?::\\d+)?/[^\\s\\x00-\\x1f\\x7f]*$",
           }),
         }),
         response: t.Object({
@@ -95,7 +98,7 @@ export const v1AuthCreate = (app: any) => {
             typeof authState.redirectUri !== "string" ||
             !authState.redirectUri.trim() ||
             authState.redirectUri.trim().length > 2048 ||
-            !/^https?:\/\/[\w.-]+(?::\d+)?\/.*$/.test(
+            !/^https?:\/\/[\w.-]+(?::\d+)?\/[^\s\x00-\x1f\x7f]*$/.test(
               authState.redirectUri.trim(),
             )
           ) {

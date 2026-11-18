@@ -60,8 +60,11 @@ export const v2MailEndpoints = async (app: any) => {
           return { success: false, error: "to required" };
         }
         const recipients = to.split(",").map((s) => s.trim()).filter(Boolean);
-        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-        if (recipients.length === 0 || recipients.some((addr) => !emailRegex.test(addr))) {
+        const emailRegex = /^[^\s@<>",;\x00-\x1f\x7f]+@[^\s@<>",;\x00-\x1f\x7f]+\.[^\s@<>",;\x00-\x1f\x7f]+$/;
+        if (
+          recipients.length === 0 ||
+          recipients.some((addr) => addr.length > 320 || !emailRegex.test(addr))
+        ) {
           set.status = 400;
           return { success: false, error: "invalid email format" };
         }
@@ -77,13 +80,23 @@ export const v2MailEndpoints = async (app: any) => {
           set.status = 400;
           return { success: false, error: "subject exceeds maximum length of 1000 characters" };
         }
-        if (/[\r\n]/.test(subject) || (body?.from && /[\r\n]/.test(body.from))) {
+        if (/[\r\n\x00-\x1f\x7f]/.test(subject) || (body?.from && /[\r\n\x00-\x1f\x7f]/.test(body.from))) {
           set.status = 400;
           return { success: false, error: "invalid header characters (CRLF prohibited)" };
         }
         if (body?.from && body.from.trim().length > 320) {
           set.status = 400;
           return { success: false, error: "from exceeds maximum length of 320 characters" };
+        }
+        if (
+          (typeof body?.text === "string" && body.text.length > 500_000) ||
+          (typeof body?.html === "string" && body.html.length > 500_000)
+        ) {
+          set.status = 400;
+          return {
+            success: false,
+            error: "mail body exceeds maximum length of 500000 characters",
+          };
         }
         if (!body?.text?.trim() && !body?.html?.trim()) {
           set.status = 400;

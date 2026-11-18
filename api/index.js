@@ -701812,17 +701812,20 @@ var v1AuthCreate = (app) => {
         clientId: t.String({
           description: "Google OAuth Client ID",
           error: "Client ID is required",
+          maxLength: 512,
           pattern: "^[0-9]+-[a-zA-Z0-9_-]+\\.apps\\.googleusercontent\\.com$"
         }),
         clientSecret: t.String({
           description: "Google OAuth Client Secret",
           error: "Client Secret is required",
+          maxLength: 512,
           pattern: "^GOCSPX-[a-zA-Z0-9_-]+$"
         }),
         redirectUri: t.String({
           description: "OAuth Redirect URI",
           error: "Redirect URI is required",
-          pattern: "^https?://[\\w.-]+(?::\\d+)?/.*$"
+          maxLength: 2048,
+          pattern: "^https?://[\\w.-]+(?::\\d+)?/[^\\s\\x00-\\x1f\\x7f]*$"
         })
       }),
       response: t.Object({
@@ -701849,7 +701852,7 @@ var v1AuthCreate = (app) => {
         const authState = JSON.parse(
           Buffer.from(state, "base64").toString()
         );
-        if (!authState || typeof authState !== "object" || typeof authState.clientId !== "string" || !authState.clientId.trim() || authState.clientId.trim().length > 512 || typeof authState.clientSecret !== "string" || !authState.clientSecret.trim() || authState.clientSecret.trim().length > 512 || typeof authState.redirectUri !== "string" || !authState.redirectUri.trim() || authState.redirectUri.trim().length > 2048 || !/^https?:\/\/[\w.-]+(?::\d+)?\/.*$/.test(
+        if (!authState || typeof authState !== "object" || typeof authState.clientId !== "string" || !authState.clientId.trim() || authState.clientId.trim().length > 512 || typeof authState.clientSecret !== "string" || !authState.clientSecret.trim() || authState.clientSecret.trim().length > 512 || typeof authState.redirectUri !== "string" || !authState.redirectUri.trim() || authState.redirectUri.trim().length > 2048 || !/^https?:\/\/[\w.-]+(?::\d+)?\/[^\s\x00-\x1f\x7f]*$/.test(
           authState.redirectUri.trim()
         )) {
           set.status = 400;
@@ -701926,11 +701929,11 @@ var v1Comment = (app) => {
       const accessToken = String(body?.accessToken ?? "").trim();
       const videoId = String(body?.videoId ?? "").trim();
       const commentText = String(body?.commentText ?? "").trim();
-      if (!videoId) {
+      if (!videoId || videoId.length > 128) {
         set.status = 400;
         return {
           success: false,
-          message: "videoId \uAC12\uC774 \uC81C\uACF5\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4."
+          message: "\uC720\uD6A8\uD55C videoId \uAC12\uC774 \uC81C\uACF5\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4."
         };
       }
       if (!commentText) {
@@ -701940,11 +701943,11 @@ var v1Comment = (app) => {
           message: "\uB313\uAE00 \uB0B4\uC6A9\uC774 \uC81C\uACF5\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4."
         };
       }
-      if (!accessToken) {
+      if (!accessToken || accessToken.length > 4096) {
         set.status = 400;
         return {
           success: false,
-          message: "accessToken \uAC12\uC774 \uC81C\uACF5\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4."
+          message: "\uC720\uD6A8\uD55C accessToken \uAC12\uC774 \uC81C\uACF5\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4."
         };
       }
       try {
@@ -702064,18 +702067,25 @@ var v1CommentList = (app) => {
       const { maxResults, pageToken, textFormat, order } = body;
       const videoId = String(body?.videoId ?? "").trim();
       const accessToken = String(body?.accessToken ?? "").trim();
-      if (!videoId) {
+      if (!videoId || videoId.length > 128) {
         set.status = 400;
         return {
           success: false,
-          message: "videoId \uAC12\uC774 \uC81C\uACF5\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4."
+          message: "\uC720\uD6A8\uD55C videoId \uAC12\uC774 \uC81C\uACF5\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4."
         };
       }
-      if (!accessToken) {
+      if (!accessToken || accessToken.length > 4096) {
         set.status = 400;
         return {
           success: false,
-          message: "accessToken \uAC12\uC774 \uC81C\uACF5\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4."
+          message: "\uC720\uD6A8\uD55C accessToken \uAC12\uC774 \uC81C\uACF5\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4."
+        };
+      }
+      if (typeof pageToken === "string" && pageToken.trim().length > 512) {
+        set.status = 400;
+        return {
+          success: false,
+          message: "\uC720\uD6A8\uD558\uC9C0 \uC54A\uC740 pageToken \uAC12\uC785\uB2C8\uB2E4."
         };
       }
       try {
@@ -702193,18 +702203,18 @@ var v1CommentDelete = (app) => {
     async ({ body, set }) => {
       const commentId = String(body?.commentId ?? "").trim();
       const accessToken = String(body?.accessToken ?? "").trim();
-      if (!commentId) {
+      if (!commentId || commentId.length > 256) {
         set.status = 400;
         return {
           success: false,
-          message: "\uB313\uAE00 ID\uAC00 \uC81C\uACF5\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4."
+          message: "\uC720\uD6A8\uD55C \uB313\uAE00 ID\uAC00 \uC81C\uACF5\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4."
         };
       }
-      if (!accessToken) {
+      if (!accessToken || accessToken.length > 4096) {
         set.status = 400;
         return {
           success: false,
-          message: "accessToken \uAC12\uC774 \uC81C\uACF5\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4."
+          message: "\uC720\uD6A8\uD55C accessToken \uAC12\uC774 \uC81C\uACF5\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4."
         };
       }
       try {
@@ -702281,11 +702291,11 @@ var v1Reply = (app) => {
       const parentId = String(body?.parentId ?? "").trim();
       const text = String(body?.text ?? "").trim();
       const accessToken = String(body?.accessToken ?? "").trim();
-      if (!parentId) {
+      if (!parentId || parentId.length > 256) {
         set.status = 400;
         return {
           success: false,
-          message: "parentId \uAC12\uC774 \uC81C\uACF5\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4."
+          message: "\uC720\uD6A8\uD55C parentId \uAC12\uC774 \uC81C\uACF5\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4."
         };
       }
       if (!text) {
@@ -702295,11 +702305,11 @@ var v1Reply = (app) => {
           message: "\uB313\uAE00 \uB0B4\uC6A9\uC774 \uC81C\uACF5\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4."
         };
       }
-      if (!accessToken) {
+      if (!accessToken || accessToken.length > 4096) {
         set.status = 400;
         return {
           success: false,
-          message: "accessToken \uAC12\uC774 \uC81C\uACF5\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4."
+          message: "\uC720\uD6A8\uD55C accessToken \uAC12\uC774 \uC81C\uACF5\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4."
         };
       }
       try {
@@ -702382,18 +702392,25 @@ var v1ReplyList = (app) => {
       const { maxResults, pageToken } = body;
       const parentId = String(body?.parentId ?? "").trim();
       const accessToken = String(body?.accessToken ?? "").trim();
-      if (!parentId) {
+      if (!parentId || parentId.length > 256) {
         set.status = 400;
         return {
           success: false,
-          message: "\uB313\uAE00\uC758 Id \uAC12\uC774 \uC81C\uACF5\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4."
+          message: "\uC720\uD6A8\uD55C \uB313\uAE00\uC758 Id \uAC12\uC774 \uC81C\uACF5\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4."
         };
       }
-      if (!accessToken) {
+      if (!accessToken || accessToken.length > 4096) {
         set.status = 400;
         return {
           success: false,
-          message: "accessToken \uAC12\uC774 \uC81C\uACF5\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4."
+          message: "\uC720\uD6A8\uD55C accessToken \uAC12\uC774 \uC81C\uACF5\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4."
+        };
+      }
+      if (typeof pageToken === "string" && pageToken.trim().length > 512) {
+        set.status = 400;
+        return {
+          success: false,
+          message: "\uC720\uD6A8\uD558\uC9C0 \uC54A\uC740 pageToken \uAC12\uC785\uB2C8\uB2E4."
         };
       }
       try {
@@ -702535,11 +702552,18 @@ var v1ChannelInfo = (app) => {
     async ({ body, set }) => {
       const { maxResults, pageToken } = body;
       const accessToken = String(body?.accessToken ?? "").trim();
-      if (!accessToken) {
+      if (!accessToken || accessToken.length > 4096) {
         set.status = 400;
         return {
           success: false,
-          message: "accessToken \uAC12\uC774 \uC81C\uACF5\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4."
+          message: "\uC720\uD6A8\uD55C accessToken \uAC12\uC774 \uC81C\uACF5\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4."
+        };
+      }
+      if (typeof pageToken === "string" && pageToken.trim().length > 512) {
+        set.status = 400;
+        return {
+          success: false,
+          message: "\uC720\uD6A8\uD558\uC9C0 \uC54A\uC740 pageToken \uAC12\uC785\uB2C8\uB2E4."
         };
       }
       try {
@@ -702672,18 +702696,25 @@ var v1VideoList = (app) => {
       const { maxResults, pageToken } = body;
       const handle = String(body?.handle ?? "").trim();
       const accessToken = String(body?.accessToken ?? "").trim();
-      if (!handle) {
+      if (!handle || handle.length > 128) {
         set.status = 400;
         return {
           success: false,
-          message: "handle \uAC12\uC774 \uC81C\uACF5\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4."
+          message: "\uC720\uD6A8\uD55C handle \uAC12\uC774 \uC81C\uACF5\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4."
         };
       }
-      if (!accessToken) {
+      if (!accessToken || accessToken.length > 4096) {
         set.status = 400;
         return {
           success: false,
-          message: "accessToken \uAC12\uC774 \uC81C\uACF5\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4."
+          message: "\uC720\uD6A8\uD55C accessToken \uAC12\uC774 \uC81C\uACF5\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4."
+        };
+      }
+      if (typeof pageToken === "string" && pageToken.trim().length > 512) {
+        set.status = 400;
+        return {
+          success: false,
+          message: "\uC720\uD6A8\uD558\uC9C0 \uC54A\uC740 pageToken \uAC12\uC785\uB2C8\uB2E4."
         };
       }
       try {
@@ -711472,6 +711503,7 @@ var OpenAICompatibleProvider = class {
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
+    const MAX_SSE_BUFFER_CHARS2 = 256e3;
     try {
       while (true) {
         const { value, done } = await reader.read();
@@ -711482,17 +711514,28 @@ var OpenAICompatibleProvider = class {
             if (tailLine.startsWith("data:")) {
               const payload = tailLine.slice(5).trim();
               if (payload === "[DONE]") return;
+              let inBandErr = null;
+              let delta;
               try {
                 const json = JSON.parse(payload);
-                const delta = json?.choices?.[0]?.delta?.content;
-                if (delta) yield delta;
+                if (json?.error) {
+                  const errMsg = typeof json.error === "string" ? json.error : json.error?.message || JSON.stringify(json.error);
+                  inBandErr = new Error(`[${this.name}] SSE error: ${errMsg}`);
+                } else {
+                  delta = json?.choices?.[0]?.delta?.content;
+                }
               } catch {
               }
+              if (inBandErr) throw inBandErr;
+              if (delta) yield delta;
             }
           }
           break;
         }
         buffer += decoder.decode(value, { stream: true });
+        if (buffer.length > MAX_SSE_BUFFER_CHARS2) {
+          throw new Error(`[${this.name}] SSE frame exceeded buffer limit`);
+        }
         let nl;
         while ((nl = buffer.indexOf("\n")) !== -1) {
           const line = buffer.slice(0, nl).trim();
@@ -711500,12 +711543,20 @@ var OpenAICompatibleProvider = class {
           if (!line.startsWith("data:")) continue;
           const payload = line.slice(5).trim();
           if (payload === "[DONE]") return;
+          let inBandErr = null;
+          let delta;
           try {
             const json = JSON.parse(payload);
-            const delta = json?.choices?.[0]?.delta?.content;
-            if (delta) yield delta;
+            if (json?.error) {
+              const errMsg = typeof json.error === "string" ? json.error : json.error?.message || JSON.stringify(json.error);
+              inBandErr = new Error(`[${this.name}] SSE error: ${errMsg}`);
+            } else {
+              delta = json?.choices?.[0]?.delta?.content;
+            }
           } catch {
           }
+          if (inBandErr) throw inBandErr;
+          if (delta) yield delta;
         }
       }
     } finally {
@@ -712436,6 +712487,7 @@ var MemoryKeyStore = class {
 };
 
 // lib/llm/rotating-provider.ts
+var MAX_SSE_BUFFER_CHARS = 256e3;
 var RotatingLLMProvider = class {
   constructor(keyStore, keyConfigMap, options) {
     this.name = "openrouter-rotating";
@@ -712449,6 +712501,7 @@ var RotatingLLMProvider = class {
     };
     this.maxAttempts = options?.maxAttempts ?? Math.max(3, Math.min(keyConfigMap.size, 5));
     this.perAttemptTimeoutMs = options?.perAttemptTimeoutMs ?? 6e3;
+    this.chunkTimeoutMs = options?.chunkTimeoutMs ?? 25e3;
   }
   /**
    * Idempotently seeds keys, weights, and account metadata in the store.
@@ -712528,9 +712581,66 @@ var RotatingLLMProvider = class {
     const decoder = new TextDecoder();
     let buffer = "";
     let streamStatusCode = 200;
+    let streamCooldownMs = 0;
     let streamErrorMessage = "";
+    const classifyInBandError = (json) => {
+      const rawCode = Number(json?.error?.code);
+      const code = Number.isFinite(rawCode) && rawCode > 0 ? rawCode : 502;
+      const errMsg = typeof json?.error?.message === "string" && json.error.message.trim() ? json.error.message.trim() : `Upstream SSE error (${code})`;
+      const outage = HealthAndCooldownEngine.isUpstreamProviderOutage(json);
+      if (outage.isOutage && (code === 429 || code === 503)) {
+        streamStatusCode = 0;
+        streamCooldownMs = 0;
+        streamErrorMessage = `Provider outage: ${outage.provider || "UpstreamProvider"}`;
+      } else if (code === 402) {
+        streamStatusCode = 402;
+        streamCooldownMs = Infinity;
+        streamErrorMessage = errMsg;
+      } else if (code === 401 || code === 403 && !HealthAndCooldownEngine.isPromptModerationError(json)) {
+        streamStatusCode = code;
+        streamCooldownMs = Infinity;
+        streamErrorMessage = errMsg;
+      } else if (code === 403) {
+        streamStatusCode = 0;
+        streamCooldownMs = 0;
+        streamErrorMessage = errMsg;
+      } else if (code === 429) {
+        streamStatusCode = 429;
+        streamCooldownMs = 3e3;
+        streamErrorMessage = errMsg;
+      } else {
+        streamStatusCode = code >= 500 || code === 408 ? code : 502;
+        streamCooldownMs = 2e3;
+        streamErrorMessage = errMsg;
+      }
+      return new Error(`UPSTREAM_SSE_ERROR (${code}): ${errMsg}`);
+    };
+    const readChunkWithTimeout = async () => {
+      if (!Number.isFinite(this.chunkTimeoutMs) || this.chunkTimeoutMs <= 0) {
+        return reader.read();
+      }
+      let timer;
+      try {
+        return await Promise.race([
+          reader.read(),
+          new Promise((_, reject) => {
+            timer = setTimeout(() => {
+              streamStatusCode = 504;
+              streamCooldownMs = 2e3;
+              streamErrorMessage = `SSE stream stalled > ${this.chunkTimeoutMs}ms`;
+              void reader.cancel("STREAM_TIMEOUT").catch(() => {
+              });
+              reject(new Error(`STREAM_TIMEOUT: Upstream SSE stalled for ${this.chunkTimeoutMs}ms`));
+            }, this.chunkTimeoutMs);
+          })
+        ]);
+      } finally {
+        if (timer !== void 0) clearTimeout(timer);
+      }
+    };
     const onAbort = () => {
       streamStatusCode = 499;
+      streamCooldownMs = 0;
       streamErrorMessage = "Client disconnected";
       void reader.cancel().catch(() => {
       });
@@ -712546,10 +712656,11 @@ var RotatingLLMProvider = class {
       while (true) {
         if (clientSignal?.aborted) {
           streamStatusCode = 499;
+          streamCooldownMs = 0;
           streamErrorMessage = "Client disconnected";
           break;
         }
-        const { done, value } = await reader.read();
+        const { done, value } = await readChunkWithTimeout();
         if (done) {
           buffer += decoder.decode();
           if (buffer.trim()) {
@@ -712557,17 +712668,30 @@ var RotatingLLMProvider = class {
             if (tailLine.startsWith("data:")) {
               const payload = tailLine.slice(5).trim();
               if (payload === "[DONE]") return;
+              let parsedErr = null;
+              let token;
               try {
                 const json = JSON.parse(payload);
-                const token = json?.choices?.[0]?.delta?.content;
-                if (token) yield token;
+                if (json?.error) {
+                  parsedErr = classifyInBandError(json);
+                } else {
+                  token = json?.choices?.[0]?.delta?.content;
+                }
               } catch {
               }
+              if (parsedErr) throw parsedErr;
+              if (token) yield token;
             }
           }
           break;
         }
         buffer += decoder.decode(value, { stream: true });
+        if (buffer.length > MAX_SSE_BUFFER_CHARS) {
+          streamStatusCode = 502;
+          streamCooldownMs = 2e3;
+          streamErrorMessage = "Upstream SSE frame exceeded buffer limit";
+          throw new Error("STREAM_ERROR: Upstream SSE frame exceeded buffer limit");
+        }
         let nl;
         while ((nl = buffer.indexOf("\n")) !== -1) {
           const line = buffer.slice(0, nl).trim();
@@ -712576,22 +712700,35 @@ var RotatingLLMProvider = class {
           if (line.startsWith("data:")) {
             const payload = line.slice(5).trim();
             if (payload === "[DONE]") return;
+            let parsedErr = null;
+            let token;
             try {
               const json = JSON.parse(payload);
-              const token = json?.choices?.[0]?.delta?.content;
-              if (token) yield token;
+              if (json?.error) {
+                parsedErr = classifyInBandError(json);
+              } else {
+                token = json?.choices?.[0]?.delta?.content;
+              }
             } catch {
             }
+            if (parsedErr) throw parsedErr;
+            if (token) yield token;
           }
         }
       }
     } catch (streamErr) {
       if (clientSignal?.aborted || streamStatusCode === 499) {
         streamStatusCode = 499;
+        streamCooldownMs = 0;
         streamErrorMessage = "Client disconnected";
       } else {
-        streamStatusCode = 500;
-        streamErrorMessage = streamErr?.message || "Stream read error";
+        if (streamStatusCode === 200) {
+          streamStatusCode = 500;
+          streamCooldownMs = 2e3;
+        }
+        if (!streamErrorMessage) {
+          streamErrorMessage = streamErr?.message || "Stream read error";
+        }
         throw streamErr;
       }
     } finally {
@@ -712608,7 +712745,7 @@ var RotatingLLMProvider = class {
         keyId,
         leaseToken,
         streamStatusCode,
-        streamStatusCode === 200 || streamStatusCode === 499 ? 0 : 2e3,
+        streamStatusCode === 200 || streamStatusCode === 499 || streamStatusCode === 0 ? 0 : streamCooldownMs || 2e3,
         streamErrorMessage
       );
     }
@@ -713743,6 +713880,18 @@ var FallbackQueue = class {
     return job;
   }
   /**
+   * O(1)-best-case check for whether at least one pending job is ready for retry,
+   * avoiding full-queue array allocations on hot request paths.
+   */
+  hasReadyJobs(now = Date.now()) {
+    for (const job of this.jobs.values()) {
+      if (job.status === "pending" && job.nextRetryAt <= now) {
+        return true;
+      }
+    }
+    return false;
+  }
+  /**
    * Retrieve all jobs ready for retry (status === "pending" && nextRetryAt <= now).
    */
   getReadyJobs(now = Date.now()) {
@@ -713806,14 +713955,16 @@ var FallbackQueue = class {
   /**
    * Drain / process pending jobs sequentially with atomic claim to prevent double-execution.
    * Excludes failed/retried jobs from tight infinite loops within the same drain pass.
+   * Optional `maxBatchSize` bounds synchronous request-path drains to prevent serverless timeouts.
    */
-  async processPending(handler2, now = Date.now()) {
+  async processPending(handler2, now = Date.now(), maxBatchSize = Infinity) {
     let processed = 0;
     let succeeded = 0;
     let failed = 0;
     const attemptedIds = /* @__PURE__ */ new Set();
+    const safeBatch = Number.isFinite(maxBatchSize) && maxBatchSize > 0 ? Math.floor(maxBatchSize) : Infinity;
     let job;
-    while ((job = this.claimNextReady(now, attemptedIds)) !== void 0) {
+    while (processed < safeBatch && (job = this.claimNextReady(now, attemptedIds)) !== void 0) {
       attemptedIds.add(job.id);
       processed++;
       try {
@@ -713927,6 +714078,7 @@ function registerDefaultDbHandler(fn) {
   defaultDbInsertHandler = fn;
 }
 function getQueuedMessagesForThread(threadId) {
+  if (!threadId || dbFallbackQueue.size === 0) return [];
   return dbFallbackQueue.getAllJobs().filter(
     (job) => (job.status === "pending" || job.status === "processing") && job.payload?.threadId === threadId && job.type === "db_chat_message"
   ).map((job, idx) => ({
@@ -713937,11 +714089,31 @@ function getQueuedMessagesForThread(threadId) {
     created_at: job.payload.createdAt || new Date(job.createdAt).toISOString()
   }));
 }
+function getQueuedMessagesForThreads(threadIds) {
+  if (threadIds.size === 0 || dbFallbackQueue.size === 0) return [];
+  const results = [];
+  let idx = 0;
+  for (const job of dbFallbackQueue.getAllJobs()) {
+    if ((job.status === "pending" || job.status === "processing") && job.type === "db_chat_message" && typeof job.payload?.threadId === "string" && threadIds.has(job.payload.threadId)) {
+      idx++;
+      results.push({
+        id: -idx,
+        thread_id: job.payload.threadId,
+        role: job.payload.role,
+        content: job.payload.content,
+        created_at: job.payload.createdAt || new Date(job.createdAt).toISOString()
+      });
+    }
+  }
+  return results;
+}
 
 // lib/chat-store.ts
+var MAX_STORE_ID_CHARS = 100;
+var OPPORTUNISTIC_DB_DRAIN_BATCH = 10;
 async function createThread(widgetId) {
   const wid = (widgetId ?? "").trim();
-  if (!wid) return null;
+  if (!wid || wid.length > MAX_STORE_ID_CHARS) return null;
   try {
     const { data, error } = await supabaseUntyped.from("chat_thread").insert({ widget_id: wid }).select("id").single();
     if (error) {
@@ -713960,7 +714132,9 @@ async function createThread(widgetId) {
 async function getThread(threadId, widgetId) {
   const wid = (widgetId ?? "").trim();
   const tid = (threadId ?? "").trim();
-  if (!wid || !tid) return null;
+  if (!wid || !tid || wid.length > MAX_STORE_ID_CHARS || tid.length > MAX_STORE_ID_CHARS) {
+    return null;
+  }
   try {
     const { data, error } = await supabaseUntyped.from("chat_thread").select("*").eq("id", tid).eq("widget_id", wid).eq("is_deleted", false).maybeSingle();
     if (error) {
@@ -713978,7 +714152,7 @@ async function getThread(threadId, widgetId) {
 }
 async function listMessages(threadId, limit = 50) {
   const tid = (threadId ?? "").trim();
-  if (!tid) return [];
+  if (!tid || tid.length > MAX_STORE_ID_CHARS) return [];
   const safeLimit = Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 1e3) : 50;
   let rows = [];
   try {
@@ -714045,8 +714219,8 @@ async function appendMessage(threadId, role, content, options) {
       return true;
     }
     if (execRes.success && allowQueue) {
-      if (dbFallbackQueue.getReadyJobs().length > 0) {
-        await processDbQueue().catch((drainErr) => {
+      if (dbFallbackQueue.hasReadyJobs()) {
+        await processDbQueue(void 0, OPPORTUNISTIC_DB_DRAIN_BATCH).catch((drainErr) => {
           console.warn(
             "[chat-store] opportunistic processDbQueue drain warning:",
             drainErr?.message || drainErr
@@ -714097,7 +714271,7 @@ var defaultDbInsert = async (payload) => {
   }
 };
 registerDefaultDbHandler(defaultDbInsert);
-async function processDbQueue(insertFn) {
+async function processDbQueue(insertFn, maxBatchSize) {
   return dbFallbackQueue.processPending(
     async (job) => {
       const payload = job.payload;
@@ -714105,7 +714279,9 @@ async function processDbQueue(insertFn) {
         return await insertFn(payload);
       }
       return await defaultDbInsert(payload);
-    }
+    },
+    Date.now(),
+    maxBatchSize
   );
 }
 async function listWidgets(limit = 1e3) {
@@ -714141,7 +714317,7 @@ async function listWidgets(limit = 1e3) {
 }
 async function listThreads(widgetId, limit = 100) {
   const wid = (widgetId ?? "").trim();
-  if (!wid) return [];
+  if (!wid || wid.length > MAX_STORE_ID_CHARS) return [];
   const safeLimit = Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 500) : 100;
   try {
     const { data: threads, error } = await supabaseUntyped.from("chat_thread").select("*").eq("widget_id", wid).eq("is_deleted", false).order("updated_at", { ascending: false }).limit(safeLimit);
@@ -714163,8 +714339,8 @@ async function listThreads(widgetId, limit = 100) {
     const combinedMsgs = [
       ...(msgs ?? []).slice()
     ];
-    for (const id of ids) {
-      const queued = getQueuedMessagesForThread(id);
+    if (dbFallbackQueue.size > 0) {
+      const queued = getQueuedMessagesForThreads(new Set(ids));
       if (queued.length > 0) {
         combinedMsgs.push(...queued);
       }
@@ -714203,7 +714379,9 @@ async function listThreads(widgetId, limit = 100) {
 async function renameThread(threadId, widgetId, title) {
   const tid = (threadId ?? "").trim();
   const wid = (widgetId ?? "").trim();
-  if (!tid || !wid) return false;
+  if (!tid || !wid || tid.length > MAX_STORE_ID_CHARS || wid.length > MAX_STORE_ID_CHARS) {
+    return false;
+  }
   const normalized = title && title.trim().length > 0 ? title.trim().slice(0, 200) : null;
   try {
     const { error } = await supabaseUntyped.from("chat_thread").update({ title: normalized }).eq("id", tid).eq("widget_id", wid).eq("is_deleted", false);
@@ -714220,7 +714398,9 @@ async function renameThread(threadId, widgetId, title) {
 async function updateThreadPrompt(threadId, widgetId, patch) {
   const tid = (threadId ?? "").trim();
   const wid = (widgetId ?? "").trim();
-  if (!tid || !wid) return false;
+  if (!tid || !wid || tid.length > MAX_STORE_ID_CHARS || wid.length > MAX_STORE_ID_CHARS) {
+    return false;
+  }
   const update = {};
   if (patch.system_prompt !== void 0) {
     const v = patch.system_prompt?.trim() ?? "";
@@ -714274,7 +714454,15 @@ function isValidWidgetIconUrl(raw) {
 function isValidWidgetBubbleSize(raw) {
   const trimmed = raw.trim();
   if (!trimmed || trimmed.length > 32) return false;
-  return /^\d+(?:\.\d+)?(?:px|rem|em|vh|vw|%)?$/i.test(trimmed);
+  const match = trimmed.match(/^(\d+(?:\.\d+)?)(px|rem|em)?$/i);
+  if (!match) return false;
+  const num = Number(match[1]);
+  if (!Number.isFinite(num)) return false;
+  const unit = (match[2] ?? "px").toLowerCase();
+  if (unit === "rem" || unit === "em") {
+    return num >= 1.5 && num <= 10;
+  }
+  return num >= 24 && num <= 160;
 }
 
 // lib/widget-store.ts
@@ -715392,6 +715580,27 @@ var v2WidgetEndpoints = async (app) => {
         if (!widgetId || !threadId) {
           return { success: false, reason: "widgetId+threadId required" };
         }
+        if (widgetId.length > MAX_WIDGET_ID_CHARS2 || threadId.length > MAX_WIDGET_ID_CHARS2) {
+          set.status = 400;
+          return {
+            success: false,
+            error: `widgetId and threadId must be <= ${MAX_WIDGET_ID_CHARS2} characters`
+          };
+        }
+        if (typeof body?.system_prompt === "string" && body.system_prompt.length > 2e4) {
+          set.status = 400;
+          return {
+            success: false,
+            error: "system_prompt exceeds maximum length of 20000 characters"
+          };
+        }
+        if (typeof body?.context_text === "string" && body.context_text.length > 2e4) {
+          set.status = 400;
+          return {
+            success: false,
+            error: "context_text exceeds maximum length of 20000 characters"
+          };
+        }
         const ok = await updateThreadPrompt(threadId, widgetId, {
           system_prompt: body.system_prompt,
           context_text: body.context_text
@@ -715424,6 +715633,20 @@ var v2WidgetEndpoints = async (app) => {
         const threadId = body?.threadId?.trim() ?? "";
         if (!widgetId || !threadId) {
           return { success: false, reason: "widgetId+threadId required" };
+        }
+        if (widgetId.length > MAX_WIDGET_ID_CHARS2 || threadId.length > MAX_WIDGET_ID_CHARS2) {
+          set.status = 400;
+          return {
+            success: false,
+            error: `widgetId and threadId must be <= ${MAX_WIDGET_ID_CHARS2} characters`
+          };
+        }
+        if (typeof body?.title === "string" && (body.title.length > 200 || /[\x00-\x1f\x7f]/.test(body.title))) {
+          set.status = 400;
+          return {
+            success: false,
+            error: "invalid title (must be <= 200 characters without control chars)"
+          };
         }
         const ok = await renameThread(
           threadId,
@@ -715507,14 +715730,16 @@ function renderPersona(master, widgetId) {
     widget_margin_bottom: 24,
     widget_margin_right: 24,
     // Operator-set launcher size (CSS string, e.g. "48px"). NULL lets
-    // the widget bundle fall back to its own default.
-    widget_bubble_size: master?.chat_bubble_size ?? null,
+    // the widget bundle fall back to its own default. Re-validated on read
+    // so legacy/direct-SQL rows cannot serve 100vw clickjacking sizes.
+    widget_bubble_size: master?.chat_bubble_size && isValidWidgetBubbleSize(master.chat_bubble_size) ? master.chat_bubble_size.trim() : null,
     widget_auto_open: false,
     payment_type: "",
     font_family: null,
     // Custom launcher icon (the floating bubble). When NULL the widget
-    // bundle falls back to its built-in chat-glyph SVG.
-    icon: master?.icon_url ?? null,
+    // bundle falls back to its built-in chat-glyph SVG. Re-validated on read
+    // so legacy/direct-SQL rows cannot emit javascript:/data:/protocol-relative URLs.
+    icon: master?.icon_url && isValidWidgetIconUrl(master.icon_url) ? master.icon_url.trim() : null,
     accept_contact: false,
     avatar_src: null,
     widget_id: widgetId
@@ -715577,6 +715802,8 @@ var SMTP_CONNECTION_TIMEOUT_MS = 5e3;
 var SMTP_GREETING_TIMEOUT_MS = 5e3;
 var SMTP_SOCKET_TIMEOUT_MS = 1e4;
 var cached = null;
+var cachedSig = null;
+var OPPORTUNISTIC_MAIL_DRAIN_BATCH = 5;
 function resolveCreds() {
   const id = process.env.NAVER_ID?.trim();
   const user = process.env.NAVER_MAIL_USER?.trim() || (id ? id.includes("@") ? id : `${id}@naver.com` : void 0);
@@ -715584,8 +715811,12 @@ function resolveCreds() {
   return { user, pass };
 }
 function getTransporter() {
-  if (cached) return cached;
   const { user, pass } = resolveCreds();
+  const sig = user && pass ? `${user}\0${pass}` : null;
+  if (cached && sig && cachedSig === sig) return cached;
+  if (cached) {
+    resetTransporterCache();
+  }
   if (!user || !pass) {
     throw new Error(
       "\uB124\uC774\uBC84 SMTP \uC790\uACA9\uC99D\uBA85 \uBBF8\uC124\uC815 \u2014 NAVER_ID+NAVER_APP_PASSWORD \uB610\uB294 NAVER_MAIL_USER+NAVER_MAIL_PASSWORD \uAC00 \uD544\uC694\uD569\uB2C8\uB2E4. \uB124\uC774\uBC84 \uBA54\uC77C > \uD658\uACBD\uC124\uC815 > POP3/IMAP \uC124\uC815\uC5D0\uC11C 'SMTP \uC0AC\uC6A9'\uB3C4 \uCF1C\uC838 \uC788\uC5B4\uC57C \uD569\uB2C8\uB2E4."
@@ -715604,9 +715835,11 @@ function getTransporter() {
     console.error("[lib/mail/naver] Transporter background error:", err?.message || err);
     if (cached === transport) {
       cached = null;
+      cachedSig = null;
     }
   });
   cached = transport;
+  cachedSig = sig;
   return cached;
 }
 function resetTransporterCache() {
@@ -715617,6 +715850,7 @@ function resetTransporterCache() {
     }
     cached = null;
   }
+  cachedSig = null;
 }
 function explainSmtpError(err) {
   const e = err;
@@ -715683,8 +715917,8 @@ async function sendNaverMail(input, options) {
     }
     if (execRes.result) {
       if (allowQueue) {
-        if (mailFallbackQueue.getReadyJobs().length > 0) {
-          await processMailQueue().catch((drainErr) => {
+        if (mailFallbackQueue.hasReadyJobs()) {
+          await processMailQueue(OPPORTUNISTIC_MAIL_DRAIN_BATCH).catch((drainErr) => {
             console.warn(
               "[lib/mail/naver] opportunistic processMailQueue drain warning:",
               drainErr?.message || drainErr
@@ -715705,11 +715939,15 @@ async function sendNaverMail(input, options) {
     throw explainSmtpError(err);
   }
 }
-async function processMailQueue() {
-  return mailFallbackQueue.processPending(async (job) => {
-    const res = await sendNaverMail(job.payload, { allowQueue: false });
-    return res.rejected.length === 0;
-  });
+async function processMailQueue(maxBatchSize) {
+  return mailFallbackQueue.processPending(
+    async (job) => {
+      const res = await sendNaverMail(job.payload, { allowQueue: false });
+      return res.rejected.length === 0;
+    },
+    Date.now(),
+    maxBatchSize
+  );
 }
 
 // src/endpoints/v2/mail-endpoints.ts
@@ -715746,8 +715984,8 @@ var v2MailEndpoints = async (app) => {
           return { success: false, error: "to required" };
         }
         const recipients = to.split(",").map((s) => s.trim()).filter(Boolean);
-        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-        if (recipients.length === 0 || recipients.some((addr) => !emailRegex.test(addr))) {
+        const emailRegex = /^[^\s@<>",;\x00-\x1f\x7f]+@[^\s@<>",;\x00-\x1f\x7f]+\.[^\s@<>",;\x00-\x1f\x7f]+$/;
+        if (recipients.length === 0 || recipients.some((addr) => addr.length > 320 || !emailRegex.test(addr))) {
           set.status = 400;
           return { success: false, error: "invalid email format" };
         }
@@ -715763,13 +716001,20 @@ var v2MailEndpoints = async (app) => {
           set.status = 400;
           return { success: false, error: "subject exceeds maximum length of 1000 characters" };
         }
-        if (/[\r\n]/.test(subject) || body?.from && /[\r\n]/.test(body.from)) {
+        if (/[\r\n\x00-\x1f\x7f]/.test(subject) || body?.from && /[\r\n\x00-\x1f\x7f]/.test(body.from)) {
           set.status = 400;
           return { success: false, error: "invalid header characters (CRLF prohibited)" };
         }
         if (body?.from && body.from.trim().length > 320) {
           set.status = 400;
           return { success: false, error: "from exceeds maximum length of 320 characters" };
+        }
+        if (typeof body?.text === "string" && body.text.length > 5e5 || typeof body?.html === "string" && body.html.length > 5e5) {
+          set.status = 400;
+          return {
+            success: false,
+            error: "mail body exceeds maximum length of 500000 characters"
+          };
         }
         if (!body?.text?.trim() && !body?.html?.trim()) {
           set.status = 400;
@@ -716142,8 +716387,8 @@ async function sendSms({ phoneNumber, text }, options) {
     };
   }
   if (detail.ok && allowQueue) {
-    if (smsFallbackQueue.getReadyJobs().length > 0) {
-      await processSmsQueue().catch((drainErr) => {
+    if (smsFallbackQueue.hasReadyJobs()) {
+      await processSmsQueue(5).catch((drainErr) => {
         console.warn(
           "[lib/sms] opportunistic processSmsQueue drain warning:",
           drainErr?.message || drainErr
@@ -716156,21 +716401,25 @@ async function sendSms({ phoneNumber, text }, options) {
   }
   return { ok: detail.ok, provider, detail };
 }
-async function processSmsQueue() {
-  return smsFallbackQueue.processPending(async (job) => {
-    const res = await sendSms(job.payload, { allowQueue: false });
-    if (!res.ok) {
-      const detail = res.detail;
-      if (detail?.status === 429) {
-        const err = new Error(detail.error || "Pushbullet HTTP 429");
-        err.status = 429;
-        if (detail.retryAfterSeconds) err.retryAfterSeconds = detail.retryAfterSeconds;
-        throw err;
+async function processSmsQueue(maxBatchSize) {
+  return smsFallbackQueue.processPending(
+    async (job) => {
+      const res = await sendSms(job.payload, { allowQueue: false });
+      if (!res.ok) {
+        const detail = res.detail;
+        if (detail?.status === 429) {
+          const err = new Error(detail.error || "Pushbullet HTTP 429");
+          err.status = 429;
+          if (detail.retryAfterSeconds) err.retryAfterSeconds = detail.retryAfterSeconds;
+          throw err;
+        }
+        return false;
       }
-      return false;
-    }
-    return true;
-  });
+      return true;
+    },
+    Date.now(),
+    maxBatchSize
+  );
 }
 
 // src/endpoints/v2/sms-endpoints.ts

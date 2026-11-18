@@ -2932,3 +2932,21 @@ This document serves as the shared communication channel between the AI Team (Ge
   - `bun test`: **311 / 311 PASS** (`my-server-test`, 1,968 assertions) + **38 / 38 PASS** (`tokki-widget`, 185 assertions) = **349 / 349 PASS (2,153 assertions)**.
   - Pre-flight builds: `bundle:api` (`api/index.js` 26.9MB, `104ms`), `type-check` (0 errors), `build` (2.61s), `build:embed` (2.05s), `export-playground` (2.42s).
   - Korean report generated at `stress_test_audit.md` (`v6.6.0-DAILY-KO`). Committed locally with `[skip ci]`.
+
+
+---
+
+## 86. Daily Server & Vercel Perimeter / DB / 429 Diagnostics & Auto-Remediation (2026-11-19)
+
+- **Session**: `[세션명: 내 서버 및 Vercel 일일 총검사]` (Single-Agent Sequential Diagnostics — Cloud Quota Protected).
+- **Live Vercel & Sequential Audit**:
+  - Cold-start vs warm-start telemetry measured on `https://my-server-mocha.vercel.app` (`Node v24.22.3`, `iad1`, commit `cb5f128`): `/api/hello` cold `1.445s` -> warm `229.5ms`, `/v1/healthz` cold `2.368s` -> warm `282.1ms`, `/v1/heartbeat` warm `232.7ms`–`317.2ms`, `/` Swagger UI `297.9ms`, `/json` OpenAPI spec `502.8ms`. (`/api/health` returns Edge 404 by design due to `vercel.json` `/((?!api/).*)` rewrite exclusion; canonical health probes are `/v1/healthz`, `/v1/heartbeat`, and `/api/hello`.)
+  - Sequential 34-vector Local & Remote audit (`scripts/morning-audit-runner.ts`): **Local 34 / 34 PASS (100.0%)** & **Remote 34 / 34 PASS (100.0%)**.
+- **Auto-Remediations Applied (5 Hardening & Performance Patches)**:
+  1. **Backend Clickjacking Dimension Clamping & Stored DB Read-Time Sanitization (`lib/url-guard.ts`, `src/endpoints/v2/widget-endpoints.ts`)**: Tightened `isValidWidgetBubbleSize()` to clamp `px`/unitless values to `24..160` and `rem`/`em` values to `1.5..10` (blocking `100vw`, `100vh`, `100%`, `99999px`, and `0px`), and re-validated stored `icon_url` and `chat_bubble_size` inside `renderPersona()` (`/v2/widget/view`) so poisoned/legacy DB rows sanitize to `null` on read.
+  2. **Admin Thread Tuning & ID Length Bounds (`src/endpoints/v2/widget-endpoints.ts`, `lib/chat-store.ts`)**: Enforced explicit `HTTP 400` validation on `/v2/admin/threads/update` (`widgetId`/`threadId <= 100`, `system_prompt <= 20,000`, `context_text <= 20,000`), `/v2/admin/threads/rename` (`widgetId`/`threadId <= 100`, `title <= 200` without control chars), and `<= 100` ID guards across `lib/chat-store.ts` to prevent silent RAG truncation and PostgREST `414 URI Too Long` errors.
+  3. **Bounded Opportunistic Queue Drain & $O(Q)$ Batch Thread Merge (`lib/queue/fallback-queue.ts`, `lib/chat-store.ts`, `lib/mail/naver.ts`, `lib/sms/index.ts`)**: Added $O(1)$ `hasReadyJobs()`, bounded synchronous request-path opportunistic drains via `maxBatchSize` (`DB: 10`, `Mail: 5`, `SMS: 5`) to prevent 60s Vercel Serverless timeouts during 5,000-job 429 recovery, and replaced the $O(T \times Q)$ per-thread loop in `listThreads()` with single-pass `getQueuedMessagesForThreads()`.
+  4. **Credential-Reactive SMTP Transporter & Recipient Delimiter Guard (`lib/mail/naver.ts`, `src/endpoints/v2/mail-endpoints.ts`)**: Added `cachedSig` invalidation (closing stale transports on env credential rotation/clearing) in `getTransporter()`, and blocked recipient delimiter/angle-bracket injection (`<>";`), `> 320`-char addresses, and `> 500,000`-char bodies in `/v2/admin/mail/send`.
+  5. **YouTube OAuth Redirect Symmetry & Local Oversized Token/Handle Guards (`src/endpoints/v1/youtube/*.ts`)**: Enforced `maxLength` and whitespace/control-char rejection on `/v1/youtube/auth/create` (`clientId <= 512`, `clientSecret <= 512`, `redirectUri <= 2048`) matching `/auth/confirm`, and rejected oversized `accessToken` (`> 4,096`), `handle`/`videoId` (`> 128`), `commentId`/`parentId` (`> 256`), and `pageToken` (`> 512`) locally with `HTTP 400` (`0` outbound Google API calls).
+  6. **Adversarial Regression Coverage (`test/reviewer-adversarial.test.ts`)**: Added `VULN-44`..`VULN-48` verifying all 5 remediations end-to-end.
+- **Status**: **316 / 316 PASS (`bun test`, 2,014 `expect()` assertions across 13 files), Local 34/34 & Remote 34/34 PASS (`morning-audit-runner.ts`), 0 TypeScript errors, `api/index.js` synchronized & committed locally with `[skip ci]`.**

@@ -9,18 +9,18 @@ export const v1CommentDelete = (app: any) => {
       const commentId = String(body?.commentId ?? "").trim();
       const accessToken = String(body?.accessToken ?? "").trim();
 
-      if (!commentId) {
+      if (!commentId || commentId.length > 256) {
         set.status = 400;
         return {
           success: false,
-          message: "댓글 ID가 제공되지 않았습니다.",
+          message: "유효한 댓글 ID가 제공되지 않았습니다.",
         };
       }
-      if (!accessToken) {
+      if (!accessToken || accessToken.length > 4096) {
         set.status = 400;
         return {
           success: false,
-          message: "accessToken 값이 제공되지 않았습니다.",
+          message: "유효한 accessToken 값이 제공되지 않았습니다.",
         };
       }
 

@@ -1206,6 +1206,27 @@ export const v2WidgetEndpoints = async (app: any) => {
         if (!widgetId || !threadId) {
           return { success: false, reason: "widgetId+threadId required" };
         }
+        if (widgetId.length > MAX_WIDGET_ID_CHARS || threadId.length > MAX_WIDGET_ID_CHARS) {
+          set.status = 400;
+          return {
+            success: false,
+            error: `widgetId and threadId must be <= ${MAX_WIDGET_ID_CHARS} characters`,
+          };
+        }
+        if (typeof body?.system_prompt === "string" && body.system_prompt.length > 20000) {
+          set.status = 400;
+          return {
+            success: false,
+            error: "system_prompt exceeds maximum length of 20000 characters",
+          };
+        }
+        if (typeof body?.context_text === "string" && body.context_text.length > 20000) {
+          set.status = 400;
+          return {
+            success: false,
+            error: "context_text exceeds maximum length of 20000 characters",
+          };
+        }
         const ok = await updateThreadPrompt(threadId, widgetId, {
           system_prompt: body.system_prompt,
           context_text: body.context_text,
@@ -1251,6 +1272,23 @@ export const v2WidgetEndpoints = async (app: any) => {
         const threadId = body?.threadId?.trim() ?? "";
         if (!widgetId || !threadId) {
           return { success: false, reason: "widgetId+threadId required" };
+        }
+        if (widgetId.length > MAX_WIDGET_ID_CHARS || threadId.length > MAX_WIDGET_ID_CHARS) {
+          set.status = 400;
+          return {
+            success: false,
+            error: `widgetId and threadId must be <= ${MAX_WIDGET_ID_CHARS} characters`,
+          };
+        }
+        if (
+          typeof body?.title === "string" &&
+          (body.title.length > 200 || /[\x00-\x1f\x7f]/.test(body.title))
+        ) {
+          set.status = 400;
+          return {
+            success: false,
+            error: "invalid title (must be <= 200 characters without control chars)",
+          };
         }
         const ok = await renameThread(
           threadId,
@@ -1325,7 +1363,7 @@ export const v2WidgetEndpoints = async (app: any) => {
  * unregistered case both fall through to a single hardcoded default so
  * old embedded sites keep working.
  */
-function renderPersona(master: WidgetRow | null, widgetId: string) {
+export function renderPersona(master: WidgetRow | null, widgetId: string) {
   const DEFAULT_NAME = "AI 도우미";
   const DEFAULT_THEME = "noir";
   const DEFAULT_DESCRIPTION = "온라인 · 보통 몇 초 안에 답해요";
@@ -1352,14 +1390,22 @@ function renderPersona(master: WidgetRow | null, widgetId: string) {
     widget_margin_bottom: 24,
     widget_margin_right: 24,
     // Operator-set launcher size (CSS string, e.g. "48px"). NULL lets
-    // the widget bundle fall back to its own default.
-    widget_bubble_size: master?.chat_bubble_size ?? null,
+    // the widget bundle fall back to its own default. Re-validated on read
+    // so legacy/direct-SQL rows cannot serve 100vw clickjacking sizes.
+    widget_bubble_size:
+      master?.chat_bubble_size && isValidWidgetBubbleSize(master.chat_bubble_size)
+        ? master.chat_bubble_size.trim()
+        : null,
     widget_auto_open: false,
     payment_type: "",
     font_family: null,
     // Custom launcher icon (the floating bubble). When NULL the widget
-    // bundle falls back to its built-in chat-glyph SVG.
-    icon: master?.icon_url ?? null,
+    // bundle falls back to its built-in chat-glyph SVG. Re-validated on read
+    // so legacy/direct-SQL rows cannot emit javascript:/data:/protocol-relative URLs.
+    icon:
+      master?.icon_url && isValidWidgetIconUrl(master.icon_url)
+        ? master.icon_url.trim()
+        : null,
     accept_contact: false,
     avatar_src: null,
     widget_id: widgetId,

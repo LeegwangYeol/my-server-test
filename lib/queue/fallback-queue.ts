@@ -325,6 +325,19 @@ export class FallbackQueue<T = any> {
   }
 
   /**
+   * O(1)-best-case check for whether at least one pending job is ready for retry,
+   * avoiding full-queue array allocations on hot request paths.
+   */
+  public hasReadyJobs(now: number = Date.now()): boolean {
+    for (const job of this.jobs.values()) {
+      if (job.status === "pending" && job.nextRetryAt <= now) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
    * Retrieve all jobs ready for retry (status === "pending" && nextRetryAt <= now).
    */
   public getReadyJobs(now: number = Date.now()): FallbackJob<T>[] {
@@ -401,18 +414,27 @@ export class FallbackQueue<T = any> {
   /**
    * Drain / process pending jobs sequentially with atomic claim to prevent double-execution.
    * Excludes failed/retried jobs from tight infinite loops within the same drain pass.
+   * Optional `maxBatchSize` bounds synchronous request-path drains to prevent serverless timeouts.
    */
   public async processPending(
     handler: (job: FallbackJob<T>) => Promise<boolean | void>,
-    now: number = Date.now()
+    now: number = Date.now(),
+    maxBatchSize = Infinity,
   ): Promise<{ processed: number; succeeded: number; failed: number }> {
     let processed = 0;
     let succeeded = 0;
     let failed = 0;
     const attemptedIds = new Set<string>();
+    const safeBatch =
+      Number.isFinite(maxBatchSize) && maxBatchSize > 0
+        ? Math.floor(maxBatchSize)
+        : Infinity;
 
     let job: FallbackJob<T> | undefined;
-    while ((job = this.claimNextReady(now, attemptedIds)) !== undefined) {
+    while (
+      processed < safeBatch &&
+      (job = this.claimNextReady(now, attemptedIds)) !== undefined
+    ) {
       attemptedIds.add(job.id);
       processed++;
       try {
@@ -573,24 +595,30 @@ export function registerDefaultDbHandler(fn: DbInsertHandler): void {
  */
 export async function processDbQueue(
   insertFn?: (payload: any) => Promise<boolean>,
+  maxBatchSize?: number,
 ): Promise<{
   processed: number;
   succeeded: number;
   failed: number;
 }> {
   const handler = insertFn ?? defaultDbInsertHandler;
-  return dbFallbackQueue.processPending(async (job) => {
-    if (handler) {
-      return await handler(job.payload);
-    }
-    return true;
-  });
+  return dbFallbackQueue.processPending(
+    async (job) => {
+      if (handler) {
+        return await handler(job.payload);
+      }
+      return true;
+    },
+    Date.now(),
+    maxBatchSize,
+  );
 }
 
 /**
  * Returns in-memory pending fallback messages for a thread to prevent data loss.
  */
 export function getQueuedMessagesForThread(threadId: string) {
+  if (!threadId || dbFallbackQueue.size === 0) return [];
   return dbFallbackQueue
     .getAllJobs()
     .filter(
@@ -607,6 +635,41 @@ export function getQueuedMessagesForThread(threadId: string) {
       created_at:
         job.payload.createdAt || new Date(job.createdAt).toISOString(),
     }));
+}
+
+/**
+ * Single-pass O(Q) batch lookup of pending fallback messages across a set of thread IDs.
+ * Eliminates O(T * Q) N+1 scans and repeated array allocations in listThreads().
+ */
+export function getQueuedMessagesForThreads(threadIds: ReadonlySet<string>) {
+  if (threadIds.size === 0 || dbFallbackQueue.size === 0) return [];
+  const results: Array<{
+    id: number;
+    thread_id: string;
+    role: any;
+    content: string;
+    created_at: string;
+  }> = [];
+  let idx = 0;
+  for (const job of dbFallbackQueue.getAllJobs()) {
+    if (
+      (job.status === "pending" || job.status === "processing") &&
+      job.type === "db_chat_message" &&
+      typeof job.payload?.threadId === "string" &&
+      threadIds.has(job.payload.threadId)
+    ) {
+      idx++;
+      results.push({
+        id: -idx,
+        thread_id: job.payload.threadId,
+        role: job.payload.role,
+        content: job.payload.content,
+        created_at:
+          job.payload.createdAt || new Date(job.createdAt).toISOString(),
+      });
+    }
+  }
+  return results;
 }
 
 

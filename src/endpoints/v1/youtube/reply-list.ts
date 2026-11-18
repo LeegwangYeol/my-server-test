@@ -10,18 +10,25 @@ export const v1ReplyList = (app: any) => {
       const parentId = String(body?.parentId ?? "").trim();
       const accessToken = String(body?.accessToken ?? "").trim();
 
-      if (!parentId) {
+      if (!parentId || parentId.length > 256) {
         set.status = 400;
         return {
           success: false,
-          message: "댓글의 Id 값이 제공되지 않았습니다.",
+          message: "유효한 댓글의 Id 값이 제공되지 않았습니다.",
         };
       }
-      if (!accessToken) {
+      if (!accessToken || accessToken.length > 4096) {
         set.status = 400;
         return {
           success: false,
-          message: "accessToken 값이 제공되지 않았습니다.",
+          message: "유효한 accessToken 값이 제공되지 않았습니다.",
+        };
+      }
+      if (typeof pageToken === "string" && pageToken.trim().length > 512) {
+        set.status = 400;
+        return {
+          success: false,
+          message: "유효하지 않은 pageToken 값입니다.",
         };
       }
 

@@ -10,18 +10,25 @@ export const v1CommentList = (app: any) => {
       const videoId = String(body?.videoId ?? "").trim();
       const accessToken = String(body?.accessToken ?? "").trim();
 
-      if (!videoId) {
+      if (!videoId || videoId.length > 128) {
         set.status = 400;
         return {
           success: false,
-          message: "videoId 값이 제공되지 않았습니다.",
+          message: "유효한 videoId 값이 제공되지 않았습니다.",
         };
       }
-      if (!accessToken) {
+      if (!accessToken || accessToken.length > 4096) {
         set.status = 400;
         return {
           success: false,
-          message: "accessToken 값이 제공되지 않았습니다.",
+          message: "유효한 accessToken 값이 제공되지 않았습니다.",
+        };
+      }
+      if (typeof pageToken === "string" && pageToken.trim().length > 512) {
+        set.status = 400;
+        return {
+          success: false,
+          message: "유효하지 않은 pageToken 값입니다.",
         };
       }
 
