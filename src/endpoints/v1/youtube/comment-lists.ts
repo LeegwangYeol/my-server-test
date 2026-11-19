@@ -1,5 +1,10 @@
 import { Elysia, t } from "elysia";
 import { google } from "googleapis";
+import {
+  executeYoutubeWithRetry,
+  handleYoutubeError,
+  sanitizeYoutubeAccessToken,
+} from "./yt-client";
 
 // 타입 단언을 사용하여 타입 오류 해결
 export const v1CommentList = (app: any) => {
@@ -8,16 +13,16 @@ export const v1CommentList = (app: any) => {
     async ({ body, set }: { body: any; set: any }) => {
       const { maxResults, pageToken, textFormat, order } = body;
       const videoId = String(body?.videoId ?? "").trim();
-      const accessToken = String(body?.accessToken ?? "").trim();
+      const accessToken = sanitizeYoutubeAccessToken(body?.accessToken);
 
-      if (!videoId || videoId.length > 128) {
+      if (!videoId || videoId.length > 128 || /[\s\x00-\x1f\x7f]/.test(videoId)) {
         set.status = 400;
         return {
           success: false,
           message: "유효한 videoId 값이 제공되지 않았습니다.",
         };
       }
-      if (!accessToken || accessToken.length > 4096) {
+      if (!accessToken) {
         set.status = 400;
         return {
           success: false,
@@ -61,14 +66,16 @@ export const v1CommentList = (app: any) => {
             ? pageToken.trim()
             : undefined;
 
-        const response = await youtube.commentThreads.list({
-          part: ["snippet", "replies"],
-          videoId: videoId,
-          maxResults: max,
-          pageToken: cleanPageToken,
-          textFormat: textFormat || "html",
-          order: order || "time",
-        });
+        const response = await executeYoutubeWithRetry(() =>
+          youtube.commentThreads.list({
+            part: ["snippet", "replies"],
+            videoId: videoId,
+            maxResults: max,
+            pageToken: cleanPageToken,
+            textFormat: textFormat || "html",
+            order: order || "time",
+          }),
+        );
 
         return {
           success: true,
@@ -83,13 +90,12 @@ export const v1CommentList = (app: any) => {
           },
         };
       } catch (error: any) {
-        console.error("YouTube 댓글 스레드 목록 조회 에러:", error);
-        set.status = 400;
-        return {
-          success: false,
-          message:
-            error?.message || "댓글 스레드 목록 조회 중 오류가 발생하였습니다.",
-        };
+        return handleYoutubeError(
+          "comment/list",
+          error,
+          set,
+          "댓글 스레드 목록 조회 중 오류가 발생하였습니다.",
+        );
       }
     },
     {
@@ -147,6 +153,10 @@ export const v1CommentList = (app: any) => {
           }),
         }),
         400: t.Object({
+          success: t.Boolean(),
+          message: t.String(),
+        }),
+        429: t.Object({
           success: t.Boolean(),
           message: t.String(),
         }),

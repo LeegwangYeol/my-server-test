@@ -1,7 +1,28 @@
 import { Elysia, t } from "elysia";
 import { google } from "googleapis";
+import { executeYoutubeWithRetry, handleYoutubeError } from "./yt-client";
 
 const YOUTUBE_SCOPES = ["https://www.googleapis.com/auth/youtube.force-ssl"];
+const CLIENT_ID_RE = /^[0-9]+-[a-zA-Z0-9_-]+\.apps\.googleusercontent\.com$/;
+const CLIENT_SECRET_RE = /^GOCSPX-[a-zA-Z0-9_-]+$/;
+const REDIRECT_URI_RE =
+  /^https?:\/\/[\w.-]+(?::\d{1,5})?\/[^\s\\\x00-\x1f\x7f]*$/;
+
+function isValidOAuthRedirectUri(raw: string): boolean {
+  if (!raw || raw.length > 2048 || !REDIRECT_URI_RE.test(raw)) return false;
+  try {
+    const parsed = new URL(raw);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
+    if (!parsed.hostname || parsed.username || parsed.password) return false;
+    if (parsed.port) {
+      const port = Number(parsed.port);
+      if (!Number.isInteger(port) || port < 1 || port > 65535) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 // 타입 단언을 사용하여 타입 오류 해결
 export const v1AuthCreate = (app: any) => {
@@ -57,7 +78,7 @@ export const v1AuthCreate = (app: any) => {
             description: "OAuth Redirect URI",
             error: "Redirect URI is required",
             maxLength: 2048,
-            pattern: "^https?://[\\w.-]+(?::\\d+)?/[^\\s\\x00-\\x1f\\x7f]*$",
+            pattern: "^https?://[\\w.-]+(?::\\d{1,5})?/[^\\s\\\\\\x00-\\x1f\\x7f]*$",
           }),
         }),
         response: t.Object({
@@ -74,7 +95,13 @@ export const v1AuthCreate = (app: any) => {
       async ({ query, set }: { query: any; set: any }) => {
         const code = String(query?.code ?? "").trim();
         const state = String(query?.state ?? "").trim();
-        if (!code || !state || state.length > 4096) {
+        if (
+          !code ||
+          code.length > 2048 ||
+          /[\s\x00-\x1f\x7f]/.test(code) ||
+          !state ||
+          state.length > 4096
+        ) {
           set.status = 400;
           return {
             success: false,
@@ -86,21 +113,29 @@ export const v1AuthCreate = (app: any) => {
           const authState = JSON.parse(
             Buffer.from(state, "base64").toString(),
           );
+          const cid =
+            typeof authState?.clientId === "string"
+              ? authState.clientId.trim()
+              : "";
+          const csec =
+            typeof authState?.clientSecret === "string"
+              ? authState.clientSecret.trim()
+              : "";
+          const ruri =
+            typeof authState?.redirectUri === "string"
+              ? authState.redirectUri.trim()
+              : "";
+
           if (
             !authState ||
             typeof authState !== "object" ||
-            typeof authState.clientId !== "string" ||
-            !authState.clientId.trim() ||
-            authState.clientId.trim().length > 512 ||
-            typeof authState.clientSecret !== "string" ||
-            !authState.clientSecret.trim() ||
-            authState.clientSecret.trim().length > 512 ||
-            typeof authState.redirectUri !== "string" ||
-            !authState.redirectUri.trim() ||
-            authState.redirectUri.trim().length > 2048 ||
-            !/^https?:\/\/[\w.-]+(?::\d+)?\/[^\s\x00-\x1f\x7f]*$/.test(
-              authState.redirectUri.trim(),
-            )
+            !cid ||
+            cid.length > 512 ||
+            !CLIENT_ID_RE.test(cid) ||
+            !csec ||
+            csec.length > 512 ||
+            !CLIENT_SECRET_RE.test(csec) ||
+            !isValidOAuthRedirectUri(ruri)
           ) {
             set.status = 400;
             return {
@@ -108,13 +143,16 @@ export const v1AuthCreate = (app: any) => {
               message: "유효하지 않은 인증 상태(state) 정보입니다.",
             };
           }
-          const oauth2Client = new google.auth.OAuth2(
-            authState.clientId.trim(),
-            authState.clientSecret.trim(),
-            authState.redirectUri.trim(),
-          );
+          const oauth2Client = new google.auth.OAuth2({
+            clientId: cid,
+            clientSecret: csec,
+            redirectUri: ruri,
+            transporterOptions: { timeout: 10_000 },
+          });
 
-          const { tokens } = await oauth2Client.getToken(code as string);
+          const { tokens } = await executeYoutubeWithRetry(() =>
+            oauth2Client.getToken(code as string),
+          );
           if (!tokens?.access_token) {
             set.status = 400;
             return {
@@ -133,12 +171,12 @@ export const v1AuthCreate = (app: any) => {
             },
           };
         } catch (error: any) {
-          console.error("YouTube OAuth error:", error);
-          set.status = 400;
-          return {
-            success: false,
-            message: error?.message || "인증 처리 중 오류가 발생했습니다.",
-          };
+          return handleYoutubeError(
+            "auth/confirm",
+            error,
+            set,
+            "인증 처리 중 오류가 발생했습니다.",
+          );
         }
       },
       {
@@ -161,6 +199,10 @@ export const v1AuthCreate = (app: any) => {
             }),
           }),
           400: t.Object({
+            success: t.Boolean(),
+            message: t.String(),
+          }),
+          429: t.Object({
             success: t.Boolean(),
             message: t.String(),
           }),

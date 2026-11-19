@@ -1,30 +1,35 @@
 import { Elysia, t } from "elysia";
 import { google } from "googleapis";
+import {
+  executeYoutubeWithRetry,
+  handleYoutubeError,
+  sanitizeYoutubeAccessToken,
+} from "./yt-client";
 
 // 타입 단언을 사용하여 타입 오류 해결
 export const v1Comment = (app: any) => {
   app.post(
     "/comment",
     async ({ body, set }: { body: any; set: any }) => {
-      const accessToken = String(body?.accessToken ?? "").trim();
+      const accessToken = sanitizeYoutubeAccessToken(body?.accessToken);
       const videoId = String(body?.videoId ?? "").trim();
       const commentText = String(body?.commentText ?? "").trim();
 
-      if (!videoId || videoId.length > 128) {
+      if (!videoId || videoId.length > 128 || /[\s\x00-\x1f\x7f]/.test(videoId)) {
         set.status = 400;
         return {
           success: false,
           message: "유효한 videoId 값이 제공되지 않았습니다.",
         };
       }
-      if (!commentText) {
+      if (!commentText || commentText.length > 10000) {
         set.status = 400;
         return {
           success: false,
           message: "댓글 내용이 제공되지 않았습니다.",
         };
       }
-      if (!accessToken || accessToken.length > 4096) {
+      if (!accessToken) {
         set.status = 400;
         return {
           success: false,
@@ -42,19 +47,24 @@ export const v1Comment = (app: any) => {
           timeout: 10_000,
         });
 
-        const response = await youtube.commentThreads.insert({
-          part: ["snippet"],
-          requestBody: {
-            snippet: {
-              videoId,
-              topLevelComment: {
+        const response = await executeYoutubeWithRetry(
+          () =>
+            youtube.commentThreads.insert({
+              part: ["snippet"],
+              requestBody: {
                 snippet: {
-                  textOriginal: commentText,
+                  videoId,
+                  topLevelComment: {
+                    snippet: {
+                      textOriginal: commentText,
+                    },
+                  },
                 },
               },
-            },
-          },
-        });
+            }),
+          1,
+          true,
+        );
 
         return {
           success: true,
@@ -80,12 +90,12 @@ export const v1Comment = (app: any) => {
           },
         };
       } catch (error: any) {
-        console.error("YouTube comment error:", error);
-        set.status = 400;
-        return {
-          success: false,
-          message: error?.message || "댓글 작성 중 오류가 발생했습니다.",
-        };
+        return handleYoutubeError(
+          "comment",
+          error,
+          set,
+          "댓글 작성 중 오류가 발생했습니다.",
+        );
       }
     },
     {
@@ -141,6 +151,10 @@ export const v1Comment = (app: any) => {
           message: t.String(),
         }),
         401: t.Object({
+          success: t.Boolean(),
+          message: t.String(),
+        }),
+        429: t.Object({
           success: t.Boolean(),
           message: t.String(),
         }),

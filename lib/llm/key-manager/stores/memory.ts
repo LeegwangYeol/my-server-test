@@ -58,6 +58,22 @@ export class MemoryKeyStore implements IKeyStore {
    * Matches HSETNX semantics: updates static configuration without overwriting active runtime states.
    */
   public async syncKeys(keys: KeyConfig[]): Promise<void> {
+    const activeIds = new Set(keys.map((k) => k.id));
+
+    // Prune stale keys removed from configuration (only when no active in-flight leases remain)
+    for (const [existingId, existingRec] of this.records.entries()) {
+      if (!activeIds.has(existingId)) {
+        const activeLeases = this.leases.get(existingId)?.size ?? 0;
+        if (activeLeases === 0) {
+          this.records.delete(existingId);
+          this.leases.delete(existingId);
+          if (existingRec.config.accountId) {
+            this.accountKeys.get(existingRec.config.accountId)?.delete(existingId);
+          }
+        }
+      }
+    }
+
     for (const key of keys) {
       if (!this.leases.has(key.id)) {
         this.leases.set(key.id, new Map<string, number>());

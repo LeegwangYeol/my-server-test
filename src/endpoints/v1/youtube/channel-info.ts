@@ -1,5 +1,10 @@
 import { Elysia, t } from "elysia";
 import { google } from "googleapis";
+import {
+  executeYoutubeWithRetry,
+  handleYoutubeError,
+  sanitizeYoutubeAccessToken,
+} from "./yt-client";
 
 // 타입 단언을 사용하여 타입 오류 해결
 export const v1ChannelInfo = (app: any) => {
@@ -7,9 +12,9 @@ export const v1ChannelInfo = (app: any) => {
     "/channel/info",
     async ({ body, set }: { body: any; set: any }) => {
       const { maxResults, pageToken } = body;
-      const accessToken = String(body?.accessToken ?? "").trim();
+      const accessToken = sanitizeYoutubeAccessToken(body?.accessToken);
 
-      if (!accessToken || accessToken.length > 4096) {
+      if (!accessToken) {
         set.status = 400;
         return {
           success: false,
@@ -53,12 +58,14 @@ export const v1ChannelInfo = (app: any) => {
             ? pageToken.trim()
             : undefined;
 
-        const response = await youtube.channels.list({
-          part: ["snippet", "contentDetails", "statistics"],
-          mine: true,
-          maxResults: max,
-          pageToken: cleanPageToken,
-        });
+        const response = await executeYoutubeWithRetry(() =>
+          youtube.channels.list({
+            part: ["snippet", "contentDetails", "statistics"],
+            mine: true,
+            maxResults: max,
+            pageToken: cleanPageToken,
+          }),
+        );
 
         return {
           success: true,
@@ -73,12 +80,12 @@ export const v1ChannelInfo = (app: any) => {
           },
         };
       } catch (error: any) {
-        console.error("YouTube 채널 정보 조회 에러:", error);
-        set.status = 400;
-        return {
-          success: false,
-          message: error?.message || "채널 정보 조회 중 오류가 발생하였습니다.",
-        };
+        return handleYoutubeError(
+          "channel/info",
+          error,
+          set,
+          "채널 정보 조회 중 오류가 발생하였습니다.",
+        );
       }
     },
     {
@@ -119,6 +126,10 @@ export const v1ChannelInfo = (app: any) => {
           }),
         }),
         400: t.Object({
+          success: t.Boolean(),
+          message: t.String(),
+        }),
+        429: t.Object({
           success: t.Boolean(),
           message: t.String(),
         }),

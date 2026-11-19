@@ -37,6 +37,7 @@ export class OpenAICompatibleProvider implements LLMProvider {
   private readonly apiKey: string;
   private readonly defaultModel: string;
   private readonly extraHeaders: Record<string, string>;
+  private readonly chunkTimeoutMs?: number;
 
   constructor(opts: {
     name: string;
@@ -44,12 +45,14 @@ export class OpenAICompatibleProvider implements LLMProvider {
     apiKey: string;
     defaultModel: string;
     extraHeaders?: Record<string, string>;
+    chunkTimeoutMs?: number;
   }) {
     this.name = opts.name;
     this.baseUrl = opts.baseUrl.replace(/\/+$/, "");
     this.apiKey = opts.apiKey;
     this.defaultModel = opts.defaultModel;
     this.extraHeaders = opts.extraHeaders ?? {};
+    this.chunkTimeoutMs = opts.chunkTimeoutMs;
   }
 
   async *stream(
@@ -67,10 +70,38 @@ export class OpenAICompatibleProvider implements LLMProvider {
     const decoder = new TextDecoder();
     let buffer = "";
     const MAX_SSE_BUFFER_CHARS = 256_000;
+    const effectiveChunkTimeoutMs =
+      this.chunkTimeoutMs ?? envInt("LLM_CHUNK_TIMEOUT_MS", 25_000, 50, 55_000);
+
+    const readChunkWithTimeout = async (): Promise<ReadableStreamReadResult<Uint8Array>> => {
+      if (!Number.isFinite(effectiveChunkTimeoutMs) || effectiveChunkTimeoutMs <= 0) {
+        return reader.read();
+      }
+      let chunkTimer: ReturnType<typeof setTimeout> | undefined;
+      let timedOutErr: Error | null = null;
+      try {
+        const res = await Promise.race([
+          reader.read(),
+          new Promise<never>((_, reject) => {
+            chunkTimer = setTimeout(() => {
+              timedOutErr = new Error(
+                `[${this.name}] STREAM_TIMEOUT: SSE stalled for ${effectiveChunkTimeoutMs}ms`,
+              );
+              reject(timedOutErr);
+              void reader.cancel("STREAM_TIMEOUT").catch(() => {});
+            }, effectiveChunkTimeoutMs);
+          }),
+        ]);
+        if (timedOutErr) throw timedOutErr;
+        return res;
+      } finally {
+        if (chunkTimer !== undefined) clearTimeout(chunkTimer);
+      }
+    };
 
     try {
       while (true) {
-        const { value, done } = await reader.read();
+        const { value, done } = await readChunkWithTimeout();
         if (done) {
           buffer += decoder.decode();
           if (buffer.trim()) {
@@ -347,10 +378,49 @@ function abortError(): Error {
   }
 }
 
-async function safeText(resp: Response): Promise<string> {
+async function safeText(resp: Response, maxBytes = 8_192, timeoutMs = 3_000): Promise<string> {
+  if (!resp.body) return "";
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let text = "";
+  let totalBytes = 0;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+
   try {
-    return await resp.text();
+    const readDeadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        void reader.cancel().catch(() => {});
+        reject(new Error("ERROR_BODY_TIMEOUT"));
+      }, timeoutMs);
+    });
+
+    while (true) {
+      const { done, value } = await Promise.race([reader.read(), readDeadline]);
+      if (done) {
+        text += decoder.decode();
+        break;
+      }
+      if (value && value.byteLength > 0) {
+        const remaining = maxBytes - totalBytes;
+        if (value.byteLength >= remaining) {
+          text += decoder.decode(value.subarray(0, remaining));
+          void reader.cancel().catch(() => {});
+          break;
+        }
+        totalBytes += value.byteLength;
+        text += decoder.decode(value, { stream: true });
+      }
+    }
+    return text;
   } catch {
-    return "<unreadable body>";
+    return text || "<unreadable body>";
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    try {
+      reader.releaseLock();
+    } catch {
+      /* noop */
+    }
+    void resp.body.cancel().catch(() => {});
   }
 }

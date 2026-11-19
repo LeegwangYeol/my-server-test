@@ -1,5 +1,10 @@
 import { Elysia, t } from "elysia";
 import { google } from "googleapis";
+import {
+  executeYoutubeWithRetry,
+  handleYoutubeError,
+  sanitizeYoutubeAccessToken,
+} from "./yt-client";
 
 // 타입 단언을 사용하여 타입 오류 해결
 export const v1Reply = (app: any) => {
@@ -8,23 +13,23 @@ export const v1Reply = (app: any) => {
     async ({ body, set }: { body: any; set: any }) => {
       const parentId = String(body?.parentId ?? "").trim();
       const text = String(body?.text ?? "").trim();
-      const accessToken = String(body?.accessToken ?? "").trim();
+      const accessToken = sanitizeYoutubeAccessToken(body?.accessToken);
 
-      if (!parentId || parentId.length > 256) {
+      if (!parentId || parentId.length > 256 || /[\s\x00-\x1f\x7f]/.test(parentId)) {
         set.status = 400;
         return {
           success: false,
           message: "유효한 parentId 값이 제공되지 않았습니다.",
         };
       }
-      if (!text) {
+      if (!text || text.length > 10000) {
         set.status = 400;
         return {
           success: false,
           message: "댓글 내용이 제공되지 않았습니다.",
         };
       }
-      if (!accessToken || accessToken.length > 4096) {
+      if (!accessToken) {
         set.status = 400;
         return {
           success: false,
@@ -42,15 +47,20 @@ export const v1Reply = (app: any) => {
           timeout: 10_000,
         });
 
-        const response = await youtube.comments.insert({
-          part: ["snippet"],
-          requestBody: {
-            snippet: {
-              textOriginal: text,
-              parentId: parentId,
-            },
-          },
-        });
+        const response = await executeYoutubeWithRetry(
+          () =>
+            youtube.comments.insert({
+              part: ["snippet"],
+              requestBody: {
+                snippet: {
+                  textOriginal: text,
+                  parentId: parentId,
+                },
+              },
+            }),
+          1,
+          true,
+        );
 
         return {
           success: true,
@@ -60,12 +70,12 @@ export const v1Reply = (app: any) => {
           },
         };
       } catch (error: any) {
-        console.error("YouTube 답글 작성 에러:", error);
-        set.status = 400;
-        return {
-          success: false,
-          message: error?.message || "답글 작성 중 오류가 발생하였습니다.",
-        };
+        return handleYoutubeError(
+          "reply",
+          error,
+          set,
+          "답글 작성 중 오류가 발생하였습니다.",
+        );
       }
     },
     {
@@ -98,6 +108,10 @@ export const v1Reply = (app: any) => {
           }),
         }),
         400: t.Object({
+          success: t.Boolean(),
+          message: t.String(),
+        }),
+        429: t.Object({
           success: t.Boolean(),
           message: t.String(),
         }),

@@ -222,19 +222,24 @@ export async function upsertWidget(
 ): Promise<{ row: WidgetRow | null; error?: string }> {
   const id = (input.id ?? "").trim();
   if (!id) return { row: null, error: "id required" };
-  if (id.length > MAX_WIDGET_ID_CHARS) {
+  if (id.length > MAX_WIDGET_ID_CHARS || /[\x00-\x1f\x7f]/.test(id)) {
     return {
       row: null,
-      error: `id exceeds maximum length of ${MAX_WIDGET_ID_CHARS} characters`,
+      error:
+        id.length > MAX_WIDGET_ID_CHARS
+          ? `id exceeds maximum length of ${MAX_WIDGET_ID_CHARS} characters`
+          : "invalid id (control characters prohibited)",
     };
   }
 
   const patch: Record<string, unknown> = { id, is_deleted: false };
   if (input.name !== undefined) {
-    if (input.name.length > MAX_WIDGET_NAME_CHARS) {
+    if (input.name.length > MAX_WIDGET_NAME_CHARS || input.name.includes("\x00")) {
       return {
         row: null,
-        error: `name exceeds maximum length of ${MAX_WIDGET_NAME_CHARS} characters`,
+        error: input.name.includes("\x00")
+          ? "invalid name (null bytes prohibited)"
+          : `name exceeds maximum length of ${MAX_WIDGET_NAME_CHARS} characters`,
       };
     }
     patch.name = input.name;
@@ -252,19 +257,29 @@ export async function upsertWidget(
     patch.theme = input.theme;
   }
   if (input.description !== undefined) {
-    if (input.description.length > MAX_WIDGET_DESC_CHARS) {
+    if (
+      input.description.length > MAX_WIDGET_DESC_CHARS ||
+      input.description.includes("\x00")
+    ) {
       return {
         row: null,
-        error: `description exceeds maximum length of ${MAX_WIDGET_DESC_CHARS} characters`,
+        error: input.description.includes("\x00")
+          ? "invalid description (null bytes prohibited)"
+          : `description exceeds maximum length of ${MAX_WIDGET_DESC_CHARS} characters`,
       };
     }
     patch.description = input.description;
   }
   if (input.welcome_message !== undefined) {
-    if (input.welcome_message.length > MAX_WIDGET_WELCOME_CHARS) {
+    if (
+      input.welcome_message.length > MAX_WIDGET_WELCOME_CHARS ||
+      input.welcome_message.includes("\x00")
+    ) {
       return {
         row: null,
-        error: `welcome_message exceeds maximum length of ${MAX_WIDGET_WELCOME_CHARS} characters`,
+        error: input.welcome_message.includes("\x00")
+          ? "invalid welcome_message (null bytes prohibited)"
+          : `welcome_message exceeds maximum length of ${MAX_WIDGET_WELCOME_CHARS} characters`,
       };
     }
     patch.welcome_message = input.welcome_message;
@@ -272,11 +287,14 @@ export async function upsertWidget(
   if (input.system_prompt !== undefined) {
     if (
       typeof input.system_prompt === "string" &&
-      input.system_prompt.length > MAX_WIDGET_SYSTEM_PROMPT_CHARS
+      (input.system_prompt.length > MAX_WIDGET_SYSTEM_PROMPT_CHARS ||
+        input.system_prompt.includes("\x00"))
     ) {
       return {
         row: null,
-        error: `system_prompt exceeds maximum length of ${MAX_WIDGET_SYSTEM_PROMPT_CHARS} characters`,
+        error: input.system_prompt.includes("\x00")
+          ? "invalid system_prompt (null bytes prohibited)"
+          : `system_prompt exceeds maximum length of ${MAX_WIDGET_SYSTEM_PROMPT_CHARS} characters`,
       };
     }
     patch.system_prompt = input.system_prompt;
@@ -290,12 +308,15 @@ export async function upsertWidget(
     }
     if (
       input.suggested_questions.some(
-        (q) => typeof q !== "string" || q.length > MAX_SUGGESTED_QUESTION_CHARS,
+        (q) =>
+          typeof q !== "string" ||
+          q.length > MAX_SUGGESTED_QUESTION_CHARS ||
+          q.includes("\x00"),
       )
     ) {
       return {
         row: null,
-        error: `suggested_questions item exceeds maximum length of ${MAX_SUGGESTED_QUESTION_CHARS} characters`,
+        error: `suggested_questions item exceeds maximum length of ${MAX_SUGGESTED_QUESTION_CHARS} characters or contains null bytes`,
       };
     }
     patch.suggested_questions = input.suggested_questions;

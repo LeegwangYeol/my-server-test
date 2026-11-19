@@ -665942,7 +665942,7 @@ var require_helpers2 = __commonJS({
     exports2.generateCallbackId = generateCallbackId;
     exports2.parseParametersFromURL = parseParametersFromURL;
     exports2.decodeJWT = decodeJWT;
-    exports2.sleep = sleep5;
+    exports2.sleep = sleep6;
     exports2.retryable = retryable;
     exports2.generatePKCEVerifier = generatePKCEVerifier;
     exports2.generatePKCEChallenge = generatePKCEChallenge;
@@ -666080,7 +666080,7 @@ var require_helpers2 = __commonJS({
       };
       return data;
     }
-    async function sleep5(time) {
+    async function sleep6(time) {
       return await new Promise((accept) => {
         setTimeout(() => accept(null), time);
       });
@@ -701775,7 +701775,494 @@ var swagger = async ({
 
 // src/endpoints/v1/youtube/auth-create.ts
 var import_googleapis = __toESM(require_src8());
+
+// lib/queue/fallback-queue.ts
+function calculateFullJitterBackoff(attempt, baseMs = 500, maxMs = 3e4, retryAfterMs) {
+  const safeBaseMs = Number.isFinite(baseMs) && baseMs > 0 ? baseMs : 500;
+  const safeMaxMs = Number.isFinite(maxMs) && maxMs > 0 ? maxMs : 3e4;
+  const safeAttempt = Number.isFinite(attempt) ? Math.max(0, Math.floor(attempt)) : 0;
+  if (typeof retryAfterMs === "number" && Number.isFinite(retryAfterMs) && retryAfterMs > 0) {
+    const jitter = Math.floor(Math.random() * 200) + 50;
+    return Math.min(safeMaxMs, Math.max(10, Math.floor(retryAfterMs + jitter)));
+  }
+  const expCap = Math.min(safeMaxMs, safeBaseMs * Math.pow(2, Math.min(30, safeAttempt)));
+  return Math.max(10, Math.floor(Math.random() * expCap));
+}
+function is429OrQuotaError(err) {
+  if (!err) return false;
+  if (typeof err === "string") {
+    const s = err.toLowerCase();
+    return s.includes("429") || s.includes("too many requests") || s.includes("rate limit") || s.includes("quota exceeded") || s.includes("exceeded quota") || s.includes("temporarily blocked") || s.includes("throttled") || s.includes("mailbox busy") || s.includes("try again later") || s.includes("resource has been exhausted") || s.includes("all_keys_rate_limited");
+  }
+  if (typeof err === "object") {
+    const anyErr = err;
+    if (anyErr.status === 429 || anyErr.statusCode === 429) return true;
+    if (anyErr.response?.status === 429 || anyErr.response?.statusCode === 429) return true;
+    const rawCode = anyErr.responseCode ?? anyErr.code;
+    const smtpCode = Number(rawCode);
+    if (Number.isFinite(smtpCode) && [421, 450, 451, 452].includes(smtpCode)) {
+      return true;
+    }
+    const codeStr = String(anyErr.code ?? anyErr.statusCode ?? anyErr.error?.code ?? "").toUpperCase();
+    if (codeStr === "429" || codeStr === "RATE_LIMIT_EXCEEDED" || codeStr === "ALL_KEYS_RATE_LIMITED" || codeStr === "QUOTA_EXCEEDED" || codeStr === "RESOURCE_EXHAUSTED") {
+      return true;
+    }
+    const candidates = [
+      anyErr.message,
+      typeof anyErr.error === "string" ? anyErr.error : anyErr.error?.message,
+      anyErr.response?.data?.message,
+      anyErr.response?.data?.error,
+      anyErr.cause?.message,
+      typeof anyErr.toString === "function" ? anyErr.toString() : ""
+    ];
+    const message = candidates.filter(Boolean).join(" ").toLowerCase();
+    if (message.includes("429") || message.includes("too many requests") || message.includes("rate limit") || message.includes("quota exceeded") || message.includes("exceeded quota") || message.includes("temporarily blocked") || message.includes("throttled") || message.includes("mailbox busy") || message.includes("try again later") || message.includes("resource has been exhausted") || message.includes("all_keys_rate_limited")) {
+      return true;
+    }
+  }
+  return false;
+}
+function extractRetryAfterMs(err) {
+  if (!err || typeof err !== "object") return void 0;
+  const anyErr = err;
+  const rawHeader = anyErr.retryAfterMs ?? (typeof anyErr.retryAfterSeconds === "number" && anyErr.retryAfterSeconds > 0 ? anyErr.retryAfterSeconds * 1e3 : void 0) ?? anyErr.retry_after ?? anyErr.retryAfter ?? anyErr.response?.data?.retry_after ?? anyErr.response?.data?.retryAfter ?? anyErr.headers?.get?.("retry-after") ?? anyErr.headers?.get?.("Retry-After") ?? anyErr.headers?.["retry-after"] ?? anyErr.headers?.["Retry-After"] ?? anyErr.response?.headers?.get?.("retry-after") ?? anyErr.response?.headers?.get?.("Retry-After") ?? anyErr.response?.headers?.["retry-after"] ?? anyErr.response?.headers?.["Retry-After"];
+  if (typeof rawHeader === "number" && Number.isFinite(rawHeader)) {
+    if (rawHeader <= 0) return void 0;
+    if (anyErr.retryAfterMs !== void 0 || anyErr.retryAfterSeconds !== void 0) {
+      return Math.ceil(rawHeader);
+    }
+    if (rawHeader > 1e12) {
+      const delta = rawHeader - Date.now();
+      return delta > 0 ? Math.ceil(delta) : void 0;
+    }
+    if (rawHeader > 1e9) {
+      const delta = rawHeader * 1e3 - Date.now();
+      return delta > 0 ? Math.ceil(delta) : void 0;
+    }
+    return rawHeader > 1e3 ? Math.ceil(rawHeader) : Math.ceil(rawHeader * 1e3);
+  }
+  if (typeof rawHeader === "string") {
+    const trimmed = rawHeader.trim();
+    if (/^\d+(\.\d+)?$/.test(trimmed)) {
+      const sec = parseFloat(trimmed);
+      if (!isNaN(sec) && Number.isFinite(sec) && sec > 0) {
+        if (sec > 1e9) {
+          const delta = sec * 1e3 - Date.now();
+          return delta > 0 ? Math.ceil(delta) : void 0;
+        }
+        return Math.ceil(sec * 1e3);
+      }
+    }
+    const timestamp = Date.parse(trimmed);
+    if (!isNaN(timestamp) && Number.isFinite(timestamp)) {
+      const delta = timestamp - Date.now();
+      return delta > 0 ? Math.ceil(delta) : void 0;
+    }
+  }
+  return void 0;
+}
+function generateJobId() {
+  return `job-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`;
+}
+var FallbackQueue = class {
+  // idempotencyKey -> jobId
+  constructor(queueType = "general", maxCapacity = 5e3) {
+    this.jobs = /* @__PURE__ */ new Map();
+    this.idempotencyMap = /* @__PURE__ */ new Map();
+    this.queueType = queueType;
+    this.maxCapacity = Number.isFinite(maxCapacity) && maxCapacity > 0 ? Math.floor(maxCapacity) : 5e3;
+  }
+  /**
+   * Enqueue a job into the fallback queue.
+   */
+  enqueue(payload, options = {}) {
+    const idempotencyKey = options.idempotencyKey;
+    if (idempotencyKey) {
+      const existingId = this.idempotencyMap.get(idempotencyKey);
+      if (existingId) {
+        const existingJob = this.jobs.get(existingId);
+        if (existingJob && existingJob.status !== "failed") {
+          return existingJob;
+        }
+      }
+    }
+    if (this.jobs.size >= this.maxCapacity) {
+      let idToEvict;
+      for (const [id, job2] of this.jobs) {
+        if (job2.status === "failed") {
+          idToEvict = id;
+          break;
+        }
+      }
+      if (idToEvict === void 0) {
+        for (const [id, job2] of this.jobs) {
+          if (job2.status === "pending") {
+            idToEvict = id;
+            break;
+          }
+        }
+      }
+      if (idToEvict === void 0) {
+        idToEvict = this.jobs.keys().next().value;
+      }
+      if (idToEvict !== void 0) {
+        const evicted = this.jobs.get(idToEvict);
+        if (evicted?.idempotencyKey && this.idempotencyMap.get(evicted.idempotencyKey) === evicted.id) {
+          this.idempotencyMap.delete(evicted.idempotencyKey);
+        }
+        this.jobs.delete(idToEvict);
+      }
+    }
+    const now = Date.now();
+    const delay = options.initialDelayMs ?? calculateFullJitterBackoff(0);
+    const job = {
+      id: generateJobId(),
+      type: options.type ?? this.queueType,
+      payload,
+      attempts: 0,
+      maxAttempts: options.maxAttempts ?? 5,
+      createdAt: now,
+      nextRetryAt: now + delay,
+      backoffMs: delay,
+      status: "pending",
+      lastError: options.lastError,
+      idempotencyKey
+    };
+    this.jobs.set(job.id, job);
+    if (idempotencyKey) {
+      this.idempotencyMap.set(idempotencyKey, job.id);
+    }
+    return job;
+  }
+  /**
+   * O(1)-best-case check for whether at least one pending job is ready for retry,
+   * avoiding full-queue array allocations on hot request paths.
+   */
+  hasReadyJobs(now = Date.now()) {
+    for (const job of this.jobs.values()) {
+      if (job.status === "pending" && job.nextRetryAt <= now) {
+        return true;
+      }
+    }
+    return false;
+  }
+  /**
+   * Retrieve all jobs ready for retry (status === "pending" && nextRetryAt <= now).
+   */
+  getReadyJobs(now = Date.now()) {
+    const ready = [];
+    for (const job of this.jobs.values()) {
+      if (job.status === "pending" && job.nextRetryAt <= now) {
+        ready.push(job);
+      }
+    }
+    return ready;
+  }
+  /**
+   * Atomically claims the next ready job for processing to prevent race conditions.
+   * Can optionally exclude already-attempted job IDs in the current drain pass.
+   */
+  claimNextReady(now = Date.now(), excludeIds) {
+    for (const job of this.jobs.values()) {
+      if (excludeIds && excludeIds.has(job.id)) continue;
+      if (job.status === "pending" && job.nextRetryAt <= now) {
+        job.status = "processing";
+        return job;
+      }
+    }
+    return void 0;
+  }
+  markProcessing(id) {
+    const job = this.jobs.get(id);
+    if (job && job.status === "pending") {
+      job.status = "processing";
+    }
+    return job;
+  }
+  markSucceeded(id) {
+    const job = this.jobs.get(id);
+    if (job) {
+      job.status = "succeeded";
+      if (job.idempotencyKey && this.idempotencyMap.get(job.idempotencyKey) === job.id) {
+        this.idempotencyMap.delete(job.idempotencyKey);
+      }
+      this.jobs.delete(id);
+      return true;
+    }
+    return false;
+  }
+  markFailed(id, err, baseMs = 500, maxMs = 3e4) {
+    const job = this.jobs.get(id);
+    if (!job) return void 0;
+    job.attempts += 1;
+    job.lastError = err instanceof Error ? err.message : String(err);
+    if (job.attempts >= job.maxAttempts) {
+      job.status = "failed";
+    } else {
+      job.status = "pending";
+      const retryAfterMs = extractRetryAfterMs(err);
+      const backoff = calculateFullJitterBackoff(job.attempts, baseMs, maxMs, retryAfterMs);
+      job.backoffMs = backoff;
+      job.nextRetryAt = Date.now() + backoff;
+    }
+    return job;
+  }
+  /**
+   * Drain / process pending jobs sequentially with atomic claim to prevent double-execution.
+   * Excludes failed/retried jobs from tight infinite loops within the same drain pass.
+   * Optional `maxBatchSize` bounds synchronous request-path drains to prevent serverless timeouts.
+   */
+  async processPending(handler2, now = Date.now(), maxBatchSize = Infinity) {
+    let processed = 0;
+    let succeeded = 0;
+    let failed = 0;
+    const attemptedIds = /* @__PURE__ */ new Set();
+    const safeBatch = Number.isFinite(maxBatchSize) && maxBatchSize > 0 ? Math.floor(maxBatchSize) : Infinity;
+    let job;
+    while (processed < safeBatch && (job = this.claimNextReady(now, attemptedIds)) !== void 0) {
+      attemptedIds.add(job.id);
+      processed++;
+      try {
+        const ok = await handler2(job);
+        if (ok !== false) {
+          this.markSucceeded(job.id);
+          succeeded++;
+        } else {
+          this.markFailed(job.id, new Error("Handler returned false"));
+          failed++;
+        }
+      } catch (err) {
+        this.markFailed(job.id, err);
+        failed++;
+      }
+    }
+    return { processed, succeeded, failed };
+  }
+  get(id) {
+    return this.jobs.get(id);
+  }
+  getAllJobs() {
+    return Array.from(this.jobs.values());
+  }
+  getPendingCount() {
+    let count = 0;
+    for (const job of this.jobs.values()) {
+      if (job.status === "pending" || job.status === "processing") count++;
+    }
+    return count;
+  }
+  get size() {
+    return this.jobs.size;
+  }
+  /**
+   * Actively prune dead/failed jobs or jobs older than maxAgeMs (excluding in-flight processing jobs).
+   */
+  prune(maxAgeMs = 24 * 60 * 60 * 1e3, now = Date.now()) {
+    const safeMaxAge = Number.isFinite(maxAgeMs) && maxAgeMs > 0 ? maxAgeMs : 24 * 60 * 60 * 1e3;
+    const safeNow = Number.isFinite(now) ? now : Date.now();
+    let pruned = 0;
+    for (const [id, job] of this.jobs.entries()) {
+      if (job.status !== "processing" && (job.status === "failed" || safeNow - job.createdAt >= safeMaxAge)) {
+        if (job.idempotencyKey && this.idempotencyMap.get(job.idempotencyKey) === job.id) {
+          this.idempotencyMap.delete(job.idempotencyKey);
+        }
+        this.jobs.delete(id);
+        pruned++;
+      }
+    }
+    return pruned;
+  }
+  clear() {
+    this.jobs.clear();
+    this.idempotencyMap.clear();
+  }
+};
+var mailFallbackQueue = new FallbackQueue("mail", 5e3);
+var smsFallbackQueue = new FallbackQueue("sms", 5e3);
+var dbFallbackQueue = new FallbackQueue("db", 5e3);
+var generalFallbackQueue = new FallbackQueue("general", 5e3);
+var sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+async function executeWithFallback(action, options = {}) {
+  const maxRetries = options.maxRetries ?? 3;
+  const baseDelayMs = options.baseDelayMs ?? 200;
+  const maxDelayMs = options.maxDelayMs ?? 5e3;
+  let lastError = null;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const result = await action();
+      return {
+        success: true,
+        result,
+        attempts: attempt + 1
+      };
+    } catch (err) {
+      lastError = err;
+      const isRateLimited = is429OrQuotaError(err);
+      if (!isRateLimited) {
+        throw err;
+      }
+      if (attempt < maxRetries) {
+        const retryAfterMs = extractRetryAfterMs(err);
+        const backoff = calculateFullJitterBackoff(attempt, baseDelayMs, maxDelayMs, retryAfterMs);
+        await sleep(backoff);
+      }
+    }
+  }
+  if (options.queue && options.fallbackPayload !== void 0) {
+    const job = options.queue.enqueue(options.fallbackPayload, {
+      type: options.type,
+      idempotencyKey: options.idempotencyKey,
+      lastError: lastError instanceof Error ? lastError.message : String(lastError)
+    });
+    options.onEnqueue?.(job);
+    return {
+      success: true,
+      queued: true,
+      job,
+      attempts: maxRetries + 1
+    };
+  }
+  return {
+    success: false,
+    error: lastError instanceof Error ? lastError : new Error(String(lastError)),
+    attempts: maxRetries + 1
+  };
+}
+var defaultDbInsertHandler = null;
+function registerDefaultDbHandler(fn) {
+  defaultDbInsertHandler = fn;
+}
+function getQueuedMessagesForThread(threadId) {
+  if (!threadId || dbFallbackQueue.size === 0) return [];
+  return dbFallbackQueue.getAllJobs().filter(
+    (job) => (job.status === "pending" || job.status === "processing") && job.payload?.threadId === threadId && job.type === "db_chat_message"
+  ).map((job, idx) => ({
+    id: -(idx + 1),
+    thread_id: threadId,
+    role: job.payload.role,
+    content: job.payload.content,
+    created_at: job.payload.createdAt || new Date(job.createdAt).toISOString()
+  }));
+}
+function getQueuedMessagesForThreads(threadIds) {
+  if (threadIds.size === 0 || dbFallbackQueue.size === 0) return [];
+  const results = [];
+  let idx = 0;
+  for (const job of dbFallbackQueue.getAllJobs()) {
+    if ((job.status === "pending" || job.status === "processing") && job.type === "db_chat_message" && typeof job.payload?.threadId === "string" && threadIds.has(job.payload.threadId)) {
+      idx++;
+      results.push({
+        id: -idx,
+        thread_id: job.payload.threadId,
+        role: job.payload.role,
+        content: job.payload.content,
+        created_at: job.payload.createdAt || new Date(job.createdAt).toISOString()
+      });
+    }
+  }
+  return results;
+}
+
+// src/endpoints/v1/youtube/yt-client.ts
+var MAX_YOUTUBE_WAIT_MS = 2e3;
+function sanitizeYoutubeAccessToken(raw) {
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trim();
+  if (!trimmed || trimmed.length > 4096) return null;
+  if (/[\s\x00-\x1f\x7f]/.test(trimmed)) return null;
+  return trimmed;
+}
+function extractYoutubeStatusCode(err) {
+  const candidates = [
+    err?.status,
+    err?.code,
+    err?.statusCode,
+    err?.response?.status,
+    err?.response?.statusCode
+  ];
+  for (const c of candidates) {
+    const n = typeof c === "number" ? c : Number(c);
+    if (Number.isInteger(n) && n >= 100 && n <= 599) {
+      return n;
+    }
+  }
+  return void 0;
+}
+function isRetryableYoutubeError(err) {
+  const status2 = extractYoutubeStatusCode(err);
+  return status2 === 429 || status2 === 503;
+}
+var sleep2 = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+async function executeYoutubeWithRetry(action, maxRetries = 2, only429 = false) {
+  const rawMax = process.env.YOUTUBE_RETRY_MAX?.trim();
+  const effectiveMax = rawMax && /^\d+$/.test(rawMax) ? Math.min(3, Math.max(0, Number.parseInt(rawMax, 10))) : maxRetries;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await action();
+    } catch (err) {
+      const status2 = extractYoutubeStatusCode(err);
+      const retryable = only429 ? status2 === 429 : isRetryableYoutubeError(err);
+      if (!retryable || attempt >= effectiveMax) {
+        throw err;
+      }
+      const retryAfterMs = extractRetryAfterMs(err);
+      if (retryAfterMs !== void 0 && retryAfterMs > MAX_YOUTUBE_WAIT_MS) {
+        throw err;
+      }
+      const waitMs = calculateFullJitterBackoff(
+        attempt,
+        150,
+        MAX_YOUTUBE_WAIT_MS,
+        retryAfterMs
+      );
+      await sleep2(waitMs);
+    }
+  }
+}
+function handleYoutubeError(label, error, set, fallbackMessage) {
+  const status2 = extractYoutubeStatusCode(error);
+  const rawMsg = typeof error?.message === "string" && error.message.trim() ? error.message.trim() : fallbackMessage;
+  console.error(
+    `[YouTube:${label}] status=${status2 ?? "ERR"} message=${rawMsg.slice(0, 300)}`
+  );
+  if (status2 === 429) {
+    set.status = 429;
+    const retryMs = extractRetryAfterMs(error);
+    const retrySec = retryMs ? Math.max(1, Math.min(3600, Math.ceil(retryMs / 1e3))) : 5;
+    set.headers = set.headers || {};
+    set.headers["retry-after"] = String(retrySec);
+    return {
+      success: false,
+      message: rawMsg
+    };
+  }
+  set.status = 400;
+  return {
+    success: false,
+    message: rawMsg
+  };
+}
+
+// src/endpoints/v1/youtube/auth-create.ts
 var YOUTUBE_SCOPES = ["https://www.googleapis.com/auth/youtube.force-ssl"];
+var CLIENT_ID_RE = /^[0-9]+-[a-zA-Z0-9_-]+\.apps\.googleusercontent\.com$/;
+var CLIENT_SECRET_RE = /^GOCSPX-[a-zA-Z0-9_-]+$/;
+var REDIRECT_URI_RE = /^https?:\/\/[\w.-]+(?::\d{1,5})?\/[^\s\\\x00-\x1f\x7f]*$/;
+function isValidOAuthRedirectUri(raw) {
+  if (!raw || raw.length > 2048 || !REDIRECT_URI_RE.test(raw)) return false;
+  try {
+    const parsed = new URL(raw);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
+    if (!parsed.hostname || parsed.username || parsed.password) return false;
+    if (parsed.port) {
+      const port = Number(parsed.port);
+      if (!Number.isInteger(port) || port < 1 || port > 65535) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
 var v1AuthCreate = (app) => {
   app.post(
     "/auth/create",
@@ -701825,7 +702312,7 @@ var v1AuthCreate = (app) => {
           description: "OAuth Redirect URI",
           error: "Redirect URI is required",
           maxLength: 2048,
-          pattern: "^https?://[\\w.-]+(?::\\d+)?/[^\\s\\x00-\\x1f\\x7f]*$"
+          pattern: "^https?://[\\w.-]+(?::\\d{1,5})?/[^\\s\\\\\\x00-\\x1f\\x7f]*$"
         })
       }),
       response: t.Object({
@@ -701841,7 +702328,7 @@ var v1AuthCreate = (app) => {
     async ({ query, set }) => {
       const code = String(query?.code ?? "").trim();
       const state = String(query?.state ?? "").trim();
-      if (!code || !state || state.length > 4096) {
+      if (!code || code.length > 2048 || /[\s\x00-\x1f\x7f]/.test(code) || !state || state.length > 4096) {
         set.status = 400;
         return {
           success: false,
@@ -701852,21 +702339,25 @@ var v1AuthCreate = (app) => {
         const authState = JSON.parse(
           Buffer.from(state, "base64").toString()
         );
-        if (!authState || typeof authState !== "object" || typeof authState.clientId !== "string" || !authState.clientId.trim() || authState.clientId.trim().length > 512 || typeof authState.clientSecret !== "string" || !authState.clientSecret.trim() || authState.clientSecret.trim().length > 512 || typeof authState.redirectUri !== "string" || !authState.redirectUri.trim() || authState.redirectUri.trim().length > 2048 || !/^https?:\/\/[\w.-]+(?::\d+)?\/[^\s\x00-\x1f\x7f]*$/.test(
-          authState.redirectUri.trim()
-        )) {
+        const cid = typeof authState?.clientId === "string" ? authState.clientId.trim() : "";
+        const csec = typeof authState?.clientSecret === "string" ? authState.clientSecret.trim() : "";
+        const ruri = typeof authState?.redirectUri === "string" ? authState.redirectUri.trim() : "";
+        if (!authState || typeof authState !== "object" || !cid || cid.length > 512 || !CLIENT_ID_RE.test(cid) || !csec || csec.length > 512 || !CLIENT_SECRET_RE.test(csec) || !isValidOAuthRedirectUri(ruri)) {
           set.status = 400;
           return {
             success: false,
             message: "\uC720\uD6A8\uD558\uC9C0 \uC54A\uC740 \uC778\uC99D \uC0C1\uD0DC(state) \uC815\uBCF4\uC785\uB2C8\uB2E4."
           };
         }
-        const oauth2Client = new import_googleapis.google.auth.OAuth2(
-          authState.clientId.trim(),
-          authState.clientSecret.trim(),
-          authState.redirectUri.trim()
+        const oauth2Client = new import_googleapis.google.auth.OAuth2({
+          clientId: cid,
+          clientSecret: csec,
+          redirectUri: ruri,
+          transporterOptions: { timeout: 1e4 }
+        });
+        const { tokens } = await executeYoutubeWithRetry(
+          () => oauth2Client.getToken(code)
         );
-        const { tokens } = await oauth2Client.getToken(code);
         if (!tokens?.access_token) {
           set.status = 400;
           return {
@@ -701884,12 +702375,12 @@ var v1AuthCreate = (app) => {
           }
         };
       } catch (error) {
-        console.error("YouTube OAuth error:", error);
-        set.status = 400;
-        return {
-          success: false,
-          message: error?.message || "\uC778\uC99D \uCC98\uB9AC \uC911 \uC624\uB958\uAC00 \uBC1C\uC0DD\uD588\uC2B5\uB2C8\uB2E4."
-        };
+        return handleYoutubeError(
+          "auth/confirm",
+          error,
+          set,
+          "\uC778\uC99D \uCC98\uB9AC \uC911 \uC624\uB958\uAC00 \uBC1C\uC0DD\uD588\uC2B5\uB2C8\uB2E4."
+        );
       }
     },
     {
@@ -701914,6 +702405,10 @@ var v1AuthCreate = (app) => {
         400: t.Object({
           success: t.Boolean(),
           message: t.String()
+        }),
+        429: t.Object({
+          success: t.Boolean(),
+          message: t.String()
         })
       }
     }
@@ -701926,24 +702421,24 @@ var v1Comment = (app) => {
   app.post(
     "/comment",
     async ({ body, set }) => {
-      const accessToken = String(body?.accessToken ?? "").trim();
+      const accessToken = sanitizeYoutubeAccessToken(body?.accessToken);
       const videoId = String(body?.videoId ?? "").trim();
       const commentText = String(body?.commentText ?? "").trim();
-      if (!videoId || videoId.length > 128) {
+      if (!videoId || videoId.length > 128 || /[\s\x00-\x1f\x7f]/.test(videoId)) {
         set.status = 400;
         return {
           success: false,
           message: "\uC720\uD6A8\uD55C videoId \uAC12\uC774 \uC81C\uACF5\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4."
         };
       }
-      if (!commentText) {
+      if (!commentText || commentText.length > 1e4) {
         set.status = 400;
         return {
           success: false,
           message: "\uB313\uAE00 \uB0B4\uC6A9\uC774 \uC81C\uACF5\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4."
         };
       }
-      if (!accessToken || accessToken.length > 4096) {
+      if (!accessToken) {
         set.status = 400;
         return {
           success: false,
@@ -701958,19 +702453,23 @@ var v1Comment = (app) => {
           auth: oauth2Client,
           timeout: 1e4
         });
-        const response = await youtube.commentThreads.insert({
-          part: ["snippet"],
-          requestBody: {
-            snippet: {
-              videoId,
-              topLevelComment: {
-                snippet: {
-                  textOriginal: commentText
+        const response = await executeYoutubeWithRetry(
+          () => youtube.commentThreads.insert({
+            part: ["snippet"],
+            requestBody: {
+              snippet: {
+                videoId,
+                topLevelComment: {
+                  snippet: {
+                    textOriginal: commentText
+                  }
                 }
               }
             }
-          }
-        });
+          }),
+          1,
+          true
+        );
         return {
           success: true,
           message: "\uB313\uAE00\uC774 \uC131\uACF5\uC801\uC73C\uB85C \uC791\uC131\uB418\uC5C8\uC2B5\uB2C8\uB2E4.",
@@ -701989,12 +702488,12 @@ var v1Comment = (app) => {
           }
         };
       } catch (error) {
-        console.error("YouTube comment error:", error);
-        set.status = 400;
-        return {
-          success: false,
-          message: error?.message || "\uB313\uAE00 \uC791\uC131 \uC911 \uC624\uB958\uAC00 \uBC1C\uC0DD\uD588\uC2B5\uB2C8\uB2E4."
-        };
+        return handleYoutubeError(
+          "comment",
+          error,
+          set,
+          "\uB313\uAE00 \uC791\uC131 \uC911 \uC624\uB958\uAC00 \uBC1C\uC0DD\uD588\uC2B5\uB2C8\uB2E4."
+        );
       }
     },
     {
@@ -702052,6 +702551,10 @@ var v1Comment = (app) => {
         401: t.Object({
           success: t.Boolean(),
           message: t.String()
+        }),
+        429: t.Object({
+          success: t.Boolean(),
+          message: t.String()
         })
       }
     }
@@ -702066,15 +702569,15 @@ var v1CommentList = (app) => {
     async ({ body, set }) => {
       const { maxResults, pageToken, textFormat, order } = body;
       const videoId = String(body?.videoId ?? "").trim();
-      const accessToken = String(body?.accessToken ?? "").trim();
-      if (!videoId || videoId.length > 128) {
+      const accessToken = sanitizeYoutubeAccessToken(body?.accessToken);
+      if (!videoId || videoId.length > 128 || /[\s\x00-\x1f\x7f]/.test(videoId)) {
         set.status = 400;
         return {
           success: false,
           message: "\uC720\uD6A8\uD55C videoId \uAC12\uC774 \uC81C\uACF5\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4."
         };
       }
-      if (!accessToken || accessToken.length > 4096) {
+      if (!accessToken) {
         set.status = 400;
         return {
           success: false,
@@ -702104,14 +702607,16 @@ var v1CommentList = (app) => {
           }
         }
         const cleanPageToken = typeof pageToken === "string" && pageToken.trim() ? pageToken.trim() : void 0;
-        const response = await youtube.commentThreads.list({
-          part: ["snippet", "replies"],
-          videoId,
-          maxResults: max,
-          pageToken: cleanPageToken,
-          textFormat: textFormat || "html",
-          order: order || "time"
-        });
+        const response = await executeYoutubeWithRetry(
+          () => youtube.commentThreads.list({
+            part: ["snippet", "replies"],
+            videoId,
+            maxResults: max,
+            pageToken: cleanPageToken,
+            textFormat: textFormat || "html",
+            order: order || "time"
+          })
+        );
         return {
           success: true,
           message: "\uB313\uAE00 \uC2A4\uB808\uB4DC \uBAA9\uB85D\uC744 \uC131\uACF5\uC801\uC73C\uB85C \uAC00\uC838\uC654\uC2B5\uB2C8\uB2E4.",
@@ -702125,12 +702630,12 @@ var v1CommentList = (app) => {
           }
         };
       } catch (error) {
-        console.error("YouTube \uB313\uAE00 \uC2A4\uB808\uB4DC \uBAA9\uB85D \uC870\uD68C \uC5D0\uB7EC:", error);
-        set.status = 400;
-        return {
-          success: false,
-          message: error?.message || "\uB313\uAE00 \uC2A4\uB808\uB4DC \uBAA9\uB85D \uC870\uD68C \uC911 \uC624\uB958\uAC00 \uBC1C\uC0DD\uD558\uC600\uC2B5\uB2C8\uB2E4."
-        };
+        return handleYoutubeError(
+          "comment/list",
+          error,
+          set,
+          "\uB313\uAE00 \uC2A4\uB808\uB4DC \uBAA9\uB85D \uC870\uD68C \uC911 \uC624\uB958\uAC00 \uBC1C\uC0DD\uD558\uC600\uC2B5\uB2C8\uB2E4."
+        );
       }
     },
     {
@@ -702189,6 +702694,10 @@ var v1CommentList = (app) => {
         400: t.Object({
           success: t.Boolean(),
           message: t.String()
+        }),
+        429: t.Object({
+          success: t.Boolean(),
+          message: t.String()
         })
       }
     }
@@ -702202,15 +702711,15 @@ var v1CommentDelete = (app) => {
     "/comment/delete",
     async ({ body, set }) => {
       const commentId = String(body?.commentId ?? "").trim();
-      const accessToken = String(body?.accessToken ?? "").trim();
-      if (!commentId || commentId.length > 256) {
+      const accessToken = sanitizeYoutubeAccessToken(body?.accessToken);
+      if (!commentId || commentId.length > 256 || /[\s\x00-\x1f\x7f]/.test(commentId)) {
         set.status = 400;
         return {
           success: false,
           message: "\uC720\uD6A8\uD55C \uB313\uAE00 ID\uAC00 \uC81C\uACF5\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4."
         };
       }
-      if (!accessToken || accessToken.length > 4096) {
+      if (!accessToken) {
         set.status = 400;
         return {
           success: false,
@@ -702225,20 +702734,23 @@ var v1CommentDelete = (app) => {
           auth: oauth2Client,
           timeout: 1e4
         });
-        await youtube.comments.delete({
-          id: commentId
-        });
+        await executeYoutubeWithRetry(
+          () => youtube.comments.delete({
+            id: commentId
+          }),
+          2
+        );
         return {
           success: true,
           message: "\uB313\uAE00\uC774 \uC131\uACF5\uC801\uC73C\uB85C \uC0AD\uC81C\uB418\uC5C8\uC2B5\uB2C8\uB2E4."
         };
       } catch (error) {
-        console.error("YouTube \uB313\uAE00 \uC0AD\uC81C \uC5D0\uB7EC:", error);
-        set.status = 400;
-        return {
-          success: false,
-          message: error?.message || "\uB313\uAE00 \uC0AD\uC81C \uC911 \uC624\uB958\uAC00 \uBC1C\uC0DD\uD588\uC2B5\uB2C8\uB2E4."
-        };
+        return handleYoutubeError(
+          "comment/delete",
+          error,
+          set,
+          "\uB313\uAE00 \uC0AD\uC81C \uC911 \uC624\uB958\uAC00 \uBC1C\uC0DD\uD588\uC2B5\uB2C8\uB2E4."
+        );
       }
     },
     {
@@ -702276,6 +702788,10 @@ var v1CommentDelete = (app) => {
         401: t.Object({
           success: t.Boolean(),
           message: t.String()
+        }),
+        429: t.Object({
+          success: t.Boolean(),
+          message: t.String()
         })
       }
     }
@@ -702290,22 +702806,22 @@ var v1Reply = (app) => {
     async ({ body, set }) => {
       const parentId = String(body?.parentId ?? "").trim();
       const text = String(body?.text ?? "").trim();
-      const accessToken = String(body?.accessToken ?? "").trim();
-      if (!parentId || parentId.length > 256) {
+      const accessToken = sanitizeYoutubeAccessToken(body?.accessToken);
+      if (!parentId || parentId.length > 256 || /[\s\x00-\x1f\x7f]/.test(parentId)) {
         set.status = 400;
         return {
           success: false,
           message: "\uC720\uD6A8\uD55C parentId \uAC12\uC774 \uC81C\uACF5\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4."
         };
       }
-      if (!text) {
+      if (!text || text.length > 1e4) {
         set.status = 400;
         return {
           success: false,
           message: "\uB313\uAE00 \uB0B4\uC6A9\uC774 \uC81C\uACF5\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4."
         };
       }
-      if (!accessToken || accessToken.length > 4096) {
+      if (!accessToken) {
         set.status = 400;
         return {
           success: false,
@@ -702320,15 +702836,19 @@ var v1Reply = (app) => {
           auth: oauth2Client,
           timeout: 1e4
         });
-        const response = await youtube.comments.insert({
-          part: ["snippet"],
-          requestBody: {
-            snippet: {
-              textOriginal: text,
-              parentId
+        const response = await executeYoutubeWithRetry(
+          () => youtube.comments.insert({
+            part: ["snippet"],
+            requestBody: {
+              snippet: {
+                textOriginal: text,
+                parentId
+              }
             }
-          }
-        });
+          }),
+          1,
+          true
+        );
         return {
           success: true,
           message: "\uB2F5\uAE00\uC774 \uC131\uACF5\uC801\uC73C\uB85C \uB4F1\uB85D\uB418\uC5C8\uC2B5\uB2C8\uB2E4.",
@@ -702337,12 +702857,12 @@ var v1Reply = (app) => {
           }
         };
       } catch (error) {
-        console.error("YouTube \uB2F5\uAE00 \uC791\uC131 \uC5D0\uB7EC:", error);
-        set.status = 400;
-        return {
-          success: false,
-          message: error?.message || "\uB2F5\uAE00 \uC791\uC131 \uC911 \uC624\uB958\uAC00 \uBC1C\uC0DD\uD558\uC600\uC2B5\uB2C8\uB2E4."
-        };
+        return handleYoutubeError(
+          "reply",
+          error,
+          set,
+          "\uB2F5\uAE00 \uC791\uC131 \uC911 \uC624\uB958\uAC00 \uBC1C\uC0DD\uD558\uC600\uC2B5\uB2C8\uB2E4."
+        );
       }
     },
     {
@@ -702377,6 +702897,10 @@ var v1Reply = (app) => {
         400: t.Object({
           success: t.Boolean(),
           message: t.String()
+        }),
+        429: t.Object({
+          success: t.Boolean(),
+          message: t.String()
         })
       }
     }
@@ -702391,15 +702915,15 @@ var v1ReplyList = (app) => {
     async ({ body, set }) => {
       const { maxResults, pageToken } = body;
       const parentId = String(body?.parentId ?? "").trim();
-      const accessToken = String(body?.accessToken ?? "").trim();
-      if (!parentId || parentId.length > 256) {
+      const accessToken = sanitizeYoutubeAccessToken(body?.accessToken);
+      if (!parentId || parentId.length > 256 || /[\s\x00-\x1f\x7f]/.test(parentId)) {
         set.status = 400;
         return {
           success: false,
           message: "\uC720\uD6A8\uD55C \uB313\uAE00\uC758 Id \uAC12\uC774 \uC81C\uACF5\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4."
         };
       }
-      if (!accessToken || accessToken.length > 4096) {
+      if (!accessToken) {
         set.status = 400;
         return {
           success: false,
@@ -702429,13 +702953,15 @@ var v1ReplyList = (app) => {
           }
         }
         const cleanPageToken = typeof pageToken === "string" && pageToken.trim() ? pageToken.trim() : void 0;
-        const response = await youtube.comments.list({
-          part: ["snippet"],
-          // part 파라미터 추가
-          parentId,
-          maxResults: max,
-          pageToken: cleanPageToken
-        });
+        const response = await executeYoutubeWithRetry(
+          () => youtube.comments.list({
+            part: ["snippet"],
+            // part 파라미터 추가
+            parentId,
+            maxResults: max,
+            pageToken: cleanPageToken
+          })
+        );
         return {
           success: true,
           message: "\uD574\uB2F9 \uB313\uAE00\uC758 \uB300\uB313\uAE00 \uB9AC\uC2A4\uD2B8\uB97C \uC131\uACF5\uC801\uC73C\uB85C \uAC00\uC838\uC654\uC2B5\uB2C8\uB2E4.",
@@ -702473,12 +702999,12 @@ var v1ReplyList = (app) => {
           }
         };
       } catch (error) {
-        console.error("YouTube \uB313\uAE00 \uBAA9\uB85D \uC870\uD68C \uC5D0\uB7EC:", error);
-        set.status = 400;
-        return {
-          success: false,
-          message: error?.message || "\uB313\uAE00 \uBAA9\uB85D \uC870\uD68C \uC911 \uC624\uB958\uAC00 \uBC1C\uC0DD\uD558\uC600\uC2B5\uB2C8\uB2E4."
-        };
+        return handleYoutubeError(
+          "reply/list",
+          error,
+          set,
+          "\uB313\uAE00 \uBAA9\uB85D \uC870\uD68C \uC911 \uC624\uB958\uAC00 \uBC1C\uC0DD\uD558\uC600\uC2B5\uB2C8\uB2E4."
+        );
       }
     },
     {
@@ -702538,6 +703064,10 @@ var v1ReplyList = (app) => {
         400: t.Object({
           success: t.Boolean(),
           message: t.String()
+        }),
+        429: t.Object({
+          success: t.Boolean(),
+          message: t.String()
         })
       }
     }
@@ -702551,8 +703081,8 @@ var v1ChannelInfo = (app) => {
     "/channel/info",
     async ({ body, set }) => {
       const { maxResults, pageToken } = body;
-      const accessToken = String(body?.accessToken ?? "").trim();
-      if (!accessToken || accessToken.length > 4096) {
+      const accessToken = sanitizeYoutubeAccessToken(body?.accessToken);
+      if (!accessToken) {
         set.status = 400;
         return {
           success: false,
@@ -702582,12 +703112,14 @@ var v1ChannelInfo = (app) => {
           }
         }
         const cleanPageToken = typeof pageToken === "string" && pageToken.trim() ? pageToken.trim() : void 0;
-        const response = await youtube.channels.list({
-          part: ["snippet", "contentDetails", "statistics"],
-          mine: true,
-          maxResults: max,
-          pageToken: cleanPageToken
-        });
+        const response = await executeYoutubeWithRetry(
+          () => youtube.channels.list({
+            part: ["snippet", "contentDetails", "statistics"],
+            mine: true,
+            maxResults: max,
+            pageToken: cleanPageToken
+          })
+        );
         return {
           success: true,
           message: "\uCC44\uB110 \uC815\uBCF4\uB97C \uC131\uACF5\uC801\uC73C\uB85C \uAC00\uC838\uC654\uC2B5\uB2C8\uB2E4.",
@@ -702601,12 +703133,12 @@ var v1ChannelInfo = (app) => {
           }
         };
       } catch (error) {
-        console.error("YouTube \uCC44\uB110 \uC815\uBCF4 \uC870\uD68C \uC5D0\uB7EC:", error);
-        set.status = 400;
-        return {
-          success: false,
-          message: error?.message || "\uCC44\uB110 \uC815\uBCF4 \uC870\uD68C \uC911 \uC624\uB958\uAC00 \uBC1C\uC0DD\uD558\uC600\uC2B5\uB2C8\uB2E4."
-        };
+        return handleYoutubeError(
+          "channel/info",
+          error,
+          set,
+          "\uCC44\uB110 \uC815\uBCF4 \uC870\uD68C \uC911 \uC624\uB958\uAC00 \uBC1C\uC0DD\uD558\uC600\uC2B5\uB2C8\uB2E4."
+        );
       }
     },
     {
@@ -702647,6 +703179,10 @@ var v1ChannelInfo = (app) => {
           })
         }),
         400: t.Object({
+          success: t.Boolean(),
+          message: t.String()
+        }),
+        429: t.Object({
           success: t.Boolean(),
           message: t.String()
         })
@@ -702695,15 +703231,15 @@ var v1VideoList = (app) => {
     async ({ body, set }) => {
       const { maxResults, pageToken } = body;
       const handle = String(body?.handle ?? "").trim();
-      const accessToken = String(body?.accessToken ?? "").trim();
-      if (!handle || handle.length > 128) {
+      const accessToken = sanitizeYoutubeAccessToken(body?.accessToken);
+      if (!handle || handle.length > 128 || /[\s\x00-\x1f\x7f]/.test(handle)) {
         set.status = 400;
         return {
           success: false,
           message: "\uC720\uD6A8\uD55C handle \uAC12\uC774 \uC81C\uACF5\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4."
         };
       }
-      if (!accessToken || accessToken.length > 4096) {
+      if (!accessToken) {
         set.status = 400;
         return {
           success: false,
@@ -702729,14 +703265,18 @@ var v1VideoList = (app) => {
         let uploadsPlaylistId = getCachedUploadsPlaylistId(normalizedHandleKey);
         if (!uploadsPlaylistId) {
           const isHandleFormat = handle.startsWith("@");
-          let channelResponse = await youtube.channels.list(
-            isHandleFormat ? { part: ["contentDetails"], forHandle: handle } : { part: ["contentDetails"], forUsername: handle }
+          let channelResponse = await executeYoutubeWithRetry(
+            () => youtube.channels.list(
+              isHandleFormat ? { part: ["contentDetails"], forHandle: handle } : { part: ["contentDetails"], forUsername: handle }
+            )
           );
           if (!channelResponse.data.items?.length && !isHandleFormat) {
-            channelResponse = await youtube.channels.list({
-              part: ["contentDetails"],
-              forHandle: `@${handle}`
-            });
+            channelResponse = await executeYoutubeWithRetry(
+              () => youtube.channels.list({
+                part: ["contentDetails"],
+                forHandle: `@${handle}`
+              })
+            );
           }
           uploadsPlaylistId = channelResponse.data.items?.[0]?.contentDetails?.relatedPlaylists?.uploads ?? void 0;
           if (uploadsPlaylistId) {
@@ -702758,12 +703298,14 @@ var v1VideoList = (app) => {
           }
         }
         const cleanPageToken = typeof pageToken === "string" && pageToken.trim() ? pageToken.trim() : void 0;
-        const response = await youtube.playlistItems.list({
-          part: ["snippet", "contentDetails"],
-          playlistId: uploadsPlaylistId,
-          maxResults: max,
-          pageToken: cleanPageToken
-        });
+        const response = await executeYoutubeWithRetry(
+          () => youtube.playlistItems.list({
+            part: ["snippet", "contentDetails"],
+            playlistId: uploadsPlaylistId,
+            maxResults: max,
+            pageToken: cleanPageToken
+          })
+        );
         return {
           success: true,
           message: "\uCC44\uB110\uC758 \uB3D9\uC601\uC0C1 \uBAA9\uB85D\uC744 \uC131\uACF5\uC801\uC73C\uB85C \uAC00\uC838\uC654\uC2B5\uB2C8\uB2E4.",
@@ -702777,12 +703319,12 @@ var v1VideoList = (app) => {
           }
         };
       } catch (error) {
-        console.error("YouTube \uCC44\uB110 \uB3D9\uC601\uC0C1 \uC870\uD68C \uC5D0\uB7EC:", error);
-        set.status = 400;
-        return {
-          success: false,
-          message: error?.message || "\uCC44\uB110 \uB3D9\uC601\uC0C1 \uC870\uD68C \uC911 \uC624\uB958\uAC00 \uBC1C\uC0DD\uD558\uC600\uC2B5\uB2C8\uB2E4."
-        };
+        return handleYoutubeError(
+          "video/list",
+          error,
+          set,
+          "\uCC44\uB110 \uB3D9\uC601\uC0C1 \uC870\uD68C \uC911 \uC624\uB958\uAC00 \uBC1C\uC0DD\uD558\uC600\uC2B5\uB2C8\uB2E4."
+        );
       }
     },
     {
@@ -702827,6 +703369,10 @@ var v1VideoList = (app) => {
           })
         }),
         400: t.Object({
+          success: t.Boolean(),
+          message: t.String()
+        }),
+        429: t.Object({
           success: t.Boolean(),
           message: t.String()
         })
@@ -702913,7 +703459,7 @@ var PostgrestError = class extends Error {
     };
   }
 };
-function sleep(ms, signal) {
+function sleep3(ms, signal) {
   return new Promise((resolve) => {
     if (signal === null || signal === void 0 ? void 0 : signal.aborted) {
       resolve();
@@ -703109,7 +703655,7 @@ var PostgrestBuilder = class {
           if (_this.retryEnabled && attemptCount < DEFAULT_MAX_RETRIES) {
             const delay = getRetryDelay(attemptCount);
             attemptCount++;
-            await sleep(delay, _this.signal);
+            await sleep3(delay, _this.signal);
             continue;
           }
           throw fetchError;
@@ -703120,7 +703666,7 @@ var PostgrestBuilder = class {
           const delay = retryAfterHeader !== null ? Math.max(0, parseInt(retryAfterHeader, 10) || 0) * 1e3 : getRetryDelay(attemptCount);
           await res$1.text();
           attemptCount++;
-          await sleep(delay, _this.signal);
+          await sleep3(delay, _this.signal);
           continue;
         }
         return await _this.processResponse(res$1);
@@ -711493,6 +712039,7 @@ var OpenAICompatibleProvider = class {
     this.apiKey = opts.apiKey;
     this.defaultModel = opts.defaultModel;
     this.extraHeaders = opts.extraHeaders ?? {};
+    this.chunkTimeoutMs = opts.chunkTimeoutMs;
   }
   async *stream(req, signal) {
     const { resp, cleanupAttempt } = await this.fetchWithRetry(req, signal);
@@ -711504,9 +712051,36 @@ var OpenAICompatibleProvider = class {
     const decoder = new TextDecoder();
     let buffer = "";
     const MAX_SSE_BUFFER_CHARS2 = 256e3;
+    const effectiveChunkTimeoutMs = this.chunkTimeoutMs ?? envInt("LLM_CHUNK_TIMEOUT_MS", 25e3, 50, 55e3);
+    const readChunkWithTimeout = async () => {
+      if (!Number.isFinite(effectiveChunkTimeoutMs) || effectiveChunkTimeoutMs <= 0) {
+        return reader.read();
+      }
+      let chunkTimer;
+      let timedOutErr = null;
+      try {
+        const res = await Promise.race([
+          reader.read(),
+          new Promise((_, reject) => {
+            chunkTimer = setTimeout(() => {
+              timedOutErr = new Error(
+                `[${this.name}] STREAM_TIMEOUT: SSE stalled for ${effectiveChunkTimeoutMs}ms`
+              );
+              reject(timedOutErr);
+              void reader.cancel("STREAM_TIMEOUT").catch(() => {
+              });
+            }, effectiveChunkTimeoutMs);
+          })
+        ]);
+        if (timedOutErr) throw timedOutErr;
+        return res;
+      } finally {
+        if (chunkTimer !== void 0) clearTimeout(chunkTimer);
+      }
+    };
     try {
       while (true) {
-        const { value, done } = await reader.read();
+        const { value, done } = await readChunkWithTimeout();
         if (done) {
           buffer += decoder.decode();
           if (buffer.trim()) {
@@ -711629,7 +712203,7 @@ var OpenAICompatibleProvider = class {
         console.warn(
           `[${this.name}] ${timedOut ? "handshake timeout" : "network error"} \u2192 retry ${attempt + 1}/${maxRetries} in ${wait}ms`
         );
-        await sleep2(wait, signal);
+        await sleep4(wait, signal);
         continue;
       }
       if (resp.ok) {
@@ -711648,7 +712222,7 @@ var OpenAICompatibleProvider = class {
           console.warn(
             `[${this.name}] ${resp.status} \u2192 retry ${attempt + 1}/${maxRetries} in ${wait}ms`
           );
-          await sleep2(wait, signal);
+          await sleep4(wait, signal);
           continue;
         }
       }
@@ -711707,7 +712281,7 @@ function envInt(name, fallback, min, max) {
 function isAbortError(err) {
   return typeof err === "object" && err !== null && err.name === "AbortError";
 }
-function sleep2(ms, signal) {
+function sleep4(ms, signal) {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) return reject(abortError());
     const onAbort = () => {
@@ -711730,11 +712304,50 @@ function abortError() {
     });
   }
 }
-async function safeText(resp) {
+async function safeText(resp, maxBytes = 8192, timeoutMs = 3e3) {
+  if (!resp.body) return "";
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let text = "";
+  let totalBytes = 0;
+  let timer;
   try {
-    return await resp.text();
+    const readDeadline = new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        void reader.cancel().catch(() => {
+        });
+        reject(new Error("ERROR_BODY_TIMEOUT"));
+      }, timeoutMs);
+    });
+    while (true) {
+      const { done, value } = await Promise.race([reader.read(), readDeadline]);
+      if (done) {
+        text += decoder.decode();
+        break;
+      }
+      if (value && value.byteLength > 0) {
+        const remaining = maxBytes - totalBytes;
+        if (value.byteLength >= remaining) {
+          text += decoder.decode(value.subarray(0, remaining));
+          void reader.cancel().catch(() => {
+          });
+          break;
+        }
+        totalBytes += value.byteLength;
+        text += decoder.decode(value, { stream: true });
+      }
+    }
+    return text;
   } catch {
-    return "<unreadable body>";
+    return text || "<unreadable body>";
+  } finally {
+    if (timer !== void 0) clearTimeout(timer);
+    try {
+      reader.releaseLock();
+    } catch {
+    }
+    void resp.body.cancel().catch(() => {
+    });
   }
 }
 
@@ -711938,6 +712551,68 @@ var FailoverExhaustedError = class extends KeyManagerError {
     this.name = "FailoverExhaustedError";
   }
 };
+var MAX_UPSTREAM_ERROR_BODY_BYTES = 8192;
+async function readBoundedErrorBody(response, maxBytes, attemptSignal) {
+  if (!response.body) return "";
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let text = "";
+  let totalBytes = 0;
+  const readChunkRace = () => {
+    if (!attemptSignal) return reader.read();
+    if (attemptSignal.aborted) {
+      const reason = attemptSignal.reason;
+      return Promise.reject(reason instanceof Error ? reason : new Error("ATTEMPT_TIMEOUT"));
+    }
+    return new Promise((resolve, reject) => {
+      const onAbort = () => {
+        const reason = attemptSignal.reason;
+        void reader.cancel().catch(() => {
+        });
+        reject(reason instanceof Error ? reason : new Error("ATTEMPT_TIMEOUT"));
+      };
+      attemptSignal.addEventListener("abort", onAbort, { once: true });
+      reader.read().then(
+        (res) => {
+          attemptSignal.removeEventListener("abort", onAbort);
+          resolve(res);
+        },
+        (err) => {
+          attemptSignal.removeEventListener("abort", onAbort);
+          reject(err);
+        }
+      );
+    });
+  };
+  try {
+    while (true) {
+      const { done, value } = await readChunkRace();
+      if (done) {
+        text += decoder.decode();
+        break;
+      }
+      if (value && value.byteLength > 0) {
+        const remaining = maxBytes - totalBytes;
+        if (value.byteLength >= remaining) {
+          text += decoder.decode(value.subarray(0, remaining));
+          void reader.cancel().catch(() => {
+          });
+          break;
+        }
+        totalBytes += value.byteLength;
+        text += decoder.decode(value, { stream: true });
+      }
+    }
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {
+    }
+    void response.body.cancel().catch(() => {
+    });
+  }
+  return text;
+}
 function createAttemptSignal(timeoutMs, clientSignal) {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => {
@@ -712008,13 +712683,48 @@ async function executeWithResilientFailover(keyStore, keyConfigMap, requestFacto
     );
     try {
       const response = await requestFactory(config.apiKey, attemptSignal);
-      cleanupSignal();
       if (response.ok) {
+        cleanupSignal();
+        if (clientSignal?.aborted) {
+          void response.body?.cancel().catch(() => {
+          });
+          await keyStore.releaseKey(keyId, leaseToken, 499, 0, "Client stream aborted");
+          throw new KeyManagerError(
+            "CLIENT_ABORTED: Client disconnected during handshake.",
+            499,
+            void 0,
+            "CLIENT_ABORTED"
+          );
+        }
         await keyStore.acknowledgeHandshake(keyId, leaseToken);
+        if (clientSignal?.aborted) {
+          void response.body?.cancel().catch(() => {
+          });
+          await keyStore.releaseKey(keyId, leaseToken, 499, 0, "Client stream aborted");
+          throw new KeyManagerError(
+            "CLIENT_ABORTED: Client disconnected during handshake.",
+            499,
+            void 0,
+            "CLIENT_ABORTED"
+          );
+        }
         return { response, keyId, leaseToken };
       }
-      const errJson = await response.clone().json().catch(() => ({}));
-      const errText = !errJson?.error ? await response.text().catch(() => "") : JSON.stringify(errJson);
+      const rawErrBody = await readBoundedErrorBody(
+        response,
+        MAX_UPSTREAM_ERROR_BODY_BYTES,
+        attemptSignal
+      );
+      cleanupSignal();
+      let errJson = {};
+      if (rawErrBody.trim().startsWith("{")) {
+        try {
+          errJson = JSON.parse(rawErrBody);
+        } catch {
+          errJson = {};
+        }
+      }
+      const errText = errJson?.error ? JSON.stringify(errJson) : rawErrBody;
       const outageCheck = HealthAndCooldownEngine.isUpstreamProviderOutage(errJson);
       if (outageCheck.isOutage && (response.status === 429 || response.status === 503)) {
         await keyStore.releaseKey(
@@ -712063,7 +712773,12 @@ async function executeWithResilientFailover(keyStore, keyConfigMap, requestFacto
         0,
         `Client error (${response.status})`
       );
-      return { response, keyId, leaseToken };
+      const clientErrResponse = new Response(rawErrBody, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers
+      });
+      return { response: clientErrResponse, keyId, leaseToken };
     } catch (networkErr) {
       cleanupSignal();
       const isClientAbort = clientSignal?.aborted;
@@ -712127,6 +712842,19 @@ var MemoryKeyStore = class {
    * Matches HSETNX semantics: updates static configuration without overwriting active runtime states.
    */
   async syncKeys(keys) {
+    const activeIds = new Set(keys.map((k) => k.id));
+    for (const [existingId, existingRec] of this.records.entries()) {
+      if (!activeIds.has(existingId)) {
+        const activeLeases = this.leases.get(existingId)?.size ?? 0;
+        if (activeLeases === 0) {
+          this.records.delete(existingId);
+          this.leases.delete(existingId);
+          if (existingRec.config.accountId) {
+            this.accountKeys.get(existingRec.config.accountId)?.delete(existingId);
+          }
+        }
+      }
+    }
     for (const key of keys) {
       if (!this.leases.has(key.id)) {
         this.leases.set(key.id, /* @__PURE__ */ new Map());
@@ -713048,6 +713776,11 @@ var UpstashRedisKeyStore = class {
     // Storage circuit breaker state
     this.redisConsecutiveFailures = 0;
     this.storageBreakerOpenUntil = 0;
+    /**
+     * Permanent 402/401/403 exhaustions observed while Redis was unreachable / breaker-open,
+     * flushed back to Redis upon recovery so bankrupt keys are never resurrected.
+     */
+    this.pendingPermanentExhaustions = /* @__PURE__ */ new Map();
     if (typeof urlOrConfig === "object") {
       this.restUrl = urlOrConfig.restUrl.replace(/\/$/, "");
       this.restToken = urlOrConfig.restToken;
@@ -713068,9 +713801,11 @@ var UpstashRedisKeyStore = class {
   async syncKeys(keys) {
     await this.memoryFallback.syncKeys(keys);
     try {
-      const pipeline = [];
+      const pipeline = [["DEL", "openrouter:keys:list"]];
       const keyIds = keys.map((k) => k.id);
-      pipeline.push(["SADD", "openrouter:keys:list", ...keyIds]);
+      if (keyIds.length > 0) {
+        pipeline.push(["SADD", "openrouter:keys:list", ...keyIds]);
+      }
       for (const k of keys) {
         const hashKey = `openrouter:key:${k.id}`;
         pipeline.push([
@@ -713111,6 +713846,7 @@ var UpstashRedisKeyStore = class {
       return this.memoryFallback.reserveKey(modelOrExclude, maybeExclude);
     }
     try {
+      await this.flushPendingExhaustionsToRedis();
       const clientNonce = typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : "";
       const result = await this.evalLua(
         RESERVE_KEY_LUA,
@@ -713168,19 +713904,24 @@ var UpstashRedisKeyStore = class {
       errMsg = errorMessage ?? "";
     }
     if (this.isStorageBreakerOpen()) {
-      return this.memoryFallback.releaseKey(keyId, leaseToken, statusCode, cooldown, errMsg);
+      await this.memoryFallback.releaseKey(keyId, leaseToken, statusCode, cooldown, errMsg);
+      await this.queuePermanentExhaustionIfNeeded(keyId, statusCode, errMsg);
+      return;
     }
     try {
+      const safeStatus = typeof statusCode === "number" && Number.isFinite(statusCode) ? Math.trunc(statusCode) : 0;
+      const safeCooldown = typeof cooldown === "number" && Number.isFinite(cooldown) && cooldown >= 0 ? Math.floor(cooldown) : 0;
       await this.evalLua(
         RELEASE_KEY_LUA,
         [`openrouter:key:${keyId}`],
-        [leaseToken, statusCode, cooldown, errMsg.slice(0, 200)]
+        [leaseToken, safeStatus, safeCooldown, errMsg.slice(0, 200)]
       );
       this.recordSuccess();
       await this.memoryFallback.releaseKey(keyId, leaseToken, statusCode, cooldown, errMsg);
     } catch (err) {
       this.recordFailure(err);
       await this.memoryFallback.releaseKey(keyId, leaseToken, statusCode, cooldown, errMsg);
+      await this.queuePermanentExhaustionIfNeeded(keyId, statusCode, errMsg);
     }
   }
   /**
@@ -713252,6 +713993,14 @@ var UpstashRedisKeyStore = class {
   async resetKeyToActive(keyId) {
     const statesBefore = await this.memoryFallback.getAllStates();
     const accountId = statesBefore.find((s) => s.id === keyId)?.accountId;
+    this.pendingPermanentExhaustions.delete(keyId);
+    if (accountId) {
+      for (const st of statesBefore) {
+        if (st.accountId === accountId) {
+          this.pendingPermanentExhaustions.delete(st.id);
+        }
+      }
+    }
     await this.memoryFallback.resetKeyToActive(keyId);
     if (this.isStorageBreakerOpen()) return;
     try {
@@ -713281,6 +714030,65 @@ var UpstashRedisKeyStore = class {
     }
   }
   // --- Internal Fail-Open Circuit Breaker & HTTP Transport ---
+  async queuePermanentExhaustionIfNeeded(keyId, statusCode, errMsg) {
+    if (statusCode !== 402 && statusCode !== 401 && statusCode !== 403) {
+      return;
+    }
+    this.pendingPermanentExhaustions.set(keyId, {
+      statusCode,
+      errMsg: errMsg.slice(0, 200)
+    });
+  }
+  async flushPendingExhaustionsToRedis() {
+    if (this.pendingPermanentExhaustions.size === 0) return;
+    const states = await this.memoryFallback.getAllStates();
+    const stateMap = new Map(states.map((s) => [s.id, s]));
+    const pipeline = [];
+    for (const [keyId, info] of this.pendingPermanentExhaustions.entries()) {
+      const st = stateMap.get(keyId);
+      if (st && st.status !== "EXHAUSTED") {
+        continue;
+      }
+      const hashKey = `openrouter:key:${keyId}`;
+      pipeline.push([
+        "HSET",
+        hashKey,
+        "state",
+        "EXHAUSTED",
+        "last_error_code",
+        String(info.statusCode),
+        "last_error_message",
+        info.errMsg
+      ]);
+      if (info.statusCode === 402 && st?.accountId) {
+        pipeline.push([
+          "SET",
+          `openrouter:account:${st.accountId}:broken`,
+          "1",
+          "EX",
+          "86400"
+        ]);
+        for (const sib of states) {
+          if (sib.accountId === st.accountId && sib.id !== keyId) {
+            pipeline.push([
+              "HSET",
+              `openrouter:key:${sib.id}`,
+              "state",
+              "EXHAUSTED",
+              "last_error_code",
+              "402",
+              "last_error_message",
+              "Account credit balance exhausted"
+            ]);
+          }
+        }
+      }
+    }
+    if (pipeline.length > 0) {
+      await this.execPipeline(pipeline);
+    }
+    this.pendingPermanentExhaustions.clear();
+  }
   isStorageBreakerOpen() {
     return Date.now() < this.storageBreakerOpenUntil;
   }
@@ -713298,13 +714106,18 @@ var UpstashRedisKeyStore = class {
     }
   }
   async evalLua(script, keys, args) {
+    const safeArgs = args.map((a) => {
+      if (a === null || a === void 0) return "";
+      if (typeof a === "number") return Number.isFinite(a) ? a : 0;
+      return a;
+    });
     const res = await fetch(`${this.restUrl}/eval`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${this.restToken}`,
         "Content-Type": "application/json"
       },
-      body: JSON.stringify([script, keys.length, ...keys, ...args]),
+      body: JSON.stringify([script, keys.length, ...keys, ...safeArgs]),
       signal: AbortSignal.timeout(this.timeoutMs)
     });
     if (!res.ok) {
@@ -713405,10 +714218,14 @@ var PRESETS = {
 var cachedRotatingProvider = null;
 var cachedRotatingSignature = null;
 var cachedKeyStore = null;
+var cachedKeyStoreSig = null;
 function getKeyStore() {
-  if (cachedKeyStore) return cachedKeyStore;
-  const redisUrl = process.env.UPSTASH_REDIS_REST_URL?.trim();
-  const redisToken = process.env.UPSTASH_REDIS_REST_TOKEN?.trim();
+  const redisUrl = process.env.UPSTASH_REDIS_REST_URL?.trim() ?? "";
+  const redisToken = process.env.UPSTASH_REDIS_REST_TOKEN?.trim() ?? "";
+  const storeSig = redisUrl && redisToken ? `redis:${redisUrl}\0${redisToken}` : "memory";
+  if (cachedKeyStore && cachedKeyStoreSig === storeSig) {
+    return cachedKeyStore;
+  }
   if (redisUrl && redisToken) {
     cachedKeyStore = new UpstashRedisKeyStore(redisUrl, redisToken, {
       timeoutMs: 500
@@ -713416,6 +714233,7 @@ function getKeyStore() {
   } else {
     cachedKeyStore = new MemoryKeyStore();
   }
+  cachedKeyStoreSig = storeSig;
   return cachedKeyStore;
 }
 function parseKeyConfigsFromEnv() {
@@ -713726,393 +714544,6 @@ create policy "widget-icons service-role write"
 `
   }
 ];
-
-// lib/queue/fallback-queue.ts
-function calculateFullJitterBackoff(attempt, baseMs = 500, maxMs = 3e4, retryAfterMs) {
-  const safeBaseMs = Number.isFinite(baseMs) && baseMs > 0 ? baseMs : 500;
-  const safeMaxMs = Number.isFinite(maxMs) && maxMs > 0 ? maxMs : 3e4;
-  const safeAttempt = Number.isFinite(attempt) ? Math.max(0, Math.floor(attempt)) : 0;
-  if (typeof retryAfterMs === "number" && Number.isFinite(retryAfterMs) && retryAfterMs > 0) {
-    const jitter = Math.floor(Math.random() * 200) + 50;
-    return Math.min(safeMaxMs, Math.max(10, Math.floor(retryAfterMs + jitter)));
-  }
-  const expCap = Math.min(safeMaxMs, safeBaseMs * Math.pow(2, Math.min(30, safeAttempt)));
-  return Math.max(10, Math.floor(Math.random() * expCap));
-}
-function is429OrQuotaError(err) {
-  if (!err) return false;
-  if (typeof err === "string") {
-    const s = err.toLowerCase();
-    return s.includes("429") || s.includes("too many requests") || s.includes("rate limit") || s.includes("quota exceeded") || s.includes("exceeded quota") || s.includes("temporarily blocked") || s.includes("throttled") || s.includes("mailbox busy") || s.includes("try again later") || s.includes("resource has been exhausted") || s.includes("all_keys_rate_limited");
-  }
-  if (typeof err === "object") {
-    const anyErr = err;
-    if (anyErr.status === 429 || anyErr.statusCode === 429) return true;
-    if (anyErr.response?.status === 429 || anyErr.response?.statusCode === 429) return true;
-    const rawCode = anyErr.responseCode ?? anyErr.code;
-    const smtpCode = Number(rawCode);
-    if (Number.isFinite(smtpCode) && [421, 450, 451, 452].includes(smtpCode)) {
-      return true;
-    }
-    const codeStr = String(anyErr.code ?? anyErr.statusCode ?? anyErr.error?.code ?? "").toUpperCase();
-    if (codeStr === "429" || codeStr === "RATE_LIMIT_EXCEEDED" || codeStr === "ALL_KEYS_RATE_LIMITED" || codeStr === "QUOTA_EXCEEDED" || codeStr === "RESOURCE_EXHAUSTED") {
-      return true;
-    }
-    const candidates = [
-      anyErr.message,
-      typeof anyErr.error === "string" ? anyErr.error : anyErr.error?.message,
-      anyErr.response?.data?.message,
-      anyErr.response?.data?.error,
-      anyErr.cause?.message,
-      typeof anyErr.toString === "function" ? anyErr.toString() : ""
-    ];
-    const message = candidates.filter(Boolean).join(" ").toLowerCase();
-    if (message.includes("429") || message.includes("too many requests") || message.includes("rate limit") || message.includes("quota exceeded") || message.includes("exceeded quota") || message.includes("temporarily blocked") || message.includes("throttled") || message.includes("mailbox busy") || message.includes("try again later") || message.includes("resource has been exhausted") || message.includes("all_keys_rate_limited")) {
-      return true;
-    }
-  }
-  return false;
-}
-function extractRetryAfterMs(err) {
-  if (!err || typeof err !== "object") return void 0;
-  const anyErr = err;
-  const rawHeader = anyErr.retryAfterMs ?? (typeof anyErr.retryAfterSeconds === "number" && anyErr.retryAfterSeconds > 0 ? anyErr.retryAfterSeconds * 1e3 : void 0) ?? anyErr.retry_after ?? anyErr.retryAfter ?? anyErr.response?.data?.retry_after ?? anyErr.response?.data?.retryAfter ?? anyErr.headers?.get?.("retry-after") ?? anyErr.headers?.get?.("Retry-After") ?? anyErr.headers?.["retry-after"] ?? anyErr.headers?.["Retry-After"] ?? anyErr.response?.headers?.get?.("retry-after") ?? anyErr.response?.headers?.get?.("Retry-After") ?? anyErr.response?.headers?.["retry-after"] ?? anyErr.response?.headers?.["Retry-After"];
-  if (typeof rawHeader === "number" && Number.isFinite(rawHeader)) {
-    if (rawHeader <= 0) return void 0;
-    if (anyErr.retryAfterMs !== void 0 || anyErr.retryAfterSeconds !== void 0) {
-      return Math.ceil(rawHeader);
-    }
-    if (rawHeader > 1e12) {
-      const delta = rawHeader - Date.now();
-      return delta > 0 ? Math.ceil(delta) : void 0;
-    }
-    if (rawHeader > 1e9) {
-      const delta = rawHeader * 1e3 - Date.now();
-      return delta > 0 ? Math.ceil(delta) : void 0;
-    }
-    return rawHeader > 1e3 ? Math.ceil(rawHeader) : Math.ceil(rawHeader * 1e3);
-  }
-  if (typeof rawHeader === "string") {
-    const trimmed = rawHeader.trim();
-    if (/^\d+(\.\d+)?$/.test(trimmed)) {
-      const sec = parseFloat(trimmed);
-      if (!isNaN(sec) && Number.isFinite(sec) && sec > 0) {
-        if (sec > 1e9) {
-          const delta = sec * 1e3 - Date.now();
-          return delta > 0 ? Math.ceil(delta) : void 0;
-        }
-        return Math.ceil(sec * 1e3);
-      }
-    }
-    const timestamp = Date.parse(trimmed);
-    if (!isNaN(timestamp) && Number.isFinite(timestamp)) {
-      const delta = timestamp - Date.now();
-      return delta > 0 ? Math.ceil(delta) : void 0;
-    }
-  }
-  return void 0;
-}
-function generateJobId() {
-  return `job-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`;
-}
-var FallbackQueue = class {
-  // idempotencyKey -> jobId
-  constructor(queueType = "general", maxCapacity = 5e3) {
-    this.jobs = /* @__PURE__ */ new Map();
-    this.idempotencyMap = /* @__PURE__ */ new Map();
-    this.queueType = queueType;
-    this.maxCapacity = Number.isFinite(maxCapacity) && maxCapacity > 0 ? Math.floor(maxCapacity) : 5e3;
-  }
-  /**
-   * Enqueue a job into the fallback queue.
-   */
-  enqueue(payload, options = {}) {
-    const idempotencyKey = options.idempotencyKey;
-    if (idempotencyKey) {
-      const existingId = this.idempotencyMap.get(idempotencyKey);
-      if (existingId) {
-        const existingJob = this.jobs.get(existingId);
-        if (existingJob && existingJob.status !== "failed") {
-          return existingJob;
-        }
-      }
-    }
-    if (this.jobs.size >= this.maxCapacity) {
-      let idToEvict;
-      for (const [id, job2] of this.jobs) {
-        if (job2.status === "failed") {
-          idToEvict = id;
-          break;
-        }
-      }
-      if (idToEvict === void 0) {
-        for (const [id, job2] of this.jobs) {
-          if (job2.status === "pending") {
-            idToEvict = id;
-            break;
-          }
-        }
-      }
-      if (idToEvict === void 0) {
-        idToEvict = this.jobs.keys().next().value;
-      }
-      if (idToEvict !== void 0) {
-        const evicted = this.jobs.get(idToEvict);
-        if (evicted?.idempotencyKey && this.idempotencyMap.get(evicted.idempotencyKey) === evicted.id) {
-          this.idempotencyMap.delete(evicted.idempotencyKey);
-        }
-        this.jobs.delete(idToEvict);
-      }
-    }
-    const now = Date.now();
-    const delay = options.initialDelayMs ?? calculateFullJitterBackoff(0);
-    const job = {
-      id: generateJobId(),
-      type: options.type ?? this.queueType,
-      payload,
-      attempts: 0,
-      maxAttempts: options.maxAttempts ?? 5,
-      createdAt: now,
-      nextRetryAt: now + delay,
-      backoffMs: delay,
-      status: "pending",
-      lastError: options.lastError,
-      idempotencyKey
-    };
-    this.jobs.set(job.id, job);
-    if (idempotencyKey) {
-      this.idempotencyMap.set(idempotencyKey, job.id);
-    }
-    return job;
-  }
-  /**
-   * O(1)-best-case check for whether at least one pending job is ready for retry,
-   * avoiding full-queue array allocations on hot request paths.
-   */
-  hasReadyJobs(now = Date.now()) {
-    for (const job of this.jobs.values()) {
-      if (job.status === "pending" && job.nextRetryAt <= now) {
-        return true;
-      }
-    }
-    return false;
-  }
-  /**
-   * Retrieve all jobs ready for retry (status === "pending" && nextRetryAt <= now).
-   */
-  getReadyJobs(now = Date.now()) {
-    const ready = [];
-    for (const job of this.jobs.values()) {
-      if (job.status === "pending" && job.nextRetryAt <= now) {
-        ready.push(job);
-      }
-    }
-    return ready;
-  }
-  /**
-   * Atomically claims the next ready job for processing to prevent race conditions.
-   * Can optionally exclude already-attempted job IDs in the current drain pass.
-   */
-  claimNextReady(now = Date.now(), excludeIds) {
-    for (const job of this.jobs.values()) {
-      if (excludeIds && excludeIds.has(job.id)) continue;
-      if (job.status === "pending" && job.nextRetryAt <= now) {
-        job.status = "processing";
-        return job;
-      }
-    }
-    return void 0;
-  }
-  markProcessing(id) {
-    const job = this.jobs.get(id);
-    if (job && job.status === "pending") {
-      job.status = "processing";
-    }
-    return job;
-  }
-  markSucceeded(id) {
-    const job = this.jobs.get(id);
-    if (job) {
-      job.status = "succeeded";
-      if (job.idempotencyKey && this.idempotencyMap.get(job.idempotencyKey) === job.id) {
-        this.idempotencyMap.delete(job.idempotencyKey);
-      }
-      this.jobs.delete(id);
-      return true;
-    }
-    return false;
-  }
-  markFailed(id, err, baseMs = 500, maxMs = 3e4) {
-    const job = this.jobs.get(id);
-    if (!job) return void 0;
-    job.attempts += 1;
-    job.lastError = err instanceof Error ? err.message : String(err);
-    if (job.attempts >= job.maxAttempts) {
-      job.status = "failed";
-    } else {
-      job.status = "pending";
-      const retryAfterMs = extractRetryAfterMs(err);
-      const backoff = calculateFullJitterBackoff(job.attempts, baseMs, maxMs, retryAfterMs);
-      job.backoffMs = backoff;
-      job.nextRetryAt = Date.now() + backoff;
-    }
-    return job;
-  }
-  /**
-   * Drain / process pending jobs sequentially with atomic claim to prevent double-execution.
-   * Excludes failed/retried jobs from tight infinite loops within the same drain pass.
-   * Optional `maxBatchSize` bounds synchronous request-path drains to prevent serverless timeouts.
-   */
-  async processPending(handler2, now = Date.now(), maxBatchSize = Infinity) {
-    let processed = 0;
-    let succeeded = 0;
-    let failed = 0;
-    const attemptedIds = /* @__PURE__ */ new Set();
-    const safeBatch = Number.isFinite(maxBatchSize) && maxBatchSize > 0 ? Math.floor(maxBatchSize) : Infinity;
-    let job;
-    while (processed < safeBatch && (job = this.claimNextReady(now, attemptedIds)) !== void 0) {
-      attemptedIds.add(job.id);
-      processed++;
-      try {
-        const ok = await handler2(job);
-        if (ok !== false) {
-          this.markSucceeded(job.id);
-          succeeded++;
-        } else {
-          this.markFailed(job.id, new Error("Handler returned false"));
-          failed++;
-        }
-      } catch (err) {
-        this.markFailed(job.id, err);
-        failed++;
-      }
-    }
-    return { processed, succeeded, failed };
-  }
-  get(id) {
-    return this.jobs.get(id);
-  }
-  getAllJobs() {
-    return Array.from(this.jobs.values());
-  }
-  getPendingCount() {
-    let count = 0;
-    for (const job of this.jobs.values()) {
-      if (job.status === "pending" || job.status === "processing") count++;
-    }
-    return count;
-  }
-  get size() {
-    return this.jobs.size;
-  }
-  /**
-   * Actively prune dead/failed jobs or jobs older than maxAgeMs (excluding in-flight processing jobs).
-   */
-  prune(maxAgeMs = 24 * 60 * 60 * 1e3, now = Date.now()) {
-    const safeMaxAge = Number.isFinite(maxAgeMs) && maxAgeMs > 0 ? maxAgeMs : 24 * 60 * 60 * 1e3;
-    const safeNow = Number.isFinite(now) ? now : Date.now();
-    let pruned = 0;
-    for (const [id, job] of this.jobs.entries()) {
-      if (job.status !== "processing" && (job.status === "failed" || safeNow - job.createdAt >= safeMaxAge)) {
-        if (job.idempotencyKey && this.idempotencyMap.get(job.idempotencyKey) === job.id) {
-          this.idempotencyMap.delete(job.idempotencyKey);
-        }
-        this.jobs.delete(id);
-        pruned++;
-      }
-    }
-    return pruned;
-  }
-  clear() {
-    this.jobs.clear();
-    this.idempotencyMap.clear();
-  }
-};
-var mailFallbackQueue = new FallbackQueue("mail", 5e3);
-var smsFallbackQueue = new FallbackQueue("sms", 5e3);
-var dbFallbackQueue = new FallbackQueue("db", 5e3);
-var generalFallbackQueue = new FallbackQueue("general", 5e3);
-var sleep3 = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-async function executeWithFallback(action, options = {}) {
-  const maxRetries = options.maxRetries ?? 3;
-  const baseDelayMs = options.baseDelayMs ?? 200;
-  const maxDelayMs = options.maxDelayMs ?? 5e3;
-  let lastError = null;
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    try {
-      const result = await action();
-      return {
-        success: true,
-        result,
-        attempts: attempt + 1
-      };
-    } catch (err) {
-      lastError = err;
-      const isRateLimited = is429OrQuotaError(err);
-      if (!isRateLimited) {
-        throw err;
-      }
-      if (attempt < maxRetries) {
-        const retryAfterMs = extractRetryAfterMs(err);
-        const backoff = calculateFullJitterBackoff(attempt, baseDelayMs, maxDelayMs, retryAfterMs);
-        await sleep3(backoff);
-      }
-    }
-  }
-  if (options.queue && options.fallbackPayload !== void 0) {
-    const job = options.queue.enqueue(options.fallbackPayload, {
-      type: options.type,
-      idempotencyKey: options.idempotencyKey,
-      lastError: lastError instanceof Error ? lastError.message : String(lastError)
-    });
-    options.onEnqueue?.(job);
-    return {
-      success: true,
-      queued: true,
-      job,
-      attempts: maxRetries + 1
-    };
-  }
-  return {
-    success: false,
-    error: lastError instanceof Error ? lastError : new Error(String(lastError)),
-    attempts: maxRetries + 1
-  };
-}
-var defaultDbInsertHandler = null;
-function registerDefaultDbHandler(fn) {
-  defaultDbInsertHandler = fn;
-}
-function getQueuedMessagesForThread(threadId) {
-  if (!threadId || dbFallbackQueue.size === 0) return [];
-  return dbFallbackQueue.getAllJobs().filter(
-    (job) => (job.status === "pending" || job.status === "processing") && job.payload?.threadId === threadId && job.type === "db_chat_message"
-  ).map((job, idx) => ({
-    id: -(idx + 1),
-    thread_id: threadId,
-    role: job.payload.role,
-    content: job.payload.content,
-    created_at: job.payload.createdAt || new Date(job.createdAt).toISOString()
-  }));
-}
-function getQueuedMessagesForThreads(threadIds) {
-  if (threadIds.size === 0 || dbFallbackQueue.size === 0) return [];
-  const results = [];
-  let idx = 0;
-  for (const job of dbFallbackQueue.getAllJobs()) {
-    if ((job.status === "pending" || job.status === "processing") && job.type === "db_chat_message" && typeof job.payload?.threadId === "string" && threadIds.has(job.payload.threadId)) {
-      idx++;
-      results.push({
-        id: -idx,
-        thread_id: job.payload.threadId,
-        role: job.payload.role,
-        content: job.payload.content,
-        created_at: job.payload.createdAt || new Date(job.createdAt).toISOString()
-      });
-    }
-  }
-  return results;
-}
 
 // lib/chat-store.ts
 var MAX_STORE_ID_CHARS = 100;
@@ -714594,18 +715025,18 @@ async function listWidgetsRegistered() {
 async function upsertWidget(input) {
   const id = (input.id ?? "").trim();
   if (!id) return { row: null, error: "id required" };
-  if (id.length > MAX_WIDGET_ID_CHARS) {
+  if (id.length > MAX_WIDGET_ID_CHARS || /[\x00-\x1f\x7f]/.test(id)) {
     return {
       row: null,
-      error: `id exceeds maximum length of ${MAX_WIDGET_ID_CHARS} characters`
+      error: id.length > MAX_WIDGET_ID_CHARS ? `id exceeds maximum length of ${MAX_WIDGET_ID_CHARS} characters` : "invalid id (control characters prohibited)"
     };
   }
   const patch = { id, is_deleted: false };
   if (input.name !== void 0) {
-    if (input.name.length > MAX_WIDGET_NAME_CHARS) {
+    if (input.name.length > MAX_WIDGET_NAME_CHARS || input.name.includes("\0")) {
       return {
         row: null,
-        error: `name exceeds maximum length of ${MAX_WIDGET_NAME_CHARS} characters`
+        error: input.name.includes("\0") ? "invalid name (null bytes prohibited)" : `name exceeds maximum length of ${MAX_WIDGET_NAME_CHARS} characters`
       };
     }
     patch.name = input.name;
@@ -714620,28 +715051,28 @@ async function upsertWidget(input) {
     patch.theme = input.theme;
   }
   if (input.description !== void 0) {
-    if (input.description.length > MAX_WIDGET_DESC_CHARS) {
+    if (input.description.length > MAX_WIDGET_DESC_CHARS || input.description.includes("\0")) {
       return {
         row: null,
-        error: `description exceeds maximum length of ${MAX_WIDGET_DESC_CHARS} characters`
+        error: input.description.includes("\0") ? "invalid description (null bytes prohibited)" : `description exceeds maximum length of ${MAX_WIDGET_DESC_CHARS} characters`
       };
     }
     patch.description = input.description;
   }
   if (input.welcome_message !== void 0) {
-    if (input.welcome_message.length > MAX_WIDGET_WELCOME_CHARS) {
+    if (input.welcome_message.length > MAX_WIDGET_WELCOME_CHARS || input.welcome_message.includes("\0")) {
       return {
         row: null,
-        error: `welcome_message exceeds maximum length of ${MAX_WIDGET_WELCOME_CHARS} characters`
+        error: input.welcome_message.includes("\0") ? "invalid welcome_message (null bytes prohibited)" : `welcome_message exceeds maximum length of ${MAX_WIDGET_WELCOME_CHARS} characters`
       };
     }
     patch.welcome_message = input.welcome_message;
   }
   if (input.system_prompt !== void 0) {
-    if (typeof input.system_prompt === "string" && input.system_prompt.length > MAX_WIDGET_SYSTEM_PROMPT_CHARS) {
+    if (typeof input.system_prompt === "string" && (input.system_prompt.length > MAX_WIDGET_SYSTEM_PROMPT_CHARS || input.system_prompt.includes("\0"))) {
       return {
         row: null,
-        error: `system_prompt exceeds maximum length of ${MAX_WIDGET_SYSTEM_PROMPT_CHARS} characters`
+        error: input.system_prompt.includes("\0") ? "invalid system_prompt (null bytes prohibited)" : `system_prompt exceeds maximum length of ${MAX_WIDGET_SYSTEM_PROMPT_CHARS} characters`
       };
     }
     patch.system_prompt = input.system_prompt;
@@ -714654,11 +715085,11 @@ async function upsertWidget(input) {
       };
     }
     if (input.suggested_questions.some(
-      (q) => typeof q !== "string" || q.length > MAX_SUGGESTED_QUESTION_CHARS
+      (q) => typeof q !== "string" || q.length > MAX_SUGGESTED_QUESTION_CHARS || q.includes("\0")
     )) {
       return {
         row: null,
-        error: `suggested_questions item exceeds maximum length of ${MAX_SUGGESTED_QUESTION_CHARS} characters`
+        error: `suggested_questions item exceeds maximum length of ${MAX_SUGGESTED_QUESTION_CHARS} characters or contains null bytes`
       };
     }
     patch.suggested_questions = input.suggested_questions;
@@ -714753,6 +715184,24 @@ var v2WidgetEndpoints = async (app) => {
         set
       }) => {
         const MAX_VIEW_AUX_CHARS = 2e3;
+        if (body !== void 0 && body !== null && (typeof body !== "object" || Array.isArray(body))) {
+          let rawBody = "";
+          try {
+            rawBody = typeof body === "string" ? body : JSON.stringify(body) ?? "";
+          } catch {
+            set.status = 400;
+            return { success: false, error: "malformed request body" };
+          }
+          if (rawBody.length > MAX_VIEW_AUX_CHARS) {
+            set.status = 413;
+            return {
+              success: false,
+              error: `request body too large (${rawBody.length} > ${MAX_VIEW_AUX_CHARS} chars)`
+            };
+          }
+          set.status = 400;
+          return { success: false, error: "request body must be a JSON object" };
+        }
         const rawWidgetId = body?.widgetId;
         const rawThreadId = body?.threadId;
         if (rawWidgetId !== void 0 && rawWidgetId !== null) {
@@ -714848,12 +715297,7 @@ var v2WidgetEndpoints = async (app) => {
         };
       },
       {
-        body: t.Optional(
-          t.Object({
-            widgetId: t.Optional(t.Any()),
-            threadId: t.Optional(t.Any())
-          })
-        ),
+        body: t.Optional(t.Any()),
         detail: {
           tags: ["API"],
           description: "Widget config + restored thread messages"
@@ -714866,7 +715310,52 @@ var v2WidgetEndpoints = async (app) => {
         body,
         set
       }) => {
+        const MAX_CREATE_THREAD_CHARS = 4e3;
+        if (body !== void 0 && body !== null && (typeof body !== "object" || Array.isArray(body))) {
+          let rawBody = "";
+          try {
+            rawBody = typeof body === "string" ? body : JSON.stringify(body) ?? "";
+          } catch {
+            set.status = 403;
+            return { success: false, error: "unregistered widget_id" };
+          }
+          if (rawBody.length > MAX_CREATE_THREAD_CHARS) {
+            set.status = 413;
+            return {
+              success: false,
+              error: `payload too large (${rawBody.length} > ${MAX_CREATE_THREAD_CHARS} chars)`
+            };
+          }
+          set.status = 403;
+          return { success: false, error: "unregistered widget_id" };
+        }
         const rawWidgetId = body?.widgetId;
+        if (rawWidgetId !== void 0 && rawWidgetId !== null) {
+          if (typeof rawWidgetId === "string") {
+            if (rawWidgetId.length > MAX_CREATE_THREAD_CHARS) {
+              set.status = 413;
+              return {
+                success: false,
+                error: `widgetId too large (${rawWidgetId.length} > ${MAX_CREATE_THREAD_CHARS} chars)`
+              };
+            }
+          } else {
+            let serializedWid = "";
+            try {
+              serializedWid = JSON.stringify(rawWidgetId) ?? "";
+            } catch {
+              set.status = 403;
+              return { success: false, error: "unregistered widget_id" };
+            }
+            if (serializedWid.length > MAX_CREATE_THREAD_CHARS) {
+              set.status = 413;
+              return {
+                success: false,
+                error: `widgetId too large (${serializedWid.length} > ${MAX_CREATE_THREAD_CHARS} chars)`
+              };
+            }
+          }
+        }
         const widgetId = (typeof rawWidgetId === "string" ? rawWidgetId : "").trim();
         let widgetMaster = null;
         try {
@@ -714893,9 +715382,7 @@ var v2WidgetEndpoints = async (app) => {
         return { success: true, threadId, thread_id: threadId };
       },
       {
-        body: t.Optional(
-          t.Object({ widgetId: t.Optional(t.Any()) })
-        ),
+        body: t.Optional(t.Any()),
         detail: {
           tags: ["API"],
           description: "Allocate a new persisted thread id"
@@ -714905,6 +715392,31 @@ var v2WidgetEndpoints = async (app) => {
     app2.post(
       "/ask",
       async ({ body, set, request }) => {
+        const MAX_MESSAGE_CHARS = 4e3;
+        if (body !== void 0 && body !== null && (typeof body !== "object" || Array.isArray(body))) {
+          let rawBody = "";
+          try {
+            rawBody = typeof body === "string" ? body : JSON.stringify(body) ?? "";
+          } catch {
+            set.status = 403;
+            return {
+              success: false,
+              error: "unregistered widget_id \u2014 register it via /v2/admin/widgets/upsert first"
+            };
+          }
+          if (rawBody.length > MAX_MESSAGE_CHARS) {
+            set.status = 413;
+            return {
+              success: false,
+              error: `message too long (${rawBody.length} > ${MAX_MESSAGE_CHARS} chars)`
+            };
+          }
+          set.status = 403;
+          return {
+            success: false,
+            error: "unregistered widget_id \u2014 register it via /v2/admin/widgets/upsert first"
+          };
+        }
         const rawWidgetId = body?.widgetId;
         const widgetId = (typeof rawWidgetId === "string" ? rawWidgetId : "").trim();
         const rawMessage = body?.message;
@@ -714912,7 +715424,6 @@ var v2WidgetEndpoints = async (app) => {
         let hasNonStringMessage = false;
         const rawThreadId = body?.threadId;
         let threadId = "";
-        const MAX_MESSAGE_CHARS = 4e3;
         if (typeof rawMessage === "string") {
           userMessage = rawMessage;
           if (userMessage.length > MAX_MESSAGE_CHARS) {
@@ -715028,7 +715539,10 @@ var v2WidgetEndpoints = async (app) => {
             error: "message required"
           };
         }
+        const MAX_HISTORY_MESSAGES = 10;
+        const MAX_HISTORY_CHARS = 16e3;
         let existingThread = null;
+        let createdFreshThread = false;
         if (threadId) {
           existingThread = await getThread(threadId, widgetId);
           if (existingThread) {
@@ -715038,14 +715552,37 @@ var v2WidgetEndpoints = async (app) => {
           }
         }
         if (!threadId) {
-          threadId = await createThread(widgetId) ?? "";
+          const allocated = await createThread(widgetId);
+          threadId = allocated ?? "";
+          if (threadId) {
+            createdFreshThread = true;
+          }
         }
+        let persistedUser = false;
         if (threadId && userMessage) {
-          await appendMessage(threadId, "user", userMessage);
+          const appendRes = await appendMessage(threadId, "user", userMessage);
+          persistedUser = appendRes !== false;
         }
-        const history = threadId ? await listMessages(threadId) : [];
-        const MAX_HISTORY_MESSAGES = 10;
-        const MAX_HISTORY_CHARS = 16e3;
+        const rawHistory = !threadId ? [] : createdFreshThread && persistedUser && dbFallbackQueue.size === 0 ? [
+          {
+            id: 1,
+            thread_id: threadId,
+            role: "user",
+            content: userMessage,
+            created_at: (/* @__PURE__ */ new Date()).toISOString()
+          }
+        ] : await listMessages(threadId, MAX_HISTORY_MESSAGES);
+        const lastHist = rawHistory[rawHistory.length - 1];
+        const history = !lastHist || lastHist.role !== "user" || lastHist.content !== userMessage ? [
+          ...rawHistory,
+          {
+            id: 0,
+            thread_id: threadId,
+            role: "user",
+            content: userMessage,
+            created_at: (/* @__PURE__ */ new Date()).toISOString()
+          }
+        ] : rawHistory;
         const candidateHistory = history.slice(-MAX_HISTORY_MESSAGES);
         const boundedHistory = [];
         let totalChars = 0;
@@ -715115,18 +715652,18 @@ var v2WidgetEndpoints = async (app) => {
           set.headers["Content-Type"] = "text/event-stream";
           set.headers["Cache-Control"] = "no-cache, no-transform";
           set.headers["Connection"] = "keep-alive";
-          const enc2 = new TextEncoder();
+          const enc = new TextEncoder();
           const fallback = pickReply(userMessage);
-          const stream2 = new ReadableStream({
+          const stream = new ReadableStream({
             async start(controller) {
               try {
                 for (const tk of chunkText(fallback)) {
                   if (abortController.signal.aborted) break;
                   const safe = tk.replace(/%/g, "%25").replace(/ /g, "%20").replace(/\n/g, "%0a").replace(/\r/g, "%0d");
-                  controller.enqueue(enc2.encode(`data: ${safe}
+                  controller.enqueue(enc.encode(`data: ${safe}
 
 `));
-                  await sleep4(40);
+                  await sleep5(40);
                 }
               } finally {
                 if (threadId && fallback.trim()) {
@@ -715137,7 +715674,7 @@ var v2WidgetEndpoints = async (app) => {
                   }
                 }
                 if (!abortController.signal.aborted) {
-                  controller.enqueue(enc2.encode(`data: [DONE]
+                  controller.enqueue(enc.encode(`data: [DONE]
 
 `));
                   try {
@@ -715152,7 +715689,7 @@ var v2WidgetEndpoints = async (app) => {
               abortController.abort(reason);
             }
           });
-          return new Response(stream2);
+          return new Response(stream);
         }
         let handshakeResult = null;
         if (typeof provider.preStreamHandshake === "function") {
@@ -715217,74 +715754,86 @@ var v2WidgetEndpoints = async (app) => {
             };
           }
         }
-        set.headers["Content-Type"] = "text/event-stream";
-        set.headers["Cache-Control"] = "no-cache, no-transform";
-        set.headers["Connection"] = "keep-alive";
-        const enc = new TextEncoder();
-        const sendChunk = (controller, text) => {
-          const safe = text.replace(/%/g, "%25").replace(/ /g, "%20").replace(/\n/g, "%0a").replace(/\r/g, "%0d");
-          controller.enqueue(enc.encode(`data: ${safe}
+        let streamEntered = false;
+        try {
+          set.headers = set.headers || {};
+          set.headers["Content-Type"] = "text/event-stream";
+          set.headers["Cache-Control"] = "no-cache, no-transform";
+          set.headers["Connection"] = "keep-alive";
+          const enc = new TextEncoder();
+          const sendChunk = (controller, text) => {
+            const safe = text.replace(/%/g, "%25").replace(/ /g, "%20").replace(/\n/g, "%0a").replace(/\r/g, "%0d");
+            controller.enqueue(enc.encode(`data: ${safe}
 
 `));
-        };
-        let assistantBuffer = "";
-        const stream = new ReadableStream({
-          async start(controller) {
-            try {
-              const tokenStream = handshakeResult ? provider.streamFromHandshake(
-                handshakeResult,
-                abortController.signal
-              ) : provider.stream(
-                { messages, maxTokens },
-                abortController.signal
-              );
-              for await (const token of tokenStream) {
-                if (abortController.signal.aborted) break;
-                assistantBuffer += token;
-                sendChunk(controller, token);
-              }
-            } catch (err) {
-              if (!abortController.signal.aborted) {
-                const msg = err instanceof Error ? err.message : String(err);
-                sendChunk(controller, `
+          };
+          let assistantBuffer = "";
+          const stream = new ReadableStream({
+            async start(controller) {
+              streamEntered = true;
+              try {
+                const tokenStream = handshakeResult ? provider.streamFromHandshake(
+                  handshakeResult,
+                  abortController.signal
+                ) : provider.stream(
+                  { messages, maxTokens },
+                  abortController.signal
+                );
+                for await (const token of tokenStream) {
+                  if (abortController.signal.aborted) break;
+                  assistantBuffer += token;
+                  sendChunk(controller, token);
+                }
+              } catch (err) {
+                if (!abortController.signal.aborted) {
+                  const msg = err instanceof Error ? err.message : String(err);
+                  sendChunk(controller, `
 [LLM error] ${msg}`);
-              }
-            } finally {
-              if (threadId && assistantBuffer.trim()) {
-                try {
-                  await appendMessage(threadId, "assistant", assistantBuffer);
-                } catch (e) {
-                  console.error("[v2/ask] persist assistant failed:", e);
                 }
-              }
-              if (!abortController.signal.aborted) {
-                controller.enqueue(enc.encode(`data: [DONE]
+              } finally {
+                if (threadId && assistantBuffer.trim()) {
+                  try {
+                    await appendMessage(threadId, "assistant", assistantBuffer);
+                  } catch (e) {
+                    console.error("[v2/ask] persist assistant failed:", e);
+                  }
+                }
+                if (!abortController.signal.aborted) {
+                  controller.enqueue(enc.encode(`data: [DONE]
 
 `));
-                try {
-                  controller.close();
-                } catch {
+                  try {
+                    controller.close();
+                  } catch {
+                  }
                 }
               }
+            },
+            cancel(reason) {
+              console.log("[v2/ask] Client disconnected, cancelling stream:", reason);
+              abortController.abort(reason);
             }
-          },
-          cancel(reason) {
-            console.log("[v2/ask] Client disconnected, cancelling stream:", reason);
-            abortController.abort(reason);
+          });
+          return new Response(stream);
+        } catch (setupErr) {
+          if (!streamEntered && handshakeResult) {
+            void handshakeResult.response?.body?.cancel?.().catch(() => {
+            });
+            try {
+              const iter = provider.streamFromHandshake?.(
+                handshakeResult,
+                AbortSignal.abort()
+              );
+              await iter?.[Symbol.asyncIterator]?.().next?.().catch(() => {
+              });
+            } catch {
+            }
           }
-        });
-        return new Response(stream);
+          throw setupErr;
+        }
       },
       {
-        body: t.Optional(
-          t.Object({
-            widgetId: t.Optional(t.Any()),
-            threadId: t.Optional(t.Any()),
-            message: t.Optional(t.Any()),
-            browserInfo: t.Optional(t.Any()),
-            search: t.Optional(t.Any())
-          })
-        ),
+        body: t.Optional(t.Any()),
         detail: {
           tags: ["API"],
           description: "Stream a chat reply (SSE) + persist both turns"
@@ -715352,18 +715901,18 @@ var v2WidgetEndpoints = async (app) => {
           set.status = 400;
           return { success: false, error: "id required" };
         }
-        if (id.length > MAX_WIDGET_ID_CHARS2) {
+        if (id.length > MAX_WIDGET_ID_CHARS2 || /[\x00-\x1f\x7f]/.test(id)) {
           set.status = 400;
           return {
             success: false,
-            error: `id exceeds maximum length of ${MAX_WIDGET_ID_CHARS2} characters`
+            error: id.length > MAX_WIDGET_ID_CHARS2 ? `id exceeds maximum length of ${MAX_WIDGET_ID_CHARS2} characters` : "invalid id (control characters prohibited)"
           };
         }
-        if (typeof body?.name === "string" && body.name.length > 200) {
+        if (typeof body?.name === "string" && (body.name.length > 200 || body.name.includes("\0"))) {
           set.status = 400;
           return {
             success: false,
-            error: "name exceeds maximum length of 200 characters"
+            error: body.name.includes("\0") ? "invalid name (null bytes prohibited)" : "name exceeds maximum length of 200 characters"
           };
         }
         if (typeof body?.theme === "string" && (body.theme.length > 64 || /[\x00-\x1f\x7f]/.test(body.theme))) {
@@ -715373,25 +715922,25 @@ var v2WidgetEndpoints = async (app) => {
             error: "invalid theme (must be <= 64 characters without control chars)"
           };
         }
-        if (typeof body?.description === "string" && body.description.length > 1e3) {
+        if (typeof body?.description === "string" && (body.description.length > 1e3 || body.description.includes("\0"))) {
           set.status = 400;
           return {
             success: false,
-            error: "description exceeds maximum length of 1000 characters"
+            error: body.description.includes("\0") ? "invalid description (null bytes prohibited)" : "description exceeds maximum length of 1000 characters"
           };
         }
-        if (typeof body?.welcome_message === "string" && body.welcome_message.length > 2e3) {
+        if (typeof body?.welcome_message === "string" && (body.welcome_message.length > 2e3 || body.welcome_message.includes("\0"))) {
           set.status = 400;
           return {
             success: false,
-            error: "welcome_message exceeds maximum length of 2000 characters"
+            error: body.welcome_message.includes("\0") ? "invalid welcome_message (null bytes prohibited)" : "welcome_message exceeds maximum length of 2000 characters"
           };
         }
-        if (typeof body?.system_prompt === "string" && body.system_prompt.length > 2e4) {
+        if (typeof body?.system_prompt === "string" && (body.system_prompt.length > 2e4 || body.system_prompt.includes("\0"))) {
           set.status = 400;
           return {
             success: false,
-            error: "system_prompt exceeds maximum length of 20000 characters"
+            error: body.system_prompt.includes("\0") ? "invalid system_prompt (null bytes prohibited)" : "system_prompt exceeds maximum length of 20000 characters"
           };
         }
         if (Array.isArray(body?.suggested_questions)) {
@@ -715403,12 +715952,12 @@ var v2WidgetEndpoints = async (app) => {
             };
           }
           if (body.suggested_questions.some(
-            (q) => typeof q !== "string" || q.length > 300
+            (q) => typeof q !== "string" || q.length > 300 || q.includes("\0")
           )) {
             set.status = 400;
             return {
               success: false,
-              error: "suggested_questions item exceeds maximum length of 300 characters"
+              error: "suggested_questions item invalid (must be <= 300 chars without null bytes)"
             };
           }
         }
@@ -715639,7 +716188,13 @@ var v2WidgetEndpoints = async (app) => {
         const deny = requireAdmin(headers, set);
         if (deny) return deny;
         const id = (body?.id ?? "").trim();
-        if (!id) return { success: false };
+        if (!id || id.length > MAX_WIDGET_ID_CHARS2 || /[\x00-\x1f\x7f]/.test(id)) {
+          set.status = 400;
+          return {
+            success: false,
+            error: !id ? "id required" : `invalid id (must be 1..${MAX_WIDGET_ID_CHARS2} chars without control chars)`
+          };
+        }
         const ok = await deleteWidget(id);
         return { success: ok };
       },
@@ -715688,18 +716243,18 @@ var v2WidgetEndpoints = async (app) => {
             error: `widgetId and threadId must be <= ${MAX_WIDGET_ID_CHARS2} characters`
           };
         }
-        if (typeof body?.system_prompt === "string" && body.system_prompt.length > 2e4) {
+        if (typeof body?.system_prompt === "string" && (body.system_prompt.length > 2e4 || body.system_prompt.includes("\0"))) {
           set.status = 400;
           return {
             success: false,
-            error: "system_prompt exceeds maximum length of 20000 characters"
+            error: body.system_prompt.includes("\0") ? "invalid system_prompt (null bytes prohibited)" : "system_prompt exceeds maximum length of 20000 characters"
           };
         }
-        if (typeof body?.context_text === "string" && body.context_text.length > 2e4) {
+        if (typeof body?.context_text === "string" && (body.context_text.length > 2e4 || body.context_text.includes("\0"))) {
           set.status = 400;
           return {
             success: false,
-            error: "context_text exceeds maximum length of 20000 characters"
+            error: body.context_text.includes("\0") ? "invalid context_text (null bytes prohibited)" : "context_text exceeds maximum length of 20000 characters"
           };
         }
         const ok = await updateThreadPrompt(threadId, widgetId, {
@@ -715864,7 +716419,7 @@ function chunkText(text) {
   }
   return out;
 }
-function sleep4(ms) {
+function sleep5(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 function detectImageMime(bytes) {
@@ -716695,146 +717250,6 @@ var healthzEndpoint = async (app) => {
   return app;
 };
 
-// node_modules/@elysiajs/cors/dist/index.mjs
-var isBun2 = typeof new Headers()?.toJSON === "function";
-var processHeaders = (headers) => {
-  if (isBun2) return Object.keys(headers.toJSON()).join(", ");
-  let keys = "";
-  let i = 0;
-  headers.forEach((_, key) => {
-    if (i) keys = keys + ", " + key;
-    else keys = key;
-    i++;
-  });
-  return keys;
-};
-var cors = (config) => {
-  let {
-    aot = true,
-    origin = true,
-    methods = true,
-    allowedHeaders = true,
-    exposeHeaders = true,
-    credentials = true,
-    maxAge = 5,
-    preflight = true
-  } = config ?? {};
-  if (Array.isArray(allowedHeaders))
-    allowedHeaders = allowedHeaders.join(", ");
-  if (Array.isArray(exposeHeaders)) exposeHeaders = exposeHeaders.join(", ");
-  const origins = typeof origin === "boolean" ? void 0 : Array.isArray(origin) ? origin : [origin];
-  const app = new Elysia({
-    name: "@elysiajs/cors",
-    seed: config,
-    aot
-  });
-  const anyOrigin = origins?.some((o) => o === "*");
-  const originMap = {};
-  if (origins) {
-    for (const origin2 of origins)
-      if (typeof origin2 === "string") originMap[origin2] = true;
-  }
-  const processOrigin = (origin2, request, from) => {
-    if (Array.isArray(origin2))
-      return origin2.some((o) => processOrigin(o, request, from));
-    switch (typeof origin2) {
-      case "string":
-        if (from in originMap) return true;
-        const fromProtocol = from.indexOf("://");
-        if (fromProtocol !== -1) from = from.slice(fromProtocol + 3);
-        return origin2 === from;
-      case "function":
-        return origin2(request) === true;
-      case "object":
-        if (origin2 instanceof RegExp) return origin2.test(from);
-    }
-    return false;
-  };
-  const handleOrigin = (set, request) => {
-    if (origin === true) {
-      set.headers.vary = "*";
-      set.headers["access-control-allow-origin"] = request.headers.get("Origin") || "*";
-      return;
-    }
-    if (anyOrigin) {
-      set.headers.vary = "*";
-      set.headers["access-control-allow-origin"] = "*";
-      return;
-    }
-    if (!origins?.length) return;
-    if (origins.length) {
-      const from = request.headers.get("Origin") ?? "";
-      for (let i = 0; i < origins.length; i++) {
-        const value = processOrigin(origins[i], request, from);
-        if (value === true) {
-          set.headers.vary = origin ? "Origin" : "*";
-          set.headers["access-control-allow-origin"] = from || "*";
-          return;
-        }
-      }
-    }
-    set.headers.vary = "Origin";
-  };
-  const handleMethod = (set, method) => {
-    if (!method) return;
-    if (methods === true)
-      return set.headers["access-control-allow-methods"] = method ?? "*";
-    if (methods === false || !methods?.length) return;
-    if (methods === "*")
-      return set.headers["access-control-allow-methods"] = "*";
-    if (!Array.isArray(methods))
-      return set.headers["access-control-allow-methods"] = methods;
-    set.headers["access-control-allow-methods"] = methods.join(", ");
-  };
-  const defaultHeaders = {};
-  if (typeof exposeHeaders === "string")
-    defaultHeaders["access-control-expose-headers"] = exposeHeaders;
-  if (typeof allowedHeaders === "string")
-    defaultHeaders["access-control-allow-headers"] = allowedHeaders;
-  if (credentials === true)
-    defaultHeaders["access-control-allow-credentials"] = "true";
-  app.headers(defaultHeaders);
-  function handleOption({ set, request, headers }) {
-    handleOrigin(set, request);
-    handleMethod(set, request.headers.get("access-control-request-method"));
-    if (allowedHeaders === true || exposeHeaders === true) {
-      if (allowedHeaders === true)
-        set.headers["access-control-allow-headers"] = headers["access-control-request-headers"];
-      if (exposeHeaders === true)
-        set.headers["access-control-expose-headers"] = Object.keys(headers).join(",");
-    }
-    if (maxAge) set.headers["access-control-max-age"] = maxAge.toString();
-    return new Response(null, {
-      status: 204
-    });
-  }
-  if (preflight) app.options("/", handleOption).options("/*", handleOption);
-  return app.onRequest(function processCors({ set, request }) {
-    handleOrigin(set, request);
-    if (preflight && request.method === "OPTIONS") {
-      return handleOption({
-        set,
-        request,
-        headers: isBun2 ? (
-          // @ts-ignore
-          request.headers.toJSON()
-        ) : (
-          // for non-Bun environments
-          Object.fromEntries(request.headers.entries())
-        )
-      });
-    }
-    handleMethod(set, request.method);
-    if (allowedHeaders === true || exposeHeaders === true) {
-      const headers = processHeaders(request.headers);
-      if (allowedHeaders === true)
-        set.headers["access-control-allow-headers"] = headers;
-      if (exposeHeaders === true)
-        set.headers["access-control-expose-headers"] = headers;
-    }
-  });
-};
-
 // lib/rate-limit/index.ts
 var SlidingWindowRateLimiter = class {
   constructor(maxEntries = 5e3) {
@@ -717091,6 +717506,32 @@ function checkRateLimit(key, limit, windowMs, reqOrHeaders, now) {
 // src/app.ts
 var MAX_REQUEST_BODY_SIZE = 1024 * 1024;
 var MAX_UPLOAD_BODY_SIZE = 2 * 1024 * 1024;
+var ALLOWED_CORS_METHODS = "GET, POST, OPTIONS";
+var ALLOWED_CORS_HEADERS = "content-type, authorization, x-admin-token, idempotency-key, x-idempotency-key, accept, x-requested-with, x-test-rate-limit";
+var EXPOSED_CORS_HEADERS = "retry-after, x-ratelimit-limit, x-ratelimit-remaining, x-ratelimit-reset";
+function sanitizeCorsOrigin(rawOrigin) {
+  if (!rawOrigin) return null;
+  const trimmed = rawOrigin.trim();
+  if (!trimmed || trimmed.toLowerCase() === "null" || trimmed.length > 512) {
+    return null;
+  }
+  if (/[\s\x00-\x1f\x7f\\]/.test(trimmed)) return null;
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return null;
+    }
+    if (!parsed.hostname || parsed.username || parsed.password) {
+      return null;
+    }
+    if (parsed.pathname !== "/" || parsed.search || parsed.hash) {
+      return null;
+    }
+    return parsed.origin;
+  } catch {
+    return null;
+  }
+}
 function normalizePathname(rawPathname) {
   let p = (rawPathname || "/").trim().replace(/\/+/g, "/");
   if (p.toLowerCase().startsWith("/api/")) {
@@ -717151,16 +717592,20 @@ var createApp = async (serverless = false) => {
     }
   });
   app.onRequest(({ request, set }) => {
-    const origin = request.headers.get("origin");
+    set.headers = set.headers || {};
+    set.headers["x-content-type-options"] = "nosniff";
+    const safeOrigin = sanitizeCorsOrigin(request.headers.get("origin"));
     const applyCorsHeaders = () => {
-      if (origin) {
-        set.headers = set.headers || {};
-        set.headers["access-control-allow-origin"] = origin;
+      set.headers = set.headers || {};
+      set.headers["x-content-type-options"] = "nosniff";
+      if (safeOrigin) {
+        set.headers["access-control-allow-origin"] = safeOrigin;
         set.headers["access-control-allow-credentials"] = "true";
-        set.headers["access-control-expose-headers"] = "retry-after, x-ratelimit-limit, x-ratelimit-remaining, x-ratelimit-reset";
+        set.headers["access-control-expose-headers"] = EXPOSED_CORS_HEADERS;
         set.headers["vary"] = "Origin";
       }
     };
+    applyCorsHeaders();
     let pathname = "/";
     try {
       const url = new URL(request.url, "http://localhost");
@@ -717202,7 +717647,20 @@ var createApp = async (serverless = false) => {
       }
     }
     if (request.method === "OPTIONS") {
-      return;
+      const preflightHeaders = new Headers({
+        "x-content-type-options": "nosniff"
+      });
+      if (safeOrigin) {
+        preflightHeaders.set("access-control-allow-origin", safeOrigin);
+        preflightHeaders.set("access-control-allow-credentials", "true");
+        preflightHeaders.set("access-control-allow-methods", ALLOWED_CORS_METHODS);
+        preflightHeaders.set("access-control-allow-headers", ALLOWED_CORS_HEADERS);
+        preflightHeaders.set("access-control-max-age", "600");
+        preflightHeaders.set("vary", "Origin");
+      } else if (request.headers.has("origin")) {
+        preflightHeaders.set("vary", "Origin");
+      }
+      return new Response(null, { status: 204, headers: preflightHeaders });
     }
     const policy = resolvePolicy(pathname, request.method);
     const clientIp = extractClientIp(request);
@@ -717221,6 +717679,7 @@ var createApp = async (serverless = false) => {
       set.headers["x-ratelimit-limit"] = String(policy.limit);
       set.headers["x-ratelimit-remaining"] = "0";
       set.headers["x-ratelimit-reset"] = String(rateLimitRes.resetEpochSec);
+      set.headers["access-control-expose-headers"] = EXPOSED_CORS_HEADERS;
       applyCorsHeaders();
       return {
         success: false,
@@ -717233,8 +717692,19 @@ var createApp = async (serverless = false) => {
     set.headers["x-ratelimit-limit"] = String(policy.limit);
     set.headers["x-ratelimit-remaining"] = String(rateLimitRes.remaining);
     set.headers["x-ratelimit-reset"] = String(rateLimitRes.resetEpochSec);
-    set.headers["access-control-expose-headers"] = "retry-after, x-ratelimit-limit, x-ratelimit-remaining, x-ratelimit-reset";
+    set.headers["access-control-expose-headers"] = EXPOSED_CORS_HEADERS;
   }).onError(({ request, error, code, set }) => {
+    const safeOrigin = sanitizeCorsOrigin(request?.headers?.get?.("origin"));
+    const attachOriginCors = () => {
+      set.headers = set.headers || {};
+      set.headers["x-content-type-options"] = "nosniff";
+      if (safeOrigin) {
+        set.headers["access-control-allow-origin"] = safeOrigin;
+        set.headers["access-control-allow-credentials"] = "true";
+        set.headers["access-control-expose-headers"] = EXPOSED_CORS_HEADERS;
+        set.headers["vary"] = "Origin";
+      }
+    };
     const errStr = [
       error?.message,
       error?.cause?.message,
@@ -717243,14 +717713,7 @@ var createApp = async (serverless = false) => {
     if ((code === "PARSE" || errStr.includes("PAYLOAD_TOO_LARGE")) && errStr.includes("PAYLOAD_TOO_LARGE")) {
       const is2Mb = errStr.includes("PAYLOAD_TOO_LARGE_2MB");
       set.status = 413;
-      const origin = request?.headers?.get?.("origin");
-      if (origin) {
-        set.headers = set.headers || {};
-        set.headers["access-control-allow-origin"] = origin;
-        set.headers["access-control-allow-credentials"] = "true";
-        set.headers["access-control-expose-headers"] = "retry-after, x-ratelimit-limit, x-ratelimit-remaining, x-ratelimit-reset";
-        set.headers["vary"] = "Origin";
-      }
+      attachOriginCors();
       return {
         success: false,
         error: `Payload Too Large: request body exceeds ${is2Mb ? "2MB" : "1MB"} limit`
@@ -717267,16 +717730,6 @@ var createApp = async (serverless = false) => {
       }
       if (errPath.startsWith("/v2/admin/")) {
         const token = (request?.headers?.get?.("x-admin-token") || "").trim();
-        const attachOriginCors = () => {
-          const origin = request?.headers?.get?.("origin");
-          if (origin) {
-            set.headers = set.headers || {};
-            set.headers["access-control-allow-origin"] = origin;
-            set.headers["access-control-allow-credentials"] = "true";
-            set.headers["access-control-expose-headers"] = "retry-after, x-ratelimit-limit, x-ratelimit-remaining, x-ratelimit-reset";
-            set.headers["vary"] = "Origin";
-          }
-        };
         if (errPath === "/v2/admin/mail/send") {
           const mailToken = process.env.MAIL_SEND_TOKEN?.trim();
           const adminToken = process.env.ADMIN_TOKEN?.trim();
@@ -717311,13 +717764,16 @@ var createApp = async (serverless = false) => {
           }
         }
       }
+      attachOriginCors();
       return;
     }
     if (code === "NOT_FOUND") {
+      attachOriginCors();
       return;
     }
     const isProd = process.env.NODE_ENV === "production" || process.env.VERCEL_ENV === "production";
     set.status = typeof set.status === "number" && set.status >= 400 ? set.status : 500;
+    attachOriginCors();
     return {
       success: false,
       error: isProd ? "Internal Server Error" : error?.message ?? "Internal Server Error"
@@ -717366,7 +717822,14 @@ var createApp = async (serverless = false) => {
     if (mediaType === "application/json" || mediaType.endsWith("+json")) {
       const text = await readBoundedBodyText(request, MAX_REQUEST_BODY_SIZE);
       if (!text) return {};
-      return JSON.parse(text);
+      const parsed = JSON.parse(text);
+      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+        return {};
+      }
+      if (Object.prototype.hasOwnProperty.call(parsed, "__proto__")) {
+        delete parsed["__proto__"];
+      }
+      return parsed;
     }
     if (mediaType === "text/plain") {
       return await readBoundedBodyText(request, MAX_REQUEST_BODY_SIZE);
@@ -717381,16 +717844,6 @@ var createApp = async (serverless = false) => {
       return text;
     }
   }).use(
-    cors({
-      origin: true,
-      exposeHeaders: [
-        "retry-after",
-        "x-ratelimit-limit",
-        "x-ratelimit-remaining",
-        "x-ratelimit-reset"
-      ]
-    })
-  ).use(
     swagger({
       path: "/",
       scalarCDN: "https://unpkg.com/@scalar/api-reference@1.25.52/dist/browser/standalone.js",

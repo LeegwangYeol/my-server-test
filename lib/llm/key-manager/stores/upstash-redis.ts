@@ -42,6 +42,14 @@ export class UpstashRedisKeyStore implements IKeyStore {
   // Storage circuit breaker state
   private redisConsecutiveFailures = 0;
   private storageBreakerOpenUntil = 0;
+  /**
+   * Permanent 402/401/403 exhaustions observed while Redis was unreachable / breaker-open,
+   * flushed back to Redis upon recovery so bankrupt keys are never resurrected.
+   */
+  private readonly pendingPermanentExhaustions = new Map<
+    string,
+    { statusCode: number; errMsg: string }
+  >();
 
   constructor(
     urlOrConfig: string | UpstashRedisConfig,
@@ -70,9 +78,11 @@ export class UpstashRedisKeyStore implements IKeyStore {
     await this.memoryFallback.syncKeys(keys);
 
     try {
-      const pipeline: any[] = [];
+      const pipeline: any[] = [['DEL', 'openrouter:keys:list']];
       const keyIds = keys.map((k) => k.id);
-      pipeline.push(['SADD', 'openrouter:keys:list', ...keyIds]);
+      if (keyIds.length > 0) {
+        pipeline.push(['SADD', 'openrouter:keys:list', ...keyIds]);
+      }
 
       for (const k of keys) {
         const hashKey = `openrouter:key:${k.id}`;
@@ -121,6 +131,8 @@ export class UpstashRedisKeyStore implements IKeyStore {
     }
 
     try {
+      await this.flushPendingExhaustionsToRedis();
+
       // Client nonce for cryptographic entropy
       const clientNonce = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : '';
       const result = await this.evalLua(
@@ -199,14 +211,24 @@ export class UpstashRedisKeyStore implements IKeyStore {
     }
 
     if (this.isStorageBreakerOpen()) {
-      return this.memoryFallback.releaseKey(keyId, leaseToken, statusCode, cooldown, errMsg);
+      await this.memoryFallback.releaseKey(keyId, leaseToken, statusCode, cooldown, errMsg);
+      await this.queuePermanentExhaustionIfNeeded(keyId, statusCode, errMsg);
+      return;
     }
 
     try {
+      const safeStatus =
+        typeof statusCode === 'number' && Number.isFinite(statusCode)
+          ? Math.trunc(statusCode)
+          : 0;
+      const safeCooldown =
+        typeof cooldown === 'number' && Number.isFinite(cooldown) && cooldown >= 0
+          ? Math.floor(cooldown)
+          : 0;
       await this.evalLua(
         RELEASE_KEY_LUA,
         [`openrouter:key:${keyId}`],
-        [leaseToken, statusCode, cooldown, errMsg.slice(0, 200)]
+        [leaseToken, safeStatus, safeCooldown, errMsg.slice(0, 200)]
       );
       this.recordSuccess();
 
@@ -215,6 +237,7 @@ export class UpstashRedisKeyStore implements IKeyStore {
     } catch (err) {
       this.recordFailure(err);
       await this.memoryFallback.releaseKey(keyId, leaseToken, statusCode, cooldown, errMsg);
+      await this.queuePermanentExhaustionIfNeeded(keyId, statusCode, errMsg);
     }
   }
 
@@ -296,6 +319,14 @@ export class UpstashRedisKeyStore implements IKeyStore {
   public async resetKeyToActive(keyId: string): Promise<void> {
     const statesBefore = await this.memoryFallback.getAllStates();
     const accountId = statesBefore.find((s) => s.id === keyId)?.accountId;
+    this.pendingPermanentExhaustions.delete(keyId);
+    if (accountId) {
+      for (const st of statesBefore) {
+        if (st.accountId === accountId) {
+          this.pendingPermanentExhaustions.delete(st.id);
+        }
+      }
+    }
     await this.memoryFallback.resetKeyToActive(keyId);
 
     if (this.isStorageBreakerOpen()) return;
@@ -329,6 +360,75 @@ export class UpstashRedisKeyStore implements IKeyStore {
 
   // --- Internal Fail-Open Circuit Breaker & HTTP Transport ---
 
+  private async queuePermanentExhaustionIfNeeded(
+    keyId: string,
+    statusCode: number,
+    errMsg: string
+  ): Promise<void> {
+    if (statusCode !== 402 && statusCode !== 401 && statusCode !== 403) {
+      return;
+    }
+    this.pendingPermanentExhaustions.set(keyId, {
+      statusCode,
+      errMsg: errMsg.slice(0, 200),
+    });
+  }
+
+  private async flushPendingExhaustionsToRedis(): Promise<void> {
+    if (this.pendingPermanentExhaustions.size === 0) return;
+
+    const states = await this.memoryFallback.getAllStates();
+    const stateMap = new Map(states.map((s) => [s.id, s]));
+    const pipeline: any[][] = [];
+
+    for (const [keyId, info] of this.pendingPermanentExhaustions.entries()) {
+      const st = stateMap.get(keyId);
+      if (st && st.status !== 'EXHAUSTED') {
+        continue;
+      }
+      const hashKey = `openrouter:key:${keyId}`;
+      pipeline.push([
+        'HSET',
+        hashKey,
+        'state',
+        'EXHAUSTED',
+        'last_error_code',
+        String(info.statusCode),
+        'last_error_message',
+        info.errMsg,
+      ]);
+
+      if (info.statusCode === 402 && st?.accountId) {
+        pipeline.push([
+          'SET',
+          `openrouter:account:${st.accountId}:broken`,
+          '1',
+          'EX',
+          '86400',
+        ]);
+        for (const sib of states) {
+          if (sib.accountId === st.accountId && sib.id !== keyId) {
+            pipeline.push([
+              'HSET',
+              `openrouter:key:${sib.id}`,
+              'state',
+              'EXHAUSTED',
+              'last_error_code',
+              '402',
+              'last_error_message',
+              'Account credit balance exhausted',
+            ]);
+          }
+        }
+      }
+    }
+
+    if (pipeline.length > 0) {
+      await this.execPipeline(pipeline);
+    }
+    this.pendingPermanentExhaustions.clear();
+  }
+
   private isStorageBreakerOpen(): boolean {
     return Date.now() < this.storageBreakerOpenUntil;
   }
@@ -349,13 +449,18 @@ export class UpstashRedisKeyStore implements IKeyStore {
   }
 
   private async evalLua(script: string, keys: string[], args: any[]): Promise<any> {
+    const safeArgs = args.map((a) => {
+      if (a === null || a === undefined) return '';
+      if (typeof a === 'number') return Number.isFinite(a) ? a : 0;
+      return a;
+    });
     const res = await fetch(`${this.restUrl}/eval`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${this.restToken}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify([script, keys.length, ...keys, ...args]),
+      body: JSON.stringify([script, keys.length, ...keys, ...safeArgs]),
       signal: AbortSignal.timeout(this.timeoutMs),
     });
 

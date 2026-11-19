@@ -25,6 +25,7 @@ import {
   isValidWidgetBubbleSize,
   isValidWidgetIconUrl,
 } from "../../../lib/url-guard";
+import { dbFallbackQueue } from "../../../lib/queue/fallback-queue";
 
 const MAX_WIDGET_ID_CHARS = 100;
 
@@ -96,10 +97,33 @@ export const v2WidgetEndpoints = async (app: any) => {
         body,
         set,
       }: {
-        body?: { widgetId?: any; threadId?: any };
+        body?: any;
         set: { status?: number | string };
       }) => {
         const MAX_VIEW_AUX_CHARS = 2000;
+        if (
+          body !== undefined &&
+          body !== null &&
+          (typeof body !== "object" || Array.isArray(body))
+        ) {
+          let rawBody = "";
+          try {
+            rawBody = typeof body === "string" ? body : (JSON.stringify(body) ?? "");
+          } catch {
+            set.status = 400;
+            return { success: false, error: "malformed request body" };
+          }
+          if (rawBody.length > MAX_VIEW_AUX_CHARS) {
+            set.status = 413;
+            return {
+              success: false,
+              error: `request body too large (${rawBody.length} > ${MAX_VIEW_AUX_CHARS} chars)`,
+            };
+          }
+          set.status = 400;
+          return { success: false, error: "request body must be a JSON object" };
+        }
+
         const rawWidgetId = body?.widgetId;
         const rawThreadId = body?.threadId;
 
@@ -211,12 +235,7 @@ export const v2WidgetEndpoints = async (app: any) => {
         };
       },
       {
-        body: t.Optional(
-          t.Object({
-            widgetId: t.Optional(t.Any()),
-            threadId: t.Optional(t.Any()),
-          }),
-        ),
+        body: t.Optional(t.Any()),
         detail: {
           tags: ["API"],
           description: "Widget config + restored thread messages",
@@ -233,10 +252,60 @@ export const v2WidgetEndpoints = async (app: any) => {
         body,
         set,
       }: {
-        body?: { widgetId?: any };
+        body?: any;
         set: { status?: number | string };
       }) => {
+        const MAX_CREATE_THREAD_CHARS = 4000;
+        if (
+          body !== undefined &&
+          body !== null &&
+          (typeof body !== "object" || Array.isArray(body))
+        ) {
+          let rawBody = "";
+          try {
+            rawBody = typeof body === "string" ? body : (JSON.stringify(body) ?? "");
+          } catch {
+            set.status = 403;
+            return { success: false, error: "unregistered widget_id" };
+          }
+          if (rawBody.length > MAX_CREATE_THREAD_CHARS) {
+            set.status = 413;
+            return {
+              success: false,
+              error: `payload too large (${rawBody.length} > ${MAX_CREATE_THREAD_CHARS} chars)`,
+            };
+          }
+          set.status = 403;
+          return { success: false, error: "unregistered widget_id" };
+        }
+
         const rawWidgetId = body?.widgetId;
+        if (rawWidgetId !== undefined && rawWidgetId !== null) {
+          if (typeof rawWidgetId === "string") {
+            if (rawWidgetId.length > MAX_CREATE_THREAD_CHARS) {
+              set.status = 413;
+              return {
+                success: false,
+                error: `widgetId too large (${rawWidgetId.length} > ${MAX_CREATE_THREAD_CHARS} chars)`,
+              };
+            }
+          } else {
+            let serializedWid = "";
+            try {
+              serializedWid = JSON.stringify(rawWidgetId) ?? "";
+            } catch {
+              set.status = 403;
+              return { success: false, error: "unregistered widget_id" };
+            }
+            if (serializedWid.length > MAX_CREATE_THREAD_CHARS) {
+              set.status = 413;
+              return {
+                success: false,
+                error: `widgetId too large (${serializedWid.length} > ${MAX_CREATE_THREAD_CHARS} chars)`,
+              };
+            }
+          }
+        }
         const widgetId = (typeof rawWidgetId === "string" ? rawWidgetId : "").trim();
         let widgetMaster = null;
         try {
@@ -266,9 +335,7 @@ export const v2WidgetEndpoints = async (app: any) => {
         return { success: true, threadId, thread_id: threadId };
       },
       {
-        body: t.Optional(
-          t.Object({ widgetId: t.Optional(t.Any()) }),
-        ),
+        body: t.Optional(t.Any()),
         detail: {
           tags: ["API"],
           description: "Allocate a new persisted thread id",
@@ -282,6 +349,38 @@ export const v2WidgetEndpoints = async (app: any) => {
     app.post(
       "/ask",
       async ({ body, set, request }: any) => {
+        const MAX_MESSAGE_CHARS = 4000;
+        if (
+          body !== undefined &&
+          body !== null &&
+          (typeof body !== "object" || Array.isArray(body))
+        ) {
+          let rawBody = "";
+          try {
+            rawBody = typeof body === "string" ? body : (JSON.stringify(body) ?? "");
+          } catch {
+            set.status = 403;
+            return {
+              success: false,
+              error:
+                "unregistered widget_id — register it via /v2/admin/widgets/upsert first",
+            };
+          }
+          if (rawBody.length > MAX_MESSAGE_CHARS) {
+            set.status = 413;
+            return {
+              success: false,
+              error: `message too long (${rawBody.length} > ${MAX_MESSAGE_CHARS} chars)`,
+            };
+          }
+          set.status = 403;
+          return {
+            success: false,
+            error:
+              "unregistered widget_id — register it via /v2/admin/widgets/upsert first",
+          };
+        }
+
         const rawWidgetId = body?.widgetId;
         const widgetId: string = (typeof rawWidgetId === "string" ? rawWidgetId : "").trim();
         const rawMessage = body?.message;
@@ -291,7 +390,6 @@ export const v2WidgetEndpoints = async (app: any) => {
         let threadId = "";
 
         // ── Guard 1: 요청당 메시지 길이 상한 — 단일 요청 토큰 폭탄 및 비문자열 밀수 방어 ──
-        const MAX_MESSAGE_CHARS = 4000;
         if (typeof rawMessage === "string") {
           userMessage = rawMessage;
           if (userMessage.length > MAX_MESSAGE_CHARS) {
@@ -428,8 +526,13 @@ export const v2WidgetEndpoints = async (app: any) => {
           };
         }
 
+        // ── Guard 3: 대화 기록 상한 — 다회차(multi-turn) 토큰 폭탄 방어 ──
+        const MAX_HISTORY_MESSAGES = 10;
+        const MAX_HISTORY_CHARS = 16000;
+
         // Make sure we have a thread on file before persisting anything.
         let existingThread = null;
+        let createdFreshThread = false;
         if (threadId) {
           existingThread = await getThread(threadId, widgetId);
           if (existingThread) {
@@ -439,20 +542,51 @@ export const v2WidgetEndpoints = async (app: any) => {
           }
         }
         if (!threadId) {
-          threadId = (await createThread(widgetId)) ?? "";
+          const allocated = await createThread(widgetId);
+          threadId = allocated ?? "";
+          if (threadId) {
+            createdFreshThread = true;
+          }
         }
 
         // Persist the incoming user message and capture history up to this
         // point. We log the user message first so it shows up in subsequent
         // history fetches even if the LLM call below crashes.
+        let persistedUser = false;
         if (threadId && userMessage) {
-          await appendMessage(threadId, "user", userMessage);
+          const appendRes = await appendMessage(threadId, "user", userMessage);
+          persistedUser = appendRes !== false;
         }
-        const history = threadId ? await listMessages(threadId) : [];
 
-        // ── Guard 3: 대화 기록 상한 — 다회차(multi-turn) 토큰 폭탄 방어 ──
-        const MAX_HISTORY_MESSAGES = 10;
-        const MAX_HISTORY_CHARS = 16000;
+        // Optimization: skip redundant DB SELECT RTT on brand-new threads when
+        // user turn succeeded and fallback queue is empty; otherwise fetch bounded window.
+        const rawHistory = !threadId
+          ? []
+          : createdFreshThread && persistedUser && dbFallbackQueue.size === 0
+            ? [
+                {
+                  id: 1,
+                  thread_id: threadId,
+                  role: "user" as const,
+                  content: userMessage,
+                  created_at: new Date().toISOString(),
+                },
+              ]
+            : await listMessages(threadId, MAX_HISTORY_MESSAGES);
+        const lastHist = rawHistory[rawHistory.length - 1];
+        const history =
+          !lastHist || lastHist.role !== "user" || lastHist.content !== userMessage
+            ? [
+                ...rawHistory,
+                {
+                  id: 0,
+                  thread_id: threadId,
+                  role: "user" as const,
+                  content: userMessage,
+                  created_at: new Date().toISOString(),
+                },
+              ]
+            : rawHistory;
 
         const candidateHistory = history.slice(-MAX_HISTORY_MESSAGES);
         const boundedHistory: typeof history = [];
@@ -700,80 +834,91 @@ export const v2WidgetEndpoints = async (app: any) => {
         }
 
         // ── COMMIT HTTP 200 SSE STREAM ──────────────────────────────────
-        set.headers["Content-Type"] = "text/event-stream";
-        set.headers["Cache-Control"] = "no-cache, no-transform";
-        set.headers["Connection"] = "keep-alive";
+        let streamEntered = false;
+        try {
+          set.headers = set.headers || {};
+          set.headers["Content-Type"] = "text/event-stream";
+          set.headers["Cache-Control"] = "no-cache, no-transform";
+          set.headers["Connection"] = "keep-alive";
 
-        const enc = new TextEncoder();
-        const sendChunk = (controller: any, text: string) => {
-          const safe = text
-            .replace(/%/g, "%25")
-            .replace(/ /g, "%20")
-            .replace(/\n/g, "%0a")
-            .replace(/\r/g, "%0d");
-          controller.enqueue(enc.encode(`data: ${safe}\n\n`));
-        };
+          const enc = new TextEncoder();
+          const sendChunk = (controller: any, text: string) => {
+            const safe = text
+              .replace(/%/g, "%25")
+              .replace(/ /g, "%20")
+              .replace(/\n/g, "%0a")
+              .replace(/\r/g, "%0d");
+            controller.enqueue(enc.encode(`data: ${safe}\n\n`));
+          };
 
-        let assistantBuffer = "";
-        const stream = new ReadableStream({
-          async start(controller) {
+          let assistantBuffer = "";
+          const stream = new ReadableStream({
+            async start(controller) {
+              streamEntered = true;
+              try {
+                const tokenStream: AsyncIterable<string> = handshakeResult
+                  ? (provider as any).streamFromHandshake(
+                      handshakeResult,
+                      abortController.signal,
+                    )
+                  : provider.stream(
+                      { messages, maxTokens },
+                      abortController.signal,
+                    );
+
+                for await (const token of tokenStream) {
+                  if (abortController.signal.aborted) break;
+                  assistantBuffer += token;
+                  sendChunk(controller, token);
+                }
+              } catch (err: any) {
+                if (!abortController.signal.aborted) {
+                  const msg = err instanceof Error ? err.message : String(err);
+                  sendChunk(controller, `\n[LLM error] ${msg}`);
+                }
+              } finally {
+                if (threadId && assistantBuffer.trim()) {
+                  try {
+                    await appendMessage(threadId, "assistant", assistantBuffer);
+                  } catch (e) {
+                    console.error("[v2/ask] persist assistant failed:", e);
+                  }
+                }
+                if (!abortController.signal.aborted) {
+                  controller.enqueue(enc.encode(`data: [DONE]\n\n`));
+                  try {
+                    controller.close();
+                  } catch {
+                    /* already closed */
+                  }
+                }
+              }
+            },
+            cancel(reason) {
+              console.log("[v2/ask] Client disconnected, cancelling stream:", reason);
+              abortController.abort(reason);
+            },
+          });
+
+          return new Response(stream);
+        } catch (setupErr) {
+          if (!streamEntered && handshakeResult) {
+            void handshakeResult.response?.body?.cancel?.().catch(() => {});
             try {
-              const tokenStream: AsyncIterable<string> = handshakeResult
-                ? (provider as any).streamFromHandshake(
-                    handshakeResult,
-                    abortController.signal,
-                  )
-                : provider.stream(
-                    { messages, maxTokens },
-                    abortController.signal,
-                  );
-
-              for await (const token of tokenStream) {
-                if (abortController.signal.aborted) break;
-                assistantBuffer += token;
-                sendChunk(controller, token);
-              }
-            } catch (err: any) {
-              if (!abortController.signal.aborted) {
-                const msg = err instanceof Error ? err.message : String(err);
-                sendChunk(controller, `\n[LLM error] ${msg}`);
-              }
-            } finally {
-              if (threadId && assistantBuffer.trim()) {
-                try {
-                  await appendMessage(threadId, "assistant", assistantBuffer);
-                } catch (e) {
-                  console.error("[v2/ask] persist assistant failed:", e);
-                }
-              }
-              if (!abortController.signal.aborted) {
-                controller.enqueue(enc.encode(`data: [DONE]\n\n`));
-                try {
-                  controller.close();
-                } catch {
-                  /* already closed */
-                }
-              }
+              const iter = (provider as any).streamFromHandshake?.(
+                handshakeResult,
+                AbortSignal.abort(),
+              );
+              await iter?.[Symbol.asyncIterator]?.().next?.().catch(() => {});
+            } catch {
+              /* noop */
             }
-          },
-          cancel(reason) {
-            console.log("[v2/ask] Client disconnected, cancelling stream:", reason);
-            abortController.abort(reason);
-          },
-        });
-
-        return new Response(stream);
+          }
+          throw setupErr;
+        }
       },
       {
-        body: t.Optional(
-          t.Object({
-            widgetId: t.Optional(t.Any()),
-            threadId: t.Optional(t.Any()),
-            message: t.Optional(t.Any()),
-            browserInfo: t.Optional(t.Any()),
-            search: t.Optional(t.Any()),
-          }),
-        ),
+        body: t.Optional(t.Any()),
         detail: {
           tags: ["API"],
           description: "Stream a chat reply (SSE) + persist both turns",
@@ -870,18 +1015,26 @@ export const v2WidgetEndpoints = async (app: any) => {
           set.status = 400;
           return { success: false, error: "id required" };
         }
-        if (id.length > MAX_WIDGET_ID_CHARS) {
+        if (id.length > MAX_WIDGET_ID_CHARS || /[\x00-\x1f\x7f]/.test(id)) {
           set.status = 400;
           return {
             success: false,
-            error: `id exceeds maximum length of ${MAX_WIDGET_ID_CHARS} characters`,
+            error:
+              id.length > MAX_WIDGET_ID_CHARS
+                ? `id exceeds maximum length of ${MAX_WIDGET_ID_CHARS} characters`
+                : "invalid id (control characters prohibited)",
           };
         }
-        if (typeof body?.name === "string" && body.name.length > 200) {
+        if (
+          typeof body?.name === "string" &&
+          (body.name.length > 200 || body.name.includes("\x00"))
+        ) {
           set.status = 400;
           return {
             success: false,
-            error: "name exceeds maximum length of 200 characters",
+            error: body.name.includes("\x00")
+              ? "invalid name (null bytes prohibited)"
+              : "name exceeds maximum length of 200 characters",
           };
         }
         if (
@@ -896,32 +1049,38 @@ export const v2WidgetEndpoints = async (app: any) => {
         }
         if (
           typeof body?.description === "string" &&
-          body.description.length > 1000
+          (body.description.length > 1000 || body.description.includes("\x00"))
         ) {
           set.status = 400;
           return {
             success: false,
-            error: "description exceeds maximum length of 1000 characters",
+            error: body.description.includes("\x00")
+              ? "invalid description (null bytes prohibited)"
+              : "description exceeds maximum length of 1000 characters",
           };
         }
         if (
           typeof body?.welcome_message === "string" &&
-          body.welcome_message.length > 2000
+          (body.welcome_message.length > 2000 || body.welcome_message.includes("\x00"))
         ) {
           set.status = 400;
           return {
             success: false,
-            error: "welcome_message exceeds maximum length of 2000 characters",
+            error: body.welcome_message.includes("\x00")
+              ? "invalid welcome_message (null bytes prohibited)"
+              : "welcome_message exceeds maximum length of 2000 characters",
           };
         }
         if (
           typeof body?.system_prompt === "string" &&
-          body.system_prompt.length > 20000
+          (body.system_prompt.length > 20000 || body.system_prompt.includes("\x00"))
         ) {
           set.status = 400;
           return {
             success: false,
-            error: "system_prompt exceeds maximum length of 20000 characters",
+            error: body.system_prompt.includes("\x00")
+              ? "invalid system_prompt (null bytes prohibited)"
+              : "system_prompt exceeds maximum length of 20000 characters",
           };
         }
         if (Array.isArray(body?.suggested_questions)) {
@@ -934,13 +1093,15 @@ export const v2WidgetEndpoints = async (app: any) => {
           }
           if (
             body.suggested_questions.some(
-              (q: unknown) => typeof q !== "string" || q.length > 300,
+              (q: unknown) =>
+                typeof q !== "string" || q.length > 300 || q.includes("\x00"),
             )
           ) {
             set.status = 400;
             return {
               success: false,
-              error: "suggested_questions item exceeds maximum length of 300 characters",
+              error:
+                "suggested_questions item invalid (must be <= 300 chars without null bytes)",
             };
           }
         }
@@ -1242,7 +1403,15 @@ export const v2WidgetEndpoints = async (app: any) => {
         const deny = requireAdmin(headers, set);
         if (deny) return deny;
         const id = (body?.id ?? "").trim();
-        if (!id) return { success: false };
+        if (!id || id.length > MAX_WIDGET_ID_CHARS || /[\x00-\x1f\x7f]/.test(id)) {
+          set.status = 400;
+          return {
+            success: false,
+            error: !id
+              ? "id required"
+              : `invalid id (must be 1..${MAX_WIDGET_ID_CHARS} chars without control chars)`,
+          };
+        }
         const ok = await deleteWidget(id);
         return { success: ok };
       },
@@ -1314,18 +1483,28 @@ export const v2WidgetEndpoints = async (app: any) => {
             error: `widgetId and threadId must be <= ${MAX_WIDGET_ID_CHARS} characters`,
           };
         }
-        if (typeof body?.system_prompt === "string" && body.system_prompt.length > 20000) {
+        if (
+          typeof body?.system_prompt === "string" &&
+          (body.system_prompt.length > 20000 || body.system_prompt.includes("\x00"))
+        ) {
           set.status = 400;
           return {
             success: false,
-            error: "system_prompt exceeds maximum length of 20000 characters",
+            error: body.system_prompt.includes("\x00")
+              ? "invalid system_prompt (null bytes prohibited)"
+              : "system_prompt exceeds maximum length of 20000 characters",
           };
         }
-        if (typeof body?.context_text === "string" && body.context_text.length > 20000) {
+        if (
+          typeof body?.context_text === "string" &&
+          (body.context_text.length > 20000 || body.context_text.includes("\x00"))
+        ) {
           set.status = 400;
           return {
             success: false,
-            error: "context_text exceeds maximum length of 20000 characters",
+            error: body.context_text.includes("\x00")
+              ? "invalid context_text (null bytes prohibited)"
+              : "context_text exceeds maximum length of 20000 characters",
           };
         }
         const ok = await updateThreadPrompt(threadId, widgetId, {

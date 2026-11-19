@@ -90,6 +90,79 @@ export class FailoverExhaustedError extends KeyManagerError {
   }
 }
 
+const MAX_UPSTREAM_ERROR_BODY_BYTES = 8_192;
+
+/**
+ * Reads up to `maxBytes` of a non-2xx upstream error response in a single pass
+ * (avoiding `response.clone()` ReadableStream tee memory leaks) while honoring
+ * `attemptSignal` so stalled/tarpitted error bodies cannot hang past `perAttemptTimeoutMs`.
+ */
+async function readBoundedErrorBody(
+  response: Response,
+  maxBytes: number,
+  attemptSignal?: AbortSignal
+): Promise<string> {
+  if (!response.body) return '';
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let text = '';
+  let totalBytes = 0;
+
+  const readChunkRace = (): Promise<ReadableStreamReadResult<Uint8Array>> => {
+    if (!attemptSignal) return reader.read();
+    if (attemptSignal.aborted) {
+      const reason = attemptSignal.reason;
+      return Promise.reject(reason instanceof Error ? reason : new Error('ATTEMPT_TIMEOUT'));
+    }
+    return new Promise((resolve, reject) => {
+      const onAbort = () => {
+        const reason = attemptSignal.reason;
+        void reader.cancel().catch(() => {});
+        reject(reason instanceof Error ? reason : new Error('ATTEMPT_TIMEOUT'));
+      };
+      attemptSignal.addEventListener('abort', onAbort, { once: true });
+      reader.read().then(
+        (res) => {
+          attemptSignal.removeEventListener('abort', onAbort);
+          resolve(res);
+        },
+        (err) => {
+          attemptSignal.removeEventListener('abort', onAbort);
+          reject(err);
+        }
+      );
+    });
+  };
+
+  try {
+    while (true) {
+      const { done, value } = await readChunkRace();
+      if (done) {
+        text += decoder.decode();
+        break;
+      }
+      if (value && value.byteLength > 0) {
+        const remaining = maxBytes - totalBytes;
+        if (value.byteLength >= remaining) {
+          text += decoder.decode(value.subarray(0, remaining));
+          void reader.cancel().catch(() => {});
+          break;
+        }
+        totalBytes += value.byteLength;
+        text += decoder.decode(value, { stream: true });
+      }
+    }
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {
+      /* noop */
+    }
+    void response.body.cancel().catch(() => {});
+  }
+  return text;
+}
+
 /**
  * Creates an attempt signal combining an attempt timeout with the client's abort signal.
  * Ensures proper cleanup of timers and event listeners to prevent resource leaks.
@@ -201,23 +274,52 @@ export async function executeWithResilientFailover(
 
     try {
       const response = await requestFactory(config.apiKey, attemptSignal);
-      cleanupSignal();
 
       // --- CASE 1: SUCCESS (200 OK) ---
       if (response.ok) {
+        cleanupSignal();
+        if (clientSignal?.aborted) {
+          void response.body?.cancel().catch(() => {});
+          await keyStore.releaseKey(keyId, leaseToken, 499, 0, 'Client stream aborted');
+          throw new KeyManagerError(
+            'CLIENT_ABORTED: Client disconnected during handshake.',
+            499,
+            undefined,
+            'CLIENT_ABORTED'
+          );
+        }
         // Phase 1: Immediately graduate WARMUP keys to ACTIVE (<500ms)
         await keyStore.acknowledgeHandshake(keyId, leaseToken);
+        if (clientSignal?.aborted) {
+          void response.body?.cancel().catch(() => {});
+          await keyStore.releaseKey(keyId, leaseToken, 499, 0, 'Client stream aborted');
+          throw new KeyManagerError(
+            'CLIENT_ABORTED: Client disconnected during handshake.',
+            499,
+            undefined,
+            'CLIENT_ABORTED'
+          );
+        }
         return { response, keyId, leaseToken };
       }
 
-      // Read structured error payload
-      const errJson: OpenRouterErrorPayload = await response
-        .clone()
-        .json()
-        .catch(() => ({}));
-      const errText = !errJson?.error
-        ? await response.text().catch(() => '')
-        : JSON.stringify(errJson);
+      // Read bounded structured error payload in a single pass under attemptSignal deadline
+      const rawErrBody = await readBoundedErrorBody(
+        response,
+        MAX_UPSTREAM_ERROR_BODY_BYTES,
+        attemptSignal
+      );
+      cleanupSignal();
+
+      let errJson: OpenRouterErrorPayload = {};
+      if (rawErrBody.trim().startsWith('{')) {
+        try {
+          errJson = JSON.parse(rawErrBody) as OpenRouterErrorPayload;
+        } catch {
+          errJson = {};
+        }
+      }
+      const errText = errJson?.error ? JSON.stringify(errJson) : rawErrBody;
 
       // --- CASE 2: UPSTREAM PROVIDER / MODEL OUTAGE DISCRIMINATION ---
       const outageCheck = HealthAndCooldownEngine.isUpstreamProviderOutage(errJson);
@@ -280,7 +382,7 @@ export async function executeWithResilientFailover(
 
       // --- CASE 6: CLIENT / PROMPT MODERATION ERROR (400, 404, 413, 422, or Moderation 403) ---
       // Not a key-specific failure; reclaim lease with status 0 / cooldown 0 (zero key penalty)
-      // and return response directly to caller without rotating
+      // and return reconstructed response directly to caller without rotating
       await keyStore.releaseKey(
         keyId,
         leaseToken,
@@ -288,7 +390,12 @@ export async function executeWithResilientFailover(
         0,
         `Client error (${response.status})`
       );
-      return { response, keyId, leaseToken };
+      const clientErrResponse = new Response(rawErrBody, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers,
+      });
+      return { response: clientErrResponse, keyId, leaseToken };
 
     } catch (networkErr: any) {
       cleanupSignal();

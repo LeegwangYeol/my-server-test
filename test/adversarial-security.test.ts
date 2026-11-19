@@ -1166,6 +1166,192 @@ describe("Adversarial Security Test Suite (Requirement R2)", () => {
         });
         expect(resViewStale.status).toBe(200);
       });
+
+      test("2026-11-20 Hardening: fails over past tarpitted/stalled upstream 502/429 error bodies without deadlocking, and reconciles Upstash 402 exhaustions after Redis fail-open recovery", async () => {
+        const { MemoryKeyStore } = await import("../lib/llm/key-manager/stores/memory");
+        const { UpstashRedisKeyStore } = await import("../lib/llm/key-manager/stores/upstash-redis");
+        const { executeWithResilientFailover } = await import("../lib/llm/key-manager/executor");
+        const { OpenAICompatibleProvider } = await import("../lib/llm/openai-compatible");
+
+        // 1. Stalled/tarpitted 502 error body must abort within perAttemptTimeoutMs (60ms) and fail over to k-fast-ok
+        const memStore = new MemoryKeyStore();
+        const keyMap = new Map<string, any>([
+          ["k-tarpit-502", { id: "k-tarpit-502", apiKey: "sk-tarpit", tier: 0, weight: 100, maxConcurrency: 5 }],
+          ["k-fast-ok", { id: "k-fast-ok", apiKey: "sk-fast", tier: 0, weight: 80, maxConcurrency: 5 }],
+        ]);
+        await memStore.syncKeys(Array.from(keyMap.values()));
+
+        const t0 = performance.now();
+        const hs = await executeWithResilientFailover(
+          memStore,
+          keyMap,
+          async (apiKey) => {
+            if (apiKey === "sk-tarpit") {
+              // Returns 502 headers immediately, then hangs body stream forever
+              return new Response(
+                new ReadableStream({
+                  start() {
+                    /* tarpit: never close or enqueue */
+                  },
+                }),
+                { status: 502, headers: { "content-type": "text/html" } },
+              );
+            }
+            return new Response("data: [DONE]\n\n", {
+              status: 200,
+              headers: { "content-type": "text/event-stream" },
+            });
+          },
+          3,
+          undefined,
+          60, // 60ms per-attempt deadline
+        );
+        const elapsedMs = performance.now() - t0;
+        expect(hs.keyId).toBe("k-fast-ok");
+        expect(elapsedMs).toBeLessThan(500);
+        await memStore.releaseKey(hs.keyId, hs.leaseToken, 200, 0);
+        expect(await memStore.getActiveLeaseCount("k-tarpit-502")).toBe(0);
+        expect(await memStore.getActiveLeaseCount("k-fast-ok")).toBe(0);
+
+        // 2. UpstashRedisKeyStore reconciles 402 account-wide exhaustion back to Redis upon breaker recovery
+        const originalFetch = globalThis.fetch;
+        try {
+          let redisDown = true;
+          const redisPipelines: any[][][] = [];
+          globalThis.fetch = (async (input: any, init?: RequestInit) => {
+            const url = String(input);
+            if (url.includes("upstash.mock")) {
+              if (redisDown) {
+                throw new Error("Simulated Upstash outage");
+              }
+              if (url.endsWith("/pipeline")) {
+                const cmds = JSON.parse(String(init?.body ?? "[]"));
+                redisPipelines.push(cmds);
+                return new Response(JSON.stringify(cmds.map(() => ({ result: "OK" }))), { status: 200 });
+              }
+              if (url.endsWith("/eval")) {
+                return new Response(JSON.stringify({ result: ["k-backup-ok", "k-backup-ok:1:nonce"] }), {
+                  status: 200,
+                });
+              }
+            }
+            return originalFetch(input, init);
+          }) as any;
+
+          const fallbackMem = new MemoryKeyStore();
+          const redisStore = new UpstashRedisKeyStore("https://upstash.mock", "tok", {
+            breakerDurationMs: 40,
+            memoryFallback: fallbackMem,
+          });
+          await redisStore.syncKeys([
+            { id: "k-outage-a", apiKey: "sk-oa", accountId: "acc-outage-402", tier: 0, weight: 100, maxConcurrency: 5 },
+            { id: "k-outage-b", apiKey: "sk-ob", accountId: "acc-outage-402", tier: 0, weight: 90, maxConcurrency: 5 },
+            { id: "k-backup-ok", apiKey: "sk-ok", accountId: "acc-ok", tier: 1, weight: 80, maxConcurrency: 5 },
+          ]);
+
+          // Trip storage breaker (3 failures) and record HTTP 402 while breaker is OPEN
+          await redisStore.reserveKey();
+          await redisStore.reserveKey();
+          const rOpen = await redisStore.reserveKey(); // 3rd failure trips breaker OPEN
+          expect(rOpen).not.toBeNull();
+          await redisStore.releaseKey("k-outage-a", rOpen!.leaseToken, 402, Infinity, "Wallet empty during Redis outage");
+
+          // Wait for breaker window (40ms) to expire and bring Redis back online
+          await new Promise((r) => setTimeout(r, 55));
+          redisDown = false;
+
+          const rRecovered = await redisStore.reserveKey();
+          expect(rRecovered?.keyId).toBe("k-backup-ok");
+          // Pipeline must have flushed EXHAUSTED for both k-outage-a & sibling k-outage-b + broken account flag!
+          const flatCmds = JSON.stringify(redisPipelines);
+          expect(flatCmds).toContain("openrouter:key:k-outage-a");
+          expect(flatCmds).toContain("openrouter:key:k-outage-b");
+          expect(flatCmds).toContain("openrouter:account:acc-outage-402:broken");
+          await redisStore.releaseKey(rRecovered!.keyId, rRecovered!.leaseToken, 200, 0);
+
+          // 3. OpenAICompatibleProvider enforces chunkTimeoutMs stall watchdog
+          globalThis.fetch = (async () =>
+            new Response(
+              new ReadableStream({
+                start(c) {
+                  c.enqueue(new TextEncoder().encode(": keepalive\n\n"));
+                },
+              }),
+              { status: 200, headers: { "content-type": "text/event-stream" } },
+            )) as any;
+
+          const singleProvider = new OpenAICompatibleProvider({
+            name: "single-stall-test",
+            baseUrl: "https://mock-llm.local/v1",
+            apiKey: "sk-single",
+            defaultModel: "gpt-4o-mini",
+            chunkTimeoutMs: 50,
+          });
+          let stallErr: any = null;
+          try {
+            for await (const _ of singleProvider.stream({ messages: [{ role: "user", content: "hi" }] })) {}
+          } catch (e) {
+            stallErr = e;
+          }
+          expect(String(stallErr?.message)).toContain("STREAM_TIMEOUT");
+        } finally {
+          globalThis.fetch = originalFetch;
+        }
+      });
+
+      test("2026-11-20 Hardening: blocks CORS text/plain & JSON null/Array schema-leak bypasses (403/413) across /v2/ask, /v2/widget/create-thread, and /v2/widget/view", async () => {
+        // 1. CORS simple-request text/plain probe on /v2/ask -> 403 Forbidden (NOT 422 TypeBox schema dump)
+        const resPlainAsk = await app.handle(
+          new Request("http://localhost/v2/ask", {
+            method: "POST",
+            headers: { "content-type": "text/plain" },
+            body: '{"widgetId":"spoof","message":"hello"}',
+          }),
+        );
+        expect(resPlainAsk.status).toBe(403);
+
+        // 2. CORS simple-request >4,000-char text/plain bomb on /v2/ask -> 413 Payload Too Large
+        const resPlainAskBomb = await app.handle(
+          new Request("http://localhost/v2/ask", {
+            method: "POST",
+            headers: { "content-type": "text/plain" },
+            body: "B".repeat(4500),
+          }),
+        );
+        expect(resPlainAskBomb.status).toBe(413);
+
+        // 3. JSON null and JSON Array root on /v2/ask & /v2/widget/create-thread -> 403 Forbidden (NOT 422)
+        const resNullAsk = await postJson(app, "/v2/ask", "null");
+        expect(resNullAsk.status).toBe(403);
+
+        const resArrAsk = await postJson(app, "/v2/ask", ["spoof"]);
+        expect(resArrAsk.status).toBe(403);
+
+        const resNullThread = await postJson(app, "/v2/widget/create-thread", "null");
+        expect(resNullThread.status).toBe(403);
+
+        const resArrThread = await postJson(app, "/v2/widget/create-thread", ["spoof"]);
+        expect(resArrThread.status).toBe(403);
+
+        // 4. Oversized widgetId object (>4,000 chars) on /v2/widget/create-thread -> 413 Payload Too Large
+        const resThreadBomb = await postJson(app, "/v2/widget/create-thread", {
+          widgetId: { nestedBomb: "W".repeat(4500) },
+        });
+        expect(resThreadBomb.status).toBe(413);
+
+        // 5. JSON null/Array on /v2/widget/view -> graceful 200 OK default persona (no 422 leak); oversized text/plain -> 413
+        const resNullView = await postJson(app, "/v2/widget/view", "null");
+        expect(resNullView.status).toBe(200);
+
+        const resPlainViewBomb = await app.handle(
+          new Request("http://localhost/v2/widget/view", {
+            method: "POST",
+            headers: { "content-type": "text/plain" },
+            body: "V".repeat(2500),
+          }),
+        );
+        expect(resPlainViewBomb.status).toBe(413);
+      });
     });
   });
 });

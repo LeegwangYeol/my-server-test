@@ -64,12 +64,16 @@ const PRESETS: Record<
 let cachedRotatingProvider: RotatingLLMProvider | null = null;
 let cachedRotatingSignature: string | null = null;
 let cachedKeyStore: IKeyStore | null = null;
+let cachedKeyStoreSig: string | null = null;
 
 export function getKeyStore(): IKeyStore {
-  if (cachedKeyStore) return cachedKeyStore;
+  const redisUrl = process.env.UPSTASH_REDIS_REST_URL?.trim() ?? "";
+  const redisToken = process.env.UPSTASH_REDIS_REST_TOKEN?.trim() ?? "";
+  const storeSig = redisUrl && redisToken ? `redis:${redisUrl}\0${redisToken}` : "memory";
 
-  const redisUrl = process.env.UPSTASH_REDIS_REST_URL?.trim();
-  const redisToken = process.env.UPSTASH_REDIS_REST_TOKEN?.trim();
+  if (cachedKeyStore && cachedKeyStoreSig === storeSig) {
+    return cachedKeyStore;
+  }
 
   if (redisUrl && redisToken) {
     cachedKeyStore = new UpstashRedisKeyStore(redisUrl, redisToken, {
@@ -78,6 +82,7 @@ export function getKeyStore(): IKeyStore {
   } else {
     cachedKeyStore = new MemoryKeyStore();
   }
+  cachedKeyStoreSig = storeSig;
 
   return cachedKeyStore;
 }
@@ -86,6 +91,7 @@ export function resetCachedProviderForTesting(): void {
   cachedRotatingProvider = null;
   cachedRotatingSignature = null;
   cachedKeyStore = null;
+  cachedKeyStoreSig = null;
 }
 
 export function parseKeyConfigsFromEnv(): KeyConfig[] {

@@ -1,5 +1,10 @@
 import { Elysia, t } from "elysia";
 import { google } from "googleapis";
+import {
+  executeYoutubeWithRetry,
+  handleYoutubeError,
+  sanitizeYoutubeAccessToken,
+} from "./yt-client";
 
 const UPLOADS_CACHE_MAX = 500;
 const UPLOADS_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
@@ -50,16 +55,16 @@ export const v1VideoList = (app: any) => {
     async ({ body, set }: { body: any; set: any }) => {
       const { maxResults, pageToken } = body;
       const handle = String(body?.handle ?? "").trim();
-      const accessToken = String(body?.accessToken ?? "").trim();
+      const accessToken = sanitizeYoutubeAccessToken(body?.accessToken);
 
-      if (!handle || handle.length > 128) {
+      if (!handle || handle.length > 128 || /[\s\x00-\x1f\x7f]/.test(handle)) {
         set.status = 400;
         return {
           success: false,
           message: "유효한 handle 값이 제공되지 않았습니다.",
         };
       }
-      if (!accessToken || accessToken.length > 4096) {
+      if (!accessToken) {
         set.status = 400;
         return {
           success: false,
@@ -92,17 +97,21 @@ export const v1VideoList = (app: any) => {
 
         if (!uploadsPlaylistId) {
           const isHandleFormat = handle.startsWith("@");
-          let channelResponse = await youtube.channels.list(
-            isHandleFormat
-              ? { part: ["contentDetails"], forHandle: handle }
-              : { part: ["contentDetails"], forUsername: handle },
+          let channelResponse = await executeYoutubeWithRetry(() =>
+            youtube.channels.list(
+              isHandleFormat
+                ? { part: ["contentDetails"], forHandle: handle }
+                : { part: ["contentDetails"], forUsername: handle },
+            ),
           );
 
           if (!channelResponse.data.items?.length && !isHandleFormat) {
-            channelResponse = await youtube.channels.list({
-              part: ["contentDetails"],
-              forHandle: `@${handle}`,
-            });
+            channelResponse = await executeYoutubeWithRetry(() =>
+              youtube.channels.list({
+                part: ["contentDetails"],
+                forHandle: `@${handle}`,
+              }),
+            );
           }
 
           uploadsPlaylistId =
@@ -142,12 +151,14 @@ export const v1VideoList = (app: any) => {
             : undefined;
 
         // 업로드 플레이리스트에서 동영상 리스트 가져오기
-        const response = await youtube.playlistItems.list({
-          part: ["snippet", "contentDetails"],
-          playlistId: uploadsPlaylistId,
-          maxResults: max,
-          pageToken: cleanPageToken,
-        });
+        const response = await executeYoutubeWithRetry(() =>
+          youtube.playlistItems.list({
+            part: ["snippet", "contentDetails"],
+            playlistId: uploadsPlaylistId,
+            maxResults: max,
+            pageToken: cleanPageToken,
+          }),
+        );
 
         return {
           success: true,
@@ -162,13 +173,12 @@ export const v1VideoList = (app: any) => {
           },
         };
       } catch (error: any) {
-        console.error("YouTube 채널 동영상 조회 에러:", error);
-        set.status = 400;
-        return {
-          success: false,
-          message:
-            error?.message || "채널 동영상 조회 중 오류가 발생하였습니다.",
-        };
+        return handleYoutubeError(
+          "video/list",
+          error,
+          set,
+          "채널 동영상 조회 중 오류가 발생하였습니다.",
+        );
       }
     },
     {
@@ -214,6 +224,10 @@ export const v1VideoList = (app: any) => {
           }),
         }),
         400: t.Object({
+          success: t.Boolean(),
+          message: t.String(),
+        }),
+        429: t.Object({
           success: t.Boolean(),
           message: t.String(),
         }),

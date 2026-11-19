@@ -1,5 +1,10 @@
 import { Elysia, t } from "elysia";
 import { google } from "googleapis";
+import {
+  executeYoutubeWithRetry,
+  handleYoutubeError,
+  sanitizeYoutubeAccessToken,
+} from "./yt-client";
 
 // 타입 단언을 사용하여 타입 오류 해결
 export const v1CommentDelete = (app: any) => {
@@ -7,16 +12,16 @@ export const v1CommentDelete = (app: any) => {
     "/comment/delete",
     async ({ body, set }: { body: any; set: any }) => {
       const commentId = String(body?.commentId ?? "").trim();
-      const accessToken = String(body?.accessToken ?? "").trim();
+      const accessToken = sanitizeYoutubeAccessToken(body?.accessToken);
 
-      if (!commentId || commentId.length > 256) {
+      if (!commentId || commentId.length > 256 || /[\s\x00-\x1f\x7f]/.test(commentId)) {
         set.status = 400;
         return {
           success: false,
           message: "유효한 댓글 ID가 제공되지 않았습니다.",
         };
       }
-      if (!accessToken || accessToken.length > 4096) {
+      if (!accessToken) {
         set.status = 400;
         return {
           success: false,
@@ -37,21 +42,25 @@ export const v1CommentDelete = (app: any) => {
         });
 
         // 댓글 삭제 요청 - 삭제 성공 시 HTTP 204(No Content) 응답이 발생함
-        await youtube.comments.delete({
-          id: commentId,
-        });
+        await executeYoutubeWithRetry(
+          () =>
+            youtube.comments.delete({
+              id: commentId,
+            }),
+          2,
+        );
 
         return {
           success: true,
           message: "댓글이 성공적으로 삭제되었습니다.",
         };
       } catch (error: any) {
-        console.error("YouTube 댓글 삭제 에러:", error);
-        set.status = 400;
-        return {
-          success: false,
-          message: error?.message || "댓글 삭제 중 오류가 발생했습니다.",
-        };
+        return handleYoutubeError(
+          "comment/delete",
+          error,
+          set,
+          "댓글 삭제 중 오류가 발생했습니다.",
+        );
       }
     },
     {
@@ -87,6 +96,10 @@ export const v1CommentDelete = (app: any) => {
           message: t.String(),
         }),
         401: t.Object({
+          success: t.Boolean(),
+          message: t.String(),
+        }),
+        429: t.Object({
           success: t.Boolean(),
           message: t.String(),
         }),

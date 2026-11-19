@@ -8,7 +8,6 @@ import {
 import { v2MailEndpoints } from "./endpoints/v2/mail-endpoints";
 import { v2SmsEndpoints } from "./endpoints/v2/sms-endpoints";
 import { healthzEndpoint } from "./endpoints/healthz";
-import { cors } from "@elysiajs/cors";
 
 import {
   checkRateLimit,
@@ -18,6 +17,41 @@ import {
 
 const MAX_REQUEST_BODY_SIZE = 1024 * 1024; // 1MB
 const MAX_UPLOAD_BODY_SIZE = 2 * 1024 * 1024; // 2MB
+
+const ALLOWED_CORS_METHODS = "GET, POST, OPTIONS";
+const ALLOWED_CORS_HEADERS =
+  "content-type, authorization, x-admin-token, idempotency-key, x-idempotency-key, accept, x-requested-with, x-test-rate-limit";
+const EXPOSED_CORS_HEADERS =
+  "retry-after, x-ratelimit-limit, x-ratelimit-remaining, x-ratelimit-reset";
+
+/**
+ * Validates and normalizes an HTTP Origin header per WHATWG Fetch / OWASP WSTG-CLNT-07.
+ * Blocks `Origin: null` (sandboxed iframe / data: URI reflection), non-HTTP(S) schemes,
+ * embedded credentials, path/query/hash smuggling, and control characters.
+ */
+export function sanitizeCorsOrigin(rawOrigin?: string | null): string | null {
+  if (!rawOrigin) return null;
+  const trimmed = rawOrigin.trim();
+  if (!trimmed || trimmed.toLowerCase() === "null" || trimmed.length > 512) {
+    return null;
+  }
+  if (/[\s\x00-\x1f\x7f\\]/.test(trimmed)) return null;
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return null;
+    }
+    if (!parsed.hostname || parsed.username || parsed.password) {
+      return null;
+    }
+    if (parsed.pathname !== "/" || parsed.search || parsed.hash) {
+      return null;
+    }
+    return parsed.origin;
+  } catch {
+    return null;
+  }
+}
 
 function normalizePathname(rawPathname: string): string {
   let p = (rawPathname || "/").trim().replace(/\/+/g, "/");
@@ -95,17 +129,23 @@ export const createApp = async (serverless = false) => {
 
   app
     .onRequest(({ request, set }) => {
-      const origin = request.headers.get("origin");
+      set.headers = set.headers || {};
+      set.headers["x-content-type-options"] = "nosniff";
+
+      const safeOrigin = sanitizeCorsOrigin(request.headers.get("origin"));
       const applyCorsHeaders = () => {
-        if (origin) {
-          set.headers = set.headers || {};
-          set.headers["access-control-allow-origin"] = origin;
+        set.headers = set.headers || {};
+        set.headers["x-content-type-options"] = "nosniff";
+        if (safeOrigin) {
+          set.headers["access-control-allow-origin"] = safeOrigin;
           set.headers["access-control-allow-credentials"] = "true";
-          set.headers["access-control-expose-headers"] =
-            "retry-after, x-ratelimit-limit, x-ratelimit-remaining, x-ratelimit-reset";
+          set.headers["access-control-expose-headers"] = EXPOSED_CORS_HEADERS;
           set.headers["vary"] = "Origin";
         }
       };
+
+      // Attach validated CORS headers for all legitimate cross-origin requests
+      applyCorsHeaders();
 
       let pathname = "/";
       try {
@@ -154,9 +194,22 @@ export const createApp = async (serverless = false) => {
         }
       }
 
-      // Bypass rate limit for CORS preflight
+      // Handle CORS preflight (bypass rate limit; never echo internal proxy headers)
       if (request.method === "OPTIONS") {
-        return;
+        const preflightHeaders = new Headers({
+          "x-content-type-options": "nosniff",
+        });
+        if (safeOrigin) {
+          preflightHeaders.set("access-control-allow-origin", safeOrigin);
+          preflightHeaders.set("access-control-allow-credentials", "true");
+          preflightHeaders.set("access-control-allow-methods", ALLOWED_CORS_METHODS);
+          preflightHeaders.set("access-control-allow-headers", ALLOWED_CORS_HEADERS);
+          preflightHeaders.set("access-control-max-age", "600");
+          preflightHeaders.set("vary", "Origin");
+        } else if (request.headers.has("origin")) {
+          preflightHeaders.set("vary", "Origin");
+        }
+        return new Response(null, { status: 204, headers: preflightHeaders });
       }
 
       // Endpoint Rate Limiting
@@ -179,6 +232,7 @@ export const createApp = async (serverless = false) => {
         set.headers["x-ratelimit-limit"] = String(policy.limit);
         set.headers["x-ratelimit-remaining"] = "0";
         set.headers["x-ratelimit-reset"] = String(rateLimitRes.resetEpochSec);
+        set.headers["access-control-expose-headers"] = EXPOSED_CORS_HEADERS;
         applyCorsHeaders();
         return {
           success: false,
@@ -192,10 +246,21 @@ export const createApp = async (serverless = false) => {
       set.headers["x-ratelimit-limit"] = String(policy.limit);
       set.headers["x-ratelimit-remaining"] = String(rateLimitRes.remaining);
       set.headers["x-ratelimit-reset"] = String(rateLimitRes.resetEpochSec);
-      set.headers["access-control-expose-headers"] =
-        "retry-after, x-ratelimit-limit, x-ratelimit-remaining, x-ratelimit-reset";
+      set.headers["access-control-expose-headers"] = EXPOSED_CORS_HEADERS;
     })
     .onError(({ request, error, code, set }: any) => {
+      const safeOrigin = sanitizeCorsOrigin(request?.headers?.get?.("origin"));
+      const attachOriginCors = () => {
+        set.headers = set.headers || {};
+        set.headers["x-content-type-options"] = "nosniff";
+        if (safeOrigin) {
+          set.headers["access-control-allow-origin"] = safeOrigin;
+          set.headers["access-control-allow-credentials"] = "true";
+          set.headers["access-control-expose-headers"] = EXPOSED_CORS_HEADERS;
+          set.headers["vary"] = "Origin";
+        }
+      };
+
       const errStr = [
         error?.message,
         (error as any)?.cause?.message,
@@ -210,15 +275,7 @@ export const createApp = async (serverless = false) => {
       ) {
         const is2Mb = errStr.includes("PAYLOAD_TOO_LARGE_2MB");
         set.status = 413;
-        const origin = request?.headers?.get?.("origin");
-        if (origin) {
-          set.headers = set.headers || {};
-          set.headers["access-control-allow-origin"] = origin;
-          set.headers["access-control-allow-credentials"] = "true";
-          set.headers["access-control-expose-headers"] =
-            "retry-after, x-ratelimit-limit, x-ratelimit-remaining, x-ratelimit-reset";
-          set.headers["vary"] = "Origin";
-        }
+        attachOriginCors();
         return {
           success: false,
           error: `Payload Too Large: request body exceeds ${is2Mb ? "2MB" : "1MB"} limit`,
@@ -236,17 +293,6 @@ export const createApp = async (serverless = false) => {
         }
         if (errPath.startsWith("/v2/admin/")) {
           const token = (request?.headers?.get?.("x-admin-token") || "").trim();
-          const attachOriginCors = () => {
-            const origin = request?.headers?.get?.("origin");
-            if (origin) {
-              set.headers = set.headers || {};
-              set.headers["access-control-allow-origin"] = origin;
-              set.headers["access-control-allow-credentials"] = "true";
-              set.headers["access-control-expose-headers"] =
-                "retry-after, x-ratelimit-limit, x-ratelimit-remaining, x-ratelimit-reset";
-              set.headers["vary"] = "Origin";
-            }
-          };
 
           if (errPath === "/v2/admin/mail/send") {
             const mailToken = process.env.MAIL_SEND_TOKEN?.trim();
@@ -284,10 +330,12 @@ export const createApp = async (serverless = false) => {
             }
           }
         }
+        attachOriginCors();
         return;
       }
 
       if (code === "NOT_FOUND") {
+        attachOriginCors();
         return;
       }
 
@@ -299,6 +347,7 @@ export const createApp = async (serverless = false) => {
         typeof set.status === "number" && set.status >= 400
           ? set.status
           : 500;
+      attachOriginCors();
       return {
         success: false,
         error: isProd
@@ -356,7 +405,14 @@ export const createApp = async (serverless = false) => {
       if (mediaType === "application/json" || mediaType.endsWith("+json")) {
         const text = await readBoundedBodyText(request, MAX_REQUEST_BODY_SIZE);
         if (!text) return {};
-        return JSON.parse(text);
+        const parsed = JSON.parse(text);
+        if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+          return {};
+        }
+        if (Object.prototype.hasOwnProperty.call(parsed, "__proto__")) {
+          delete (parsed as Record<string, unknown>)["__proto__"];
+        }
+        return parsed;
       }
 
       if (mediaType === "text/plain") {
@@ -374,17 +430,6 @@ export const createApp = async (serverless = false) => {
         return text;
       }
     })
-    .use(
-      cors({
-        origin: true,
-        exposeHeaders: [
-          "retry-after",
-          "x-ratelimit-limit",
-          "x-ratelimit-remaining",
-          "x-ratelimit-reset",
-        ],
-      }),
-    )
     .use(
       swagger({
         path: "/",

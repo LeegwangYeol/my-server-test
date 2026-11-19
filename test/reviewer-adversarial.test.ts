@@ -1840,4 +1840,432 @@ describe("Adversarial Reviewer Verification Suite", () => {
       google.youtube = origYoutube;
     }
   });
+
+  it("VULN-49: UpstashRedisKeyStore serializes Infinity/NaN cooldown safely without JSON null errors, prunes stale keys on syncKeys, and getKeyStore reacts to env changes", async () => {
+    const { UpstashRedisKeyStore } = await import(
+      "../lib/llm/key-manager/stores/upstash-redis"
+    );
+    const { MemoryKeyStore } = await import(
+      "../lib/llm/key-manager/stores/memory"
+    );
+    const { getKeyStore, resetCachedProviderForTesting } = await import(
+      "../lib/llm/factory"
+    );
+
+    const mem = new MemoryKeyStore();
+    const store = new UpstashRedisKeyStore(
+      "https://mock-upstash-49.local",
+      "mock-token",
+      { memoryFallback: mem },
+    );
+
+    const evalBodies: any[][] = [];
+    const pipelineBodies: any[][][] = [];
+    const originalFetch = globalThis.fetch;
+    const prevRedisUrl = process.env.UPSTASH_REDIS_REST_URL;
+    const prevRedisToken = process.env.UPSTASH_REDIS_REST_TOKEN;
+
+    try {
+      globalThis.fetch = (async (input: any, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/pipeline")) {
+          const cmds = JSON.parse(String(init?.body ?? "[]"));
+          pipelineBodies.push(cmds);
+          return new Response(
+            JSON.stringify(cmds.map(() => ({ result: 1 }))),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
+        if (url.endsWith("/eval")) {
+          const body = JSON.parse(String(init?.body ?? "[]"));
+          evalBodies.push(body);
+          return new Response(JSON.stringify({ result: "OK" }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return originalFetch(input, init);
+      }) as any;
+
+      // 1. Seed 2 keys, then rotate to 1 key -> stale key k-old must be pruned from memory & Redis list reset
+      await store.syncKeys([
+        { id: "k-old", apiKey: "sk-old", tier: 0, weight: 10, maxConcurrency: 5 },
+        { id: "k-keep", apiKey: "sk-keep", tier: 0, weight: 10, maxConcurrency: 5 },
+      ]);
+      expect((await store.getAllStates()).map((s) => s.id)).toEqual(["k-old", "k-keep"]);
+
+      await store.syncKeys([
+        { id: "k-keep", apiKey: "sk-keep", tier: 0, weight: 10, maxConcurrency: 5 },
+      ]);
+      expect((await store.getAllStates()).map((s) => s.id)).toEqual(["k-keep"]);
+      expect(pipelineBodies[1][0]).toEqual(["DEL", "openrouter:keys:list"]);
+
+      // Empty key sync must NOT emit invalid 2-arg SADD
+      await store.syncKeys([]);
+      expect(pipelineBodies[2].some((c) => c[0] === "SADD")).toBe(false);
+
+      // 2. Releasing with Infinity cooldown (402 exhaustion) must NEVER serialize null into /eval ARGV
+      await store.syncKeys([
+        { id: "k-402", apiKey: "sk-402", accountId: "acc-49", tier: 0, weight: 10, maxConcurrency: 5 },
+      ]);
+      await store.releaseKey("k-402", "lease-inf-49", 402, Infinity, "Wallet empty");
+
+      expect(evalBodies.length).toBe(1);
+      const evalArgs = evalBodies[0];
+      // [script, numKeys, hashKey, leaseToken, statusCode, cooldownMs, errMsg]
+      expect(evalArgs.includes(null)).toBe(false);
+      expect(evalArgs[5]).toBe(0);
+
+      // 3. getKeyStore invalidates singleton when UPSTASH_REDIS_REST_URL changes
+      resetCachedProviderForTesting();
+      delete process.env.UPSTASH_REDIS_REST_URL;
+      delete process.env.UPSTASH_REDIS_REST_TOKEN;
+      const sMem = getKeyStore();
+      expect(sMem).toBeInstanceOf(MemoryKeyStore);
+
+      process.env.UPSTASH_REDIS_REST_URL = "https://upstash-1.example.com";
+      process.env.UPSTASH_REDIS_REST_TOKEN = "tok-1";
+      const sRedis1 = getKeyStore();
+      expect(sRedis1).toBeInstanceOf(UpstashRedisKeyStore);
+
+      process.env.UPSTASH_REDIS_REST_URL = "https://upstash-2.example.com";
+      const sRedis2 = getKeyStore();
+      expect(sRedis2).not.toBe(sRedis1);
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (prevRedisUrl === undefined) delete process.env.UPSTASH_REDIS_REST_URL;
+      else process.env.UPSTASH_REDIS_REST_URL = prevRedisUrl;
+      if (prevRedisToken === undefined) delete process.env.UPSTASH_REDIS_REST_TOKEN;
+      else process.env.UPSTASH_REDIS_REST_TOKEN = prevRedisToken;
+      resetCachedProviderForTesting();
+    }
+  });
+
+  it("VULN-50: CORS guard blocks Origin: null reflection, omits wildcard+credentials conflict, and prevents internal proxy header echoing on OPTIONS preflight", async () => {
+    const { sanitizeCorsOrigin } = await import("../src/app");
+    expect(sanitizeCorsOrigin("null")).toBeNull();
+    expect(sanitizeCorsOrigin("javascript:alert(1)")).toBeNull();
+    expect(sanitizeCorsOrigin("https://user:pass@evil.com")).toBeNull();
+    expect(sanitizeCorsOrigin("https://evil.com/extra-path")).toBeNull();
+    expect(sanitizeCorsOrigin("https://tokki.app")).toBe("https://tokki.app");
+    expect(sanitizeCorsOrigin("http://localhost:5173")).toBe("http://localhost:5173");
+
+    const app = await createApp(true);
+
+    // 1. Sandboxed iframe Origin: null must NEVER reflect Access-Control-Allow-Origin: null
+    const nullOriginRes = await app.handle(
+      new Request("http://localhost/v1/healthz", {
+        headers: { origin: "null" },
+      }),
+    );
+    expect(nullOriginRes.status).toBe(200);
+    expect(nullOriginRes.headers.get("access-control-allow-origin")).toBeNull();
+    expect(nullOriginRes.headers.get("access-control-allow-credentials")).toBeNull();
+    expect(nullOriginRes.headers.get("x-content-type-options")).toBe("nosniff");
+
+    // 2. Non-CORS request (no Origin header) must NOT emit wildcard * + credentials: true conflict
+    const plainRes = await app.handle(new Request("http://localhost/v1/healthz"));
+    expect(plainRes.status).toBe(200);
+    expect(plainRes.headers.get("access-control-allow-origin")).toBeNull();
+    expect(plainRes.headers.get("access-control-allow-credentials")).toBeNull();
+
+    // 3. OPTIONS preflight with legitimate Origin returns 204 and allowlisted headers WITHOUT echoing x-vercel-oidc-token
+    const preflightRes = await app.handle(
+      new Request("http://localhost/v2/ask", {
+        method: "OPTIONS",
+        headers: {
+          origin: "https://client.tokki.app",
+          "access-control-request-method": "POST",
+          "x-vercel-oidc-token": "secret-platform-oidc-jwt",
+          "x-vercel-proxy-signature": "secret-sig",
+        },
+      }),
+    );
+    expect(preflightRes.status).toBe(204);
+    expect(preflightRes.headers.get("access-control-allow-origin")).toBe(
+      "https://client.tokki.app",
+    );
+    const allowHeaders = (
+      preflightRes.headers.get("access-control-allow-headers") || ""
+    ).toLowerCase();
+    expect(allowHeaders).toContain("x-admin-token");
+    expect(allowHeaders).not.toContain("x-vercel-oidc-token");
+    expect(allowHeaders).not.toContain("x-vercel-proxy-signature");
+  });
+
+  it("VULN-51: /v2/ask skips redundant listMessages DB RTT on fresh thread creation, preserves user prompt on DB outage, and normalizes JSON null/array bodies", async () => {
+    const prevUrl = process.env.SUPABASE_URL;
+    const prevKey = process.env.SUPABASE_SERVICE_KEY;
+    const prevLlmKey = process.env.LLM_API_KEY;
+    const prevOrKeys = process.env.OPENROUTER_API_KEYS;
+    const originalFetch = globalThis.fetch;
+    const widgetStoreMod: any = await import("../lib/widget-store?real-v51" as any);
+
+    try {
+      process.env.SUPABASE_URL = "https://mock-supabase-51.local";
+      process.env.SUPABASE_SERVICE_KEY = "mock-service-key-51";
+      delete process.env.LLM_API_KEY;
+      delete process.env.OPENROUTER_API_KEYS;
+      widgetStoreMod?.invalidateWidgetCache?.("registered-valid-widget");
+
+      let chatMessageGetCalls = 0;
+      let simulateDbOutage = false;
+
+      globalThis.fetch = (async (input: any, init?: RequestInit) => {
+        const rawUrl = typeof input === "string" ? input : input?.url || String(input);
+        const parsed = new URL(rawUrl);
+        if (parsed.hostname === "mock-supabase-51.local") {
+          const method = (init?.method ?? "GET").toUpperCase();
+          if (parsed.pathname.endsWith("/widget")) {
+            return new Response(
+              JSON.stringify({
+                id: "registered-valid-widget",
+                name: "Test Bot",
+                theme: "noir",
+                description: "Online",
+                welcome_message: "Hi",
+                system_prompt: "Reply concisely.",
+                suggested_questions: [],
+                icon_url: null,
+                chat_bubble_size: null,
+                is_deleted: false,
+                created_at: new Date().toISOString(),
+                updated_at: new Date().toISOString(),
+              }),
+              { status: 200, headers: { "content-type": "application/json" } },
+            );
+          }
+          if (simulateDbOutage) {
+            return new Response(JSON.stringify({ message: "DB connection refused" }), {
+              status: 500,
+              headers: { "content-type": "application/json" },
+            });
+          }
+          if (parsed.pathname.endsWith("/chat_thread") && method === "POST") {
+            return new Response(
+              JSON.stringify({ id: "00000000-0000-4000-8000-000000000051" }),
+              { status: 201, headers: { "content-type": "application/json" } },
+            );
+          }
+          if (parsed.pathname.endsWith("/chat_message")) {
+            if (method === "GET") chatMessageGetCalls++;
+            return new Response(JSON.stringify([]), {
+              status: method === "POST" ? 201 : 200,
+              headers: { "content-type": "application/json" },
+            });
+          }
+        }
+        return originalFetch(input, init);
+      }) as any;
+
+      const app = await createApp(true);
+
+      // 1. Fresh thread creation skips redundant GET /chat_message SELECT
+      const resFresh = await app.handle(
+        new Request("http://localhost/v2/ask", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            widgetId: "registered-valid-widget",
+            message: "안녕하세요",
+          }),
+        }),
+      );
+      expect(resFresh.status).toBe(200);
+      const sseText = await resFresh.text();
+      expect(sseText).toContain("[DONE]");
+      expect(chatMessageGetCalls).toBe(0);
+
+      // 2. Simulated DB outage on createThread/appendMessage still streams valid reply
+      simulateDbOutage = true;
+      const resOutage = await app.handle(
+        new Request("http://localhost/v2/ask", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            widgetId: "registered-valid-widget",
+            message: "추천 해주세요",
+          }),
+        }),
+      );
+      expect(resOutage.status).toBe(200);
+      expect(await resOutage.text()).toContain("[DONE]");
+
+      // 3. JSON primitive "null" or array "[1,2]" on /v2/ask returns 403 (never 422 TypeBox schema leak)
+      for (const rawJson of ["null", "[1, 2, 3]"]) {
+        const primRes = await app.handle(
+          new Request("http://localhost/v2/ask", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: rawJson,
+          }),
+        );
+        expect(primRes.status).toBe(403);
+      }
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (prevUrl === undefined) delete process.env.SUPABASE_URL;
+      else process.env.SUPABASE_URL = prevUrl;
+      if (prevKey === undefined) delete process.env.SUPABASE_SERVICE_KEY;
+      else process.env.SUPABASE_SERVICE_KEY = prevKey;
+      if (prevLlmKey === undefined) delete process.env.LLM_API_KEY;
+      else process.env.LLM_API_KEY = prevLlmKey;
+      if (prevOrKeys === undefined) delete process.env.OPENROUTER_API_KEYS;
+      else process.env.OPENROUTER_API_KEYS = prevOrKeys;
+    }
+  });
+
+  it("VULN-52: Admin widget/thread endpoints reject PostgreSQL-breaking null bytes (\\x00) and invalid delete IDs with HTTP 400", async () => {
+    const prevToken = process.env.ADMIN_TOKEN;
+    process.env.ADMIN_TOKEN = "test-admin-secret";
+    try {
+      const app = await createApp(true);
+
+      // 1. Null byte in widget upsert description/system_prompt -> HTTP 400
+      const resUpsertNull = await app.handle(
+        new Request("http://localhost/v2/admin/widgets/upsert", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-admin-token": "test-admin-secret",
+          },
+          body: JSON.stringify({
+            id: "safe-widget",
+            system_prompt: "Hello\u0000World",
+          }),
+        }),
+      );
+      expect(resUpsertNull.status).toBe(400);
+
+      // 2. Null byte in /v2/admin/threads/update context_text -> HTTP 400
+      const resThreadNull = await app.handle(
+        new Request("http://localhost/v2/admin/threads/update", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-admin-token": "test-admin-secret",
+          },
+          body: JSON.stringify({
+            widgetId: "safe-widget",
+            threadId: "thread-1",
+            context_text: "RAG\u0000Data",
+          }),
+        }),
+      );
+      expect(resThreadNull.status).toBe(400);
+
+      // 3. Whitespace or >100-char ID on /v2/admin/widgets/delete -> HTTP 400
+      for (const badId of ["   ", "d".repeat(101), "bad\u0000id"]) {
+        const resDel = await app.handle(
+          new Request("http://localhost/v2/admin/widgets/delete", {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              "x-admin-token": "test-admin-secret",
+            },
+            body: JSON.stringify({ id: badId }),
+          }),
+        );
+        expect(resDel.status).toBe(400);
+      }
+    } finally {
+      if (prevToken === undefined) delete process.env.ADMIN_TOKEN;
+      else process.env.ADMIN_TOKEN = prevToken;
+    }
+  });
+
+  it("VULN-53: YouTube endpoints retry transient 429s, propagate persistent 429 + Retry-After, and block smuggled accessToken/OAuth state locally", async () => {
+    const { google } = await import("googleapis");
+    const origYoutube = google.youtube;
+    let channelCalls = 0;
+    let mode: "transient_429" | "persistent_429" = "transient_429";
+
+    try {
+      (google as any).youtube = () => ({
+        channels: {
+          list: async () => {
+            channelCalls++;
+            if (mode === "transient_429" && channelCalls === 1) {
+              const err: any = new Error("Quota rateLimitExceeded");
+              err.code = 429;
+              err.response = {
+                status: 429,
+                headers: { "retry-after": "0.05" },
+              };
+              throw err;
+            }
+            if (mode === "persistent_429") {
+              const err: any = new Error("User rate limit exceeded");
+              err.code = 429;
+              err.response = {
+                status: 429,
+                headers: { "retry-after": "12" },
+              };
+              throw err;
+            }
+            return {
+              data: {
+                items: [{ id: "UC1no5Q01M2LmT-QLgLlUN0Q" }],
+                pageInfo: { totalResults: 1, resultsPerPage: 5 },
+              },
+            };
+          },
+        },
+      });
+
+      const app = await createApp(true);
+
+      // 1. Transient 429 automatically retries and succeeds with HTTP 200
+      const okRes = await app.handle(
+        new Request("http://localhost/v1/youtube/channel/info", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ accessToken: "ya29.valid_token" }),
+        }),
+      );
+      expect(okRes.status).toBe(200);
+      expect(channelCalls).toBe(2);
+
+      // 2. Persistent 429 with Retry-After: 12 (> 2s serverless cap) fails fast with HTTP 429 + Retry-After: 12
+      mode = "persistent_429";
+      const rlRes = await app.handle(
+        new Request("http://localhost/v1/youtube/channel/info", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ accessToken: "ya29.valid_token" }),
+        }),
+      );
+      expect(rlRes.status).toBe(429);
+      expect(rlRes.headers.get("retry-after")).toBe("12");
+
+      // 3. Smuggled whitespace/CRLF accessToken is blocked locally (0 extra youtube calls)
+      const callsBefore = channelCalls;
+      const smuggledRes = await app.handle(
+        new Request("http://localhost/v1/youtube/channel/info", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ accessToken: "ya29.bad\r\nX-Evil: 1" }),
+        }),
+      );
+      expect(smuggledRes.status).toBe(400);
+      expect(channelCalls).toBe(callsBefore);
+
+      // 4. Forged OAuth confirm state with invalid clientId pattern or backslash redirectUri -> local 400
+      const forgedState = Buffer.from(
+        JSON.stringify({
+          clientId: "not-a-google-client-id",
+          clientSecret: "GOCSPX-valid",
+          redirectUri: "https://example.com/\\@evil.com",
+        }),
+      ).toString("base64");
+      const confirmRes = await app.handle(
+        new Request(
+          `http://localhost/v1/youtube/auth/confirm?code=valid_code&state=${encodeURIComponent(forgedState)}`,
+        ),
+      );
+      expect(confirmRes.status).toBe(400);
+    } finally {
+      google.youtube = origYoutube;
+    }
+  });
 });

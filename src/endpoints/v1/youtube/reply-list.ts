@@ -1,5 +1,10 @@
 import { Elysia, t } from "elysia";
 import { google } from "googleapis";
+import {
+  executeYoutubeWithRetry,
+  handleYoutubeError,
+  sanitizeYoutubeAccessToken,
+} from "./yt-client";
 
 // 타입 단언을 사용하여 타입 오류 해결
 export const v1ReplyList = (app: any) => {
@@ -8,16 +13,16 @@ export const v1ReplyList = (app: any) => {
     async ({ body, set }: { body: any; set: any }) => {
       const { maxResults, pageToken } = body;
       const parentId = String(body?.parentId ?? "").trim();
-      const accessToken = String(body?.accessToken ?? "").trim();
+      const accessToken = sanitizeYoutubeAccessToken(body?.accessToken);
 
-      if (!parentId || parentId.length > 256) {
+      if (!parentId || parentId.length > 256 || /[\s\x00-\x1f\x7f]/.test(parentId)) {
         set.status = 400;
         return {
           success: false,
           message: "유효한 댓글의 Id 값이 제공되지 않았습니다.",
         };
       }
-      if (!accessToken || accessToken.length > 4096) {
+      if (!accessToken) {
         set.status = 400;
         return {
           success: false,
@@ -60,12 +65,14 @@ export const v1ReplyList = (app: any) => {
             ? pageToken.trim()
             : undefined;
 
-        const response = await youtube.comments.list({
-          part: ["snippet"], // part 파라미터 추가
-          parentId: parentId,
-          maxResults: max,
-          pageToken: cleanPageToken,
-        });
+        const response = await executeYoutubeWithRetry(() =>
+          youtube.comments.list({
+            part: ["snippet"], // part 파라미터 추가
+            parentId: parentId,
+            maxResults: max,
+            pageToken: cleanPageToken,
+          }),
+        );
 
         return {
           success: true,
@@ -105,12 +112,12 @@ export const v1ReplyList = (app: any) => {
           },
         };
       } catch (error: any) {
-        console.error("YouTube 댓글 목록 조회 에러:", error);
-        set.status = 400;
-        return {
-          success: false,
-          message: error?.message || "댓글 목록 조회 중 오류가 발생하였습니다.",
-        };
+        return handleYoutubeError(
+          "reply/list",
+          error,
+          set,
+          "댓글 목록 조회 중 오류가 발생하였습니다.",
+        );
       }
     },
     {
@@ -169,6 +176,10 @@ export const v1ReplyList = (app: any) => {
           }),
         }),
         400: t.Object({
+          success: t.Boolean(),
+          message: t.String(),
+        }),
+        429: t.Object({
           success: t.Boolean(),
           message: t.String(),
         }),
