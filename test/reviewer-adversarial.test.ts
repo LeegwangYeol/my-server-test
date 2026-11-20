@@ -2268,4 +2268,545 @@ describe("Adversarial Reviewer Verification Suite", () => {
       google.youtube = origYoutube;
     }
   });
+
+  it("VULN-54: OpenAICompatibleProvider supports preStreamHandshake/streamFromHandshake and surfaces structured 429 Retry-After, 402, 503, and 413 codes before SSE commit", async () => {
+    const { OpenAICompatibleProvider } = await import("../lib/llm/openai-compatible");
+    const origFetch = globalThis.fetch;
+    const prevRetryMax = process.env.LLM_RETRY_MAX;
+
+    try {
+      process.env.LLM_RETRY_MAX = "0";
+      let upstreamMode: "429" | "402" | "503" | "413" | "200" = "429";
+
+      globalThis.fetch = (async () => {
+        if (upstreamMode === "429") {
+          return new Response(JSON.stringify({ error: { message: "Quota exceeded" } }), {
+            status: 429,
+            statusText: "Too Many Requests",
+            headers: { "retry-after": "14" },
+          });
+        }
+        if (upstreamMode === "402") {
+          return new Response("Insufficient credits", {
+            status: 402,
+            statusText: "Payment Required",
+          });
+        }
+        if (upstreamMode === "503") {
+          return new Response("Overloaded", {
+            status: 503,
+            statusText: "Service Unavailable",
+          });
+        }
+        if (upstreamMode === "413") {
+          return new Response("Context length exceeded", {
+            status: 413,
+            statusText: "Payload Too Large",
+          });
+        }
+        return new Response(
+          'data: {"choices":[{"delta":{"content":"SingleKeyOK"}}]}\n\ndata: [DONE]\n\n',
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        );
+      }) as any;
+
+      const provider = new OpenAICompatibleProvider({
+        name: "gemini",
+        baseUrl: "https://mock-gemini.local/v1beta/openai",
+        apiKey: "sk-gemini",
+        defaultModel: "gemini-3.5-flash-lite",
+      });
+
+      // 1. 429 -> ALL_KEYS_RATE_LIMITED with exact retryAfterSeconds = 14
+      let err429: any = null;
+      try {
+        await provider.preStreamHandshake({
+          messages: [{ role: "user", content: "hi" }],
+        });
+      } catch (e) {
+        err429 = e;
+      }
+      expect(err429?.statusCode).toBe(429);
+      expect(err429?.code).toBe("ALL_KEYS_RATE_LIMITED");
+      expect(err429?.retryAfterSeconds).toBe(14);
+
+      // 2. 402 -> ALL_ACCOUNTS_EXHAUSTED
+      upstreamMode = "402";
+      let err402: any = null;
+      try {
+        await provider.preStreamHandshake({
+          messages: [{ role: "user", content: "hi" }],
+        });
+      } catch (e) {
+        err402 = e;
+      }
+      expect(err402?.statusCode).toBe(402);
+      expect(err402?.code).toBe("ALL_ACCOUNTS_EXHAUSTED");
+
+      // 3. 503 -> UPSTREAM_MODEL_OUTAGE
+      upstreamMode = "503";
+      let err503: any = null;
+      try {
+        await provider.preStreamHandshake({
+          messages: [{ role: "user", content: "hi" }],
+        });
+      } catch (e) {
+        err503 = e;
+      }
+      expect(err503?.statusCode).toBe(503);
+      expect(err503?.code).toBe("UPSTREAM_MODEL_OUTAGE");
+
+      // 4. 413 -> UPSTREAM_CLIENT_ERROR
+      upstreamMode = "413";
+      let err413: any = null;
+      try {
+        await provider.preStreamHandshake({
+          messages: [{ role: "user", content: "hi" }],
+        });
+      } catch (e) {
+        err413 = e;
+      }
+      expect(err413?.statusCode).toBe(413);
+      expect(err413?.code).toBe("UPSTREAM_CLIENT_ERROR");
+
+      // 5. 200 -> preStreamHandshake + streamFromHandshake yields tokens cleanly
+      upstreamMode = "200";
+      const hs = await provider.preStreamHandshake({
+        messages: [{ role: "user", content: "hi" }],
+      });
+      const out: string[] = [];
+      for await (const tk of provider.streamFromHandshake(hs)) {
+        out.push(tk);
+      }
+      expect(out.join("")).toBe("SingleKeyOK");
+    } finally {
+      globalThis.fetch = origFetch;
+      if (prevRetryMax === undefined) delete process.env.LLM_RETRY_MAX;
+      else process.env.LLM_RETRY_MAX = prevRetryMax;
+    }
+  });
+
+  it("VULN-55: Serverless handler blocks >65535 ports, malformed IPv6, backslash host overrides, HTTP/2 pseudo-headers, and cleans up req/res listeners", async () => {
+    const { EventEmitter } = await import("node:events");
+    const handlerMod = await import("../lambda-src/handler");
+    const { sanitizeHost, sanitizeRequestPath, default: serverlessHandler } = handlerMod;
+
+    // 1. Out-of-range TCP ports and malformed IPv6 fall back to localhost instead of throwing Invalid URL
+    expect(sanitizeHost("evil.com:99999")).toBe("localhost");
+    expect(sanitizeHost("example..com:70000")).toBe("localhost");
+    expect(sanitizeHost("[:::1]")).toBe("localhost");
+    expect(sanitizeHost("[:]")).toBe("localhost");
+    expect(sanitizeHost("[::1]:8080")).toBe("[::1]:8080");
+    expect(sanitizeHost("my-server-mocha.vercel.app")).toBe("my-server-mocha.vercel.app");
+
+    // 2. Leading backslashes and protocol-relative paths stay pinned to /
+    expect(sanitizeRequestPath("/\\evil.com/v1/healthz", "https://localhost")).toBe(
+      "/evil.com/v1/healthz",
+    );
+    expect(sanitizeRequestPath("\\\\evil.com/v1/healthz", "https://localhost")).toBe(
+      "/evil.com/v1/healthz",
+    );
+
+    // 3. Full handler invocation with :method HTTP/2 pseudo-header + evil.com:99999 succeeds (200 OK) with 0 leaked listeners
+    const reqEmitter: any = Object.assign(new EventEmitter(), {
+      url: "/v1/healthz",
+      method: "GET",
+      complete: true,
+      headers: {
+        ":method": "GET",
+        ":authority": "my-server-mocha.vercel.app",
+        "x-forwarded-host": "evil.com:99999",
+        "x-custom-bad": "val\u0000ue",
+      },
+    });
+    let bodyOut = "";
+    const resEmitter: any = Object.assign(new EventEmitter(), {
+      statusCode: 0,
+      headersSent: false,
+      writableEnded: false,
+      destroyed: false,
+      headers: {} as Record<string, any>,
+      setHeader(k: string, v: any) {
+        this.headers[k.toLowerCase()] = v;
+      },
+      getHeader(k: string) {
+        return this.headers[k.toLowerCase()];
+      },
+      write(chunk: any) {
+        this.headersSent = true;
+        bodyOut += Buffer.from(chunk).toString("utf8");
+        return true;
+      },
+      end(chunk?: any) {
+        if (chunk) bodyOut += typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
+        this.writableEnded = true;
+      },
+    });
+
+    await serverlessHandler(reqEmitter, resEmitter);
+    expect(resEmitter.statusCode).toBe(200);
+    expect(bodyOut).toBe("OK");
+    expect(reqEmitter.listenerCount("aborted")).toBe(0);
+    expect(reqEmitter.listenerCount("close")).toBe(0);
+    expect(resEmitter.listenerCount("close")).toBe(0);
+
+    // 4. Control-byte Content-Length smuggling returns HTTP 400 (never 500 or silent header drop)
+    const badClReq: any = Object.assign(new EventEmitter(), {
+      url: "/v2/ask",
+      method: "POST",
+      complete: true,
+      headers: {
+        host: "localhost",
+        "content-length": "10\u00009999999",
+      },
+    });
+    let badClBody = "";
+    const badClRes: any = Object.assign(new EventEmitter(), {
+      statusCode: 0,
+      headersSent: false,
+      writableEnded: false,
+      destroyed: false,
+      setHeader() {},
+      end(c?: any) {
+        if (c) badClBody += String(c);
+        this.writableEnded = true;
+      },
+    });
+    await serverlessHandler(badClReq, badClRes);
+    expect(badClRes.statusCode).toBe(400);
+    expect(badClBody).toContain("Content-Length");
+  });
+
+  it("VULN-56: /v2/ask & appendMessage sanitize PostgreSQL-breaking NUL bytes, admin endpoints enforce 400/500 on invalid IDs/migrations, and normalizeIp bounds megabyte headers", async () => {
+    const prevAdmin = process.env.ADMIN_TOKEN;
+    const prevSupaUrl = process.env.SUPABASE_URL;
+    const prevSupaKey = process.env.SUPABASE_SERVICE_KEY;
+    const origFetch = globalThis.fetch;
+    const realChatStore: any = await import("../lib/chat-store?real-v56" as any);
+
+    try {
+      process.env.ADMIN_TOKEN = "test-admin-v56";
+      process.env.SUPABASE_URL = "https://mock-supa-56.local";
+      process.env.SUPABASE_SERVICE_KEY = "mock-key-56";
+
+      let insertedPayloads: any[] = [];
+      globalThis.fetch = (async (input: any, init?: RequestInit) => {
+        const u = new URL(typeof input === "string" ? input : input.url);
+        if (u.hostname === "mock-supa-56.local") {
+          if (u.pathname.endsWith("/chat_message") && init?.method === "POST") {
+            insertedPayloads.push(JSON.parse(String(init.body ?? "{}")));
+            return new Response(JSON.stringify([]), {
+              status: 201,
+              headers: { "content-type": "application/json" },
+            });
+          }
+          if (u.pathname.endsWith("/_migration_history")) {
+            return new Response(JSON.stringify([]), {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            });
+          }
+          if (u.pathname.includes("/rpc/admin_exec_sql")) {
+            return new Response(JSON.stringify({ message: "syntax error in SQL" }), {
+              status: 400,
+              headers: { "content-type": "application/json" },
+            });
+          }
+          if (u.pathname.endsWith("/widget")) {
+            return new Response(
+              JSON.stringify({
+                id: "registered-valid-widget",
+                name: "Bot",
+                theme: "noir",
+                description: "",
+                welcome_message: "",
+                system_prompt: null,
+                suggested_questions: [],
+                icon_url: null,
+                chat_bubble_size: null,
+                is_deleted: false,
+                created_at: "",
+                updated_at: "",
+              }),
+              { status: 200, headers: { "content-type": "application/json" } },
+            );
+          }
+        }
+        return origFetch(input, init);
+      }) as any;
+
+      // 1. Real appendMessage strips embedded \x00 and rejects pure \x00 or >100-char threadId
+      expect(await realChatStore.appendMessage("t".repeat(101), "user", "hi")).toBe(false);
+      expect(await realChatStore.appendMessage("tid-ok", "user", "\u0000  \u0000")).toBe(false);
+      expect(await realChatStore.appendMessage("tid-ok", "user", "Hello\u0000World")).toBe(true);
+      expect(insertedPayloads[0]?.content).toBe("HelloWorld");
+
+      const app = await createApp(true);
+
+      // 2. Pure \u0000 message on /v2/ask -> HTTP 400 ("message required")
+      const nulAskRes = await app.handle(
+        new Request("http://localhost/v2/ask", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            widgetId: "registered-valid-widget",
+            message: "\u0000   \u0000",
+          }),
+        }),
+      );
+      expect(nulAskRes.status).toBe(400);
+
+      // 3. Whitespace-only or control-char IDs on admin thread/message/upload routes -> HTTP 400
+      for (const route of ["/v2/admin/threads/update", "/v2/admin/threads/rename"]) {
+        const emptyRes = await app.handle(
+          new Request(`http://localhost${route}`, {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              "x-admin-token": "test-admin-v56",
+            },
+            body: JSON.stringify({ widgetId: "   ", threadId: "tid-1" }),
+          }),
+        );
+        expect(emptyRes.status).toBe(400);
+
+        const ctrlRes = await app.handle(
+          new Request(`http://localhost${route}`, {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              "x-admin-token": "test-admin-v56",
+            },
+            body: JSON.stringify({ widgetId: "wid\u0007", threadId: "tid-1" }),
+          }),
+        );
+        expect(ctrlRes.status).toBe(400);
+      }
+
+      const badMsgRes = await app.handle(
+        new Request("http://localhost/v2/admin/messages", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-admin-token": "test-admin-v56",
+          },
+          body: JSON.stringify({ widgetId: "w".repeat(101), threadId: "tid-1" }),
+        }),
+      );
+      expect(badMsgRes.status).toBe(400);
+
+      // 4. Failed SQL migration RPC in /v2/admin/db/migrate returns HTTP 500 (not 200 OK)
+      const migRes = await app.handle(
+        new Request("http://localhost/v2/admin/db/migrate", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-admin-token": "test-admin-v56",
+          },
+          body: JSON.stringify({ dryRun: false }),
+        }),
+      );
+      expect(migRes.status).toBe(500);
+
+      // 5. normalizeIp caps megabyte/control-char X-Forwarded-For payloads to 127.0.0.1
+      expect(normalizeIp("9".repeat(50_000))).toBe("127.0.0.1");
+      expect(normalizeIp("198.51.100.1\u0000evil")).toBe("127.0.0.1");
+    } finally {
+      globalThis.fetch = origFetch;
+      if (prevAdmin === undefined) delete process.env.ADMIN_TOKEN;
+      else process.env.ADMIN_TOKEN = prevAdmin;
+      if (prevSupaUrl === undefined) delete process.env.SUPABASE_URL;
+      else process.env.SUPABASE_URL = prevSupaUrl;
+      if (prevSupaKey === undefined) delete process.env.SUPABASE_SERVICE_KEY;
+      else process.env.SUPABASE_SERVICE_KEY = prevSupaKey;
+    }
+  });
+
+  it("VULN-57: getWidget coalesces concurrent cold-start stampedes (20 -> 1 query), retries read-only 429s, and serves stale live widget during transient DB outages", async () => {
+    const prevUrl = process.env.SUPABASE_URL;
+    const prevKey = process.env.SUPABASE_SERVICE_KEY;
+    const origFetch = globalThis.fetch;
+    const realWidgetStore: any = await import("../lib/widget-store?real-v57" as any);
+
+    try {
+      process.env.SUPABASE_URL = "https://mock-supa-57.local";
+      process.env.SUPABASE_SERVICE_KEY = "mock-key-57";
+      realWidgetStore.invalidateWidgetCache();
+
+      let dbSelectCount = 0;
+      let mode: "ok" | "transient_429" | "hard_503" = "ok";
+
+      globalThis.fetch = (async (input: any, init?: RequestInit) => {
+        const u = new URL(typeof input === "string" ? input : input.url);
+        if (u.hostname === "mock-supa-57.local" && u.pathname.endsWith("/widget")) {
+          dbSelectCount++;
+          await new Promise((r) => setTimeout(r, 15));
+          if (mode === "transient_429" && dbSelectCount === 1) {
+            return new Response(JSON.stringify({ message: "429 Too Many Requests" }), {
+              status: 429,
+              headers: { "content-type": "application/json" },
+            });
+          }
+          if (mode === "hard_503") {
+            return new Response(JSON.stringify({ message: "Upstream DB unavailable" }), {
+              status: 500,
+              headers: { "content-type": "application/json" },
+            });
+          }
+          return new Response(
+            JSON.stringify({
+              id: "coalesce-widget",
+              name: "Coalesced Bot",
+              theme: "noir",
+              description: "",
+              welcome_message: "",
+              system_prompt: null,
+              suggested_questions: [],
+              icon_url: null,
+              chat_bubble_size: null,
+              is_deleted: false,
+              created_at: new Date().toISOString(),
+              updated_at: new Date().toISOString(),
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
+        return origFetch(input, init);
+      }) as any;
+
+      // 1. 20 concurrent cold-start calls coalesce into 1 single PostgREST SELECT
+      const results = await Promise.all(
+        Array.from({ length: 20 }, () => realWidgetStore.getWidget("coalesce-widget")),
+      );
+      expect(dbSelectCount).toBe(1);
+      expect(results.every((r) => r?.id === "coalesce-widget")).toBe(true);
+
+      // 2. Transient read-only 429 retries once and succeeds
+      realWidgetStore.invalidateWidgetCache("coalesce-widget");
+      dbSelectCount = 0;
+      mode = "transient_429";
+      const retried = await realWidgetStore.getWidget("coalesce-widget");
+      expect(retried?.id).toBe("coalesce-widget");
+      expect(dbSelectCount).toBe(2);
+
+      // 3. Explicit invalidation clears stale cache so deleted/revoked widgets fail closed on outage
+      realWidgetStore.invalidateWidgetCache("coalesce-widget");
+      mode = "hard_503";
+      const afterInvalidate = await realWidgetStore.getWidget("coalesce-widget");
+      expect(afterInvalidate).toBeNull();
+    } finally {
+      globalThis.fetch = origFetch;
+      if (prevUrl === undefined) delete process.env.SUPABASE_URL;
+      else process.env.SUPABASE_URL = prevUrl;
+      if (prevKey === undefined) delete process.env.SUPABASE_SERVICE_KEY;
+      else process.env.SUPABASE_SERVICE_KEY = prevKey;
+    }
+  });
+
+  it("VULN-58: processMailQueue & processSmsQueue drain with 0-retry non-blocking attempts on persistent 429s, and resetKeyToActive restores sibling 402 keys while preserving 401 revocations", async () => {
+    const { mailFallbackQueue } = await import("../lib/queue/fallback-queue");
+    const { processMailQueue, resetTransporterCache } = await import("../lib/mail/naver");
+    const { MemoryKeyStore } = await import("../lib/llm/key-manager/stores/memory");
+    const { UpstashRedisKeyStore } = await import("../lib/llm/key-manager/stores/upstash-redis");
+
+    // 1. processMailQueue executes exactly 1 attempt per job (0ms retry sleep) when SMTP remains 421
+    const prevNaverId = process.env.NAVER_ID;
+    const prevNaverPass = process.env.NAVER_APP_PASSWORD;
+    const nodemailer = require("nodemailer");
+    const origCreateTransport = nodemailer.createTransport;
+    let smtpCalls = 0;
+    try {
+      process.env.NAVER_ID = "drainuser";
+      process.env.NAVER_APP_PASSWORD = "drainpass";
+      mailFallbackQueue.clear();
+      resetTransporterCache();
+
+      nodemailer.createTransport = () => ({
+        sendMail: async () => {
+          smtpCalls++;
+          const err: any = new Error("421 4.7.0 Temporary rate limit");
+          err.responseCode = 421;
+          err.retryAfter = "7";
+          throw err;
+        },
+        close: () => {},
+        on: () => {},
+      });
+
+      const job = mailFallbackQueue.enqueue(
+        { to: "u@example.com", subject: "Subj", text: "Body" },
+        { initialDelayMs: 0 },
+      );
+      const t0 = performance.now();
+      const drainRes = await processMailQueue(5);
+      const elapsedMs = performance.now() - t0;
+
+      expect(drainRes.processed).toBe(1);
+      expect(drainRes.failed).toBe(1);
+      expect(smtpCalls).toBe(1); // Strictly 1 attempt (no 3x backoff sleep inside drain!)
+      expect(elapsedMs).toBeLessThan(200);
+      // Retry-After: 7s preserved through explainSmtpError -> backoffMs >= 7050ms
+      expect(mailFallbackQueue.get(job.id)?.backoffMs).toBeGreaterThanOrEqual(7000);
+    } finally {
+      nodemailer.createTransport = origCreateTransport;
+      resetTransporterCache();
+      mailFallbackQueue.clear();
+      if (prevNaverId === undefined) delete process.env.NAVER_ID;
+      else process.env.NAVER_ID = prevNaverId;
+      if (prevNaverPass === undefined) delete process.env.NAVER_APP_PASSWORD;
+      else process.env.NAVER_APP_PASSWORD = prevNaverPass;
+    }
+
+    // 2. resetKeyToActive restores sibling 402-exhausted keys while preserving 401-revoked sibling keys
+    const origFetch = globalThis.fetch;
+    const redisPipelines: any[][][] = [];
+    try {
+      globalThis.fetch = (async (input: any, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("upstash-v58.mock")) {
+          if (url.endsWith("/pipeline")) {
+            const cmds = JSON.parse(String(init?.body ?? "[]"));
+            redisPipelines.push(cmds);
+            return new Response(JSON.stringify(cmds.map(() => ({ result: "OK" }))), {
+              status: 200,
+            });
+          }
+          if (url.endsWith("/eval")) {
+            return new Response(JSON.stringify({ result: "OK" }), { status: 200 });
+          }
+        }
+        return origFetch(input, init);
+      }) as any;
+
+      const mem = new MemoryKeyStore();
+      const redis = new UpstashRedisKeyStore("https://upstash-v58.mock", "tok", {
+        memoryFallback: mem,
+      });
+      await redis.syncKeys([
+        { id: "k-sib-a", apiKey: "sk-a", accountId: "acc-58", tier: 0, weight: 10, maxConcurrency: 5 },
+        { id: "k-sib-b", apiKey: "sk-b", accountId: "acc-58", tier: 0, weight: 10, maxConcurrency: 5 },
+        { id: "k-revoked-c", apiKey: "sk-c", accountId: "acc-58", tier: 0, weight: 10, maxConcurrency: 5 },
+      ]);
+
+      // k-sib-a hits 402 -> bulk-exhausts k-sib-a & k-sib-b (and k-revoked-c) with 402, then k-revoked-c gets explicit 401
+      await redis.releaseKey("k-sib-a", "l1", 402, Infinity, "Wallet empty");
+      await redis.releaseKey("k-revoked-c", "l2", 401, Infinity, "Key revoked");
+
+      redisPipelines.length = 0;
+      await redis.resetKeyToActive("k-sib-a");
+
+      const states = await redis.getAllStates();
+      expect(states.find((s) => s.id === "k-sib-a")?.status).toBe("ACTIVE");
+      expect(states.find((s) => s.id === "k-sib-b")?.status).toBe("ACTIVE");
+      expect(states.find((s) => s.id === "k-revoked-c")?.status).toBe("EXHAUSTED");
+
+      const resetPipelineJson = JSON.stringify(redisPipelines);
+      expect(resetPipelineJson).toContain("openrouter:key:k-sib-a");
+      expect(resetPipelineJson).toContain("openrouter:key:k-sib-b");
+      expect(resetPipelineJson).not.toContain("openrouter:key:k-revoked-c");
+      expect(resetPipelineJson).toContain("openrouter:account:acc-58:broken");
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
 });

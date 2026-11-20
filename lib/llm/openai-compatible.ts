@@ -31,6 +31,11 @@ import type { LLMProvider, LLMStreamRequest } from "./types";
  *   - env: LLM_RETRY_MAX (기본 3, 0이면 끔), LLM_RETRY_MAX_WAIT_MS (기본 5000)
  * 이 재시도는 "몰림을 몇 초 펴주는" 완충이지 한도를 늘리는 게 아니다.
  */
+export interface SingleKeyHandshakeResult {
+  response: Response;
+  cleanupAttempt: () => void;
+}
+
 export class OpenAICompatibleProvider implements LLMProvider {
   readonly name: string;
   private readonly baseUrl: string;
@@ -55,11 +60,28 @@ export class OpenAICompatibleProvider implements LLMProvider {
     this.chunkTimeoutMs = opts.chunkTimeoutMs;
   }
 
-  async *stream(
+  /**
+   * Phase 1: Pre-Stream Handshake
+   * Establishes upstream connection (with bounded 429/5xx retries) BEFORE `/v2/ask`
+   * commits HTTP 200 SSE headers, allowing clean HTTP 429 + Retry-After / 503 / 502 / 413 / 499 responses.
+   */
+  public async preStreamHandshake(
     req: LLMStreamRequest,
     signal?: AbortSignal,
-  ): AsyncIterable<string> {
+  ): Promise<SingleKeyHandshakeResult> {
     const { resp, cleanupAttempt } = await this.fetchWithRetry(req, signal);
+    return { response: resp, cleanupAttempt };
+  }
+
+  /**
+   * Phase 2: Stream Consumption
+   * Reads SSE frames from an established upstream response with per-chunk stall watchdog.
+   */
+  public async *streamFromHandshake(
+    handshake: SingleKeyHandshakeResult,
+    signal?: AbortSignal,
+  ): AsyncIterable<string> {
+    const { response: resp, cleanupAttempt } = handshake;
 
     if (!resp.body) {
       cleanupAttempt();
@@ -72,6 +94,17 @@ export class OpenAICompatibleProvider implements LLMProvider {
     const MAX_SSE_BUFFER_CHARS = 256_000;
     const effectiveChunkTimeoutMs =
       this.chunkTimeoutMs ?? envInt("LLM_CHUNK_TIMEOUT_MS", 25_000, 50, 55_000);
+
+    const onClientAbort = () => {
+      void reader.cancel().catch(() => {});
+    };
+    if (signal) {
+      if (signal.aborted) {
+        onClientAbort();
+      } else {
+        signal.addEventListener("abort", onClientAbort, { once: true });
+      }
+    }
 
     const readChunkWithTimeout = async (): Promise<ReadableStreamReadResult<Uint8Array>> => {
       if (!Number.isFinite(effectiveChunkTimeoutMs) || effectiveChunkTimeoutMs <= 0) {
@@ -101,6 +134,7 @@ export class OpenAICompatibleProvider implements LLMProvider {
 
     try {
       while (true) {
+        if (signal?.aborted) break;
         const { value, done } = await readChunkWithTimeout();
         if (done) {
           buffer += decoder.decode();
@@ -165,6 +199,9 @@ export class OpenAICompatibleProvider implements LLMProvider {
         }
       }
     } finally {
+      if (signal) {
+        signal.removeEventListener("abort", onClientAbort);
+      }
       cleanupAttempt();
       try {
         await reader.cancel().catch(() => {});
@@ -173,6 +210,14 @@ export class OpenAICompatibleProvider implements LLMProvider {
         /* noop */
       }
     }
+  }
+
+  async *stream(
+    req: LLMStreamRequest,
+    signal?: AbortSignal,
+  ): AsyncIterable<string> {
+    const handshake = await this.preStreamHandshake(req, signal);
+    yield* this.streamFromHandshake(handshake, signal);
   }
 
   /**
@@ -235,8 +280,19 @@ export class OpenAICompatibleProvider implements LLMProvider {
       } catch (err) {
         cleanupAttempt();
         // 취소는 재시도 대상이 아니다. 네트워크 오류 또는 핸드셰이크 타임아웃만 한정 재시도.
-        if (signal?.aborted || (!timedOut && isAbortError(err)) || attempt >= maxRetries) {
+        if (signal?.aborted || (!timedOut && isAbortError(err))) {
           throw err;
+        }
+        if (attempt >= maxRetries) {
+          const outErr =
+            err instanceof Error
+              ? err
+              : new Error(`[${this.name}] ${String(err)}`);
+          Object.assign(outErr, {
+            statusCode: 503,
+            code: "UPSTREAM_MODEL_OUTAGE",
+          });
+          throw outErr;
         }
         const wait = backoffMs(attempt);
         console.warn(
@@ -271,11 +327,65 @@ export class OpenAICompatibleProvider implements LLMProvider {
       }
 
       const text = await safeText(resp);
-      throw new Error(
+      const httpErr: Error & {
+        status?: number;
+        statusCode?: number;
+        retryAfterSeconds?: number;
+        code?: string;
+      } = new Error(
         `[${this.name}] ${resp.status} ${resp.statusText}: ${text.slice(0, 300)}`,
       );
+      httpErr.status = resp.status;
+      httpErr.statusCode = resp.status;
+      if (resp.status === 429) {
+        httpErr.code = "ALL_KEYS_RATE_LIMITED";
+        httpErr.retryAfterSeconds =
+          parseExactRetryAfterSec(
+            resp.headers.get("retry-after"),
+            resp.headers.get("date"),
+          ) ?? 5;
+      } else if (
+        resp.status === 402 ||
+        resp.status === 401 ||
+        (resp.status === 403 && !/moderation|flagged/i.test(text))
+      ) {
+        httpErr.code = "ALL_ACCOUNTS_EXHAUSTED";
+      } else if (resp.status >= 500 || resp.status === 408) {
+        httpErr.code = "UPSTREAM_MODEL_OUTAGE";
+      } else {
+        httpErr.code = "UPSTREAM_CLIENT_ERROR";
+      }
+      throw httpErr;
     }
   }
+}
+
+function parseExactRetryAfterSec(
+  header: string | null,
+  dateHeader?: string | null,
+): number | undefined {
+  if (!header) return undefined;
+  const v = header.trim();
+  if (!v) return undefined;
+  if (/^(?:\d+(?:\.\d*)?|\.\d+)s?$/i.test(v)) {
+    const sec = parseFloat(v);
+    if (!Number.isNaN(sec) && Number.isFinite(sec) && sec > 0) {
+      return Math.max(1, Math.min(3600, Math.ceil(sec)));
+    }
+    return undefined;
+  }
+  if (!Number.isNaN(Number(v))) return undefined;
+  const at = Date.parse(v);
+  if (!Number.isNaN(at)) {
+    let skew = 0;
+    if (dateHeader) {
+      const serverTime = Date.parse(dateHeader);
+      if (!Number.isNaN(serverTime)) skew = serverTime - Date.now();
+    }
+    const diff = at - (Date.now() + skew);
+    if (diff > 0) return Math.max(1, Math.min(3600, Math.ceil(diff / 1000)));
+  }
+  return undefined;
 }
 
 const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);

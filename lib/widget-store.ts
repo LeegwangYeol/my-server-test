@@ -11,6 +11,7 @@
 
 import { supabaseUntyped } from "./supabase/client";
 import { isValidWidgetIconUrl, isValidWidgetBubbleSize } from "./url-guard";
+import { is429OrQuotaError } from "./queue/fallback-queue";
 
 export { isValidWidgetIconUrl, isValidWidgetBubbleSize };
 
@@ -148,43 +149,120 @@ export class BoundedLRUCache<K, V extends { expiresAt: number }> {
   }
 }
 
+const STALE_CACHE_TTL_MS = 10 * 60_000;
 const widgetCache = new BoundedLRUCache<string, CacheEntry>(MAX_CACHE_ENTRIES);
+const staleWidgetCache = new BoundedLRUCache<
+  string,
+  { row: WidgetRow; expiresAt: number }
+>(MAX_CACHE_ENTRIES);
+const inflightWidgetFetches = new Map<string, Promise<WidgetRow | null>>();
+let cacheGeneration = 0;
 
 export function invalidateWidgetCache(id?: string) {
+  cacheGeneration++;
   if (id) {
+    const trimmed = id.trim();
     widgetCache.delete(id);
+    widgetCache.delete(trimmed);
+    staleWidgetCache.delete(id);
+    staleWidgetCache.delete(trimmed);
+    inflightWidgetFetches.delete(id);
+    inflightWidgetFetches.delete(trimmed);
   } else {
     widgetCache.clear();
+    staleWidgetCache.clear();
+    inflightWidgetFetches.clear();
   }
 }
 
-/** Read one widget row, ignoring soft-deleted entries. Cached with 60s TTL. */
+/** Read one widget row, ignoring soft-deleted entries. Cached with 60s TTL + single-flight coalescing + stale-on-429/5xx fallback. */
 export async function getWidget(id: string): Promise<WidgetRow | null> {
-  if (!id || id.length > MAX_WIDGET_ID_CHARS) return null;
+  const trimmed = (id ?? "").trim();
+  if (
+    !trimmed ||
+    trimmed.length > MAX_WIDGET_ID_CHARS ||
+    /[\x00-\x1f\x7f]/.test(trimmed)
+  ) {
+    return null;
+  }
   const now = Date.now();
-  const cached = widgetCache.get(id);
+  const cached = widgetCache.get(trimmed);
   if (cached && cached.expiresAt > now) {
     return cached.row;
   }
 
-  try {
-    const { data, error } = await supabaseUntyped
-      .from(TABLE)
-      .select("*")
-      .eq("id", id)
-      .eq("is_deleted", false)
-      .maybeSingle();
-    if (error) {
-      console.error("[widget-store] getWidget failed:", error.message);
-      return null;
-    }
-    const result = data ? normalizeRow(data) : null;
-    widgetCache.set(id, { row: result, expiresAt: now + CACHE_TTL_MS });
-    return result;
-  } catch (err: any) {
-    console.warn("[widget-store] getWidget skipped:", err?.message || err);
-    return null;
+  const existingInflight = inflightWidgetFetches.get(trimmed);
+  if (existingInflight) {
+    return existingInflight;
   }
+
+  const startGen = cacheGeneration;
+  const fetchPromise = (async (): Promise<WidgetRow | null> => {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const { data, error } = await supabaseUntyped
+          .from(TABLE)
+          .select("*")
+          .eq("id", trimmed)
+          .eq("is_deleted", false)
+          .maybeSingle();
+
+        if (error) {
+          if (attempt === 0 && is429OrQuotaError(error)) {
+            await new Promise((r) =>
+              setTimeout(r, 40 + Math.floor(Math.random() * 80)),
+            );
+            continue;
+          }
+          console.error("[widget-store] getWidget failed:", error.message);
+          if (cacheGeneration === startGen) {
+            const stale = staleWidgetCache.get(trimmed);
+            if (stale) return stale.row;
+          }
+          return null;
+        }
+
+        const result = data ? normalizeRow(data) : null;
+        if (cacheGeneration === startGen) {
+          const doneNow = Date.now();
+          widgetCache.set(trimmed, {
+            row: result,
+            expiresAt: doneNow + CACHE_TTL_MS,
+          });
+          if (result) {
+            staleWidgetCache.set(trimmed, {
+              row: result,
+              expiresAt: doneNow + STALE_CACHE_TTL_MS,
+            });
+          } else {
+            staleWidgetCache.delete(trimmed);
+          }
+        }
+        return result;
+      } catch (err: any) {
+        if (attempt === 0 && is429OrQuotaError(err)) {
+          await new Promise((r) =>
+            setTimeout(r, 40 + Math.floor(Math.random() * 80)),
+          );
+          continue;
+        }
+        console.warn("[widget-store] getWidget skipped:", err?.message || err);
+        if (cacheGeneration === startGen) {
+          const stale = staleWidgetCache.get(trimmed);
+          if (stale) return stale.row;
+        }
+        return null;
+      }
+    }
+    return null;
+  })().finally(() => {
+    if (inflightWidgetFetches.get(trimmed) === fetchPromise) {
+      inflightWidgetFetches.delete(trimmed);
+    }
+  });
+
+  inflightWidgetFetches.set(trimmed, fetchPromise);
+  return fetchPromise;
 }
 
 /** List all live widgets, newest activity first. */

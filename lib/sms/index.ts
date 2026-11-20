@@ -63,7 +63,7 @@ export interface SendSmsResult {
 
 export async function sendSms(
   { phoneNumber, text }: SendSmsInput,
-  options?: { allowQueue?: boolean; idempotencyKey?: string },
+  options?: { allowQueue?: boolean; idempotencyKey?: string; maxRetries?: number },
 ): Promise<SendSmsResult> {
   const provider = activeProvider();
   const localOnly = LOCAL_ONLY[provider];
@@ -75,7 +75,11 @@ export async function sendSms(
     );
   }
   const allowQueue = options?.allowQueue !== false;
-  const detail = await sendViaPushbullet({ phoneNumber, text });
+  const detail = await sendViaPushbullet({
+    phoneNumber,
+    text,
+    maxRetries: options?.maxRetries,
+  });
 
   if (!detail.ok && detail.status === 429 && allowQueue) {
     const initialDelayMs = detail.retryAfterSeconds
@@ -126,7 +130,10 @@ export async function processSmsQueue(maxBatchSize?: number): Promise<{
 }> {
   return smsFallbackQueue.processPending(
     async (job: FallbackJob<SendSmsInput>) => {
-      const res = await sendSms(job.payload, { allowQueue: false });
+      const res = await sendSms(job.payload, {
+        allowQueue: false,
+        maxRetries: 0,
+      });
       if (!res.ok) {
         const detail = res.detail as { status?: number; error?: string; retryAfterSeconds?: number } | undefined;
         if (detail?.status === 429) {

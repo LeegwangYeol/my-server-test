@@ -315,15 +315,28 @@ export class UpstashRedisKeyStore implements IKeyStore {
 
   /**
    * Manually resets an exhausted or rate-limited key back to active.
+   * Restores sibling keys in the same account that were bulk-exhausted by 402
+   * while preserving 401/403 key-scoped revocations.
    */
   public async resetKeyToActive(keyId: string): Promise<void> {
     const statesBefore = await this.memoryFallback.getAllStates();
     const accountId = statesBefore.find((s) => s.id === keyId)?.accountId;
+    const sibling402Ids: string[] = [];
     this.pendingPermanentExhaustions.delete(keyId);
     if (accountId) {
       for (const st of statesBefore) {
         if (st.accountId === accountId) {
-          this.pendingPermanentExhaustions.delete(st.id);
+          const pending = this.pendingPermanentExhaustions.get(st.id);
+          if (!pending || pending.statusCode === 402) {
+            this.pendingPermanentExhaustions.delete(st.id);
+          }
+          if (
+            st.id !== keyId &&
+            st.status === 'EXHAUSTED' &&
+            st.lastStatusCode === 402
+          ) {
+            sibling402Ids.push(st.id);
+          }
         }
       }
     }
@@ -332,9 +345,10 @@ export class UpstashRedisKeyStore implements IKeyStore {
     if (this.isStorageBreakerOpen()) return;
 
     try {
-      const hashKey = `openrouter:key:${keyId}`;
-      const pipeline: any[][] = [
-        [
+      const pipeline: any[][] = [];
+      for (const targetId of [keyId, ...sibling402Ids]) {
+        const hashKey = `openrouter:key:${targetId}`;
+        pipeline.push([
           'HSET',
           hashKey,
           'state',
@@ -345,9 +359,15 @@ export class UpstashRedisKeyStore implements IKeyStore {
           '0',
           'consecutive_failures',
           '0',
-        ],
-        ['HDEL', hashKey, 'canary_token', 'last_error_code', 'last_error_message'],
-      ];
+        ]);
+        pipeline.push([
+          'HDEL',
+          hashKey,
+          'canary_token',
+          'last_error_code',
+          'last_error_message',
+        ]);
+      }
       if (accountId) {
         pipeline.push(['DEL', `openrouter:account:${accountId}:broken`]);
       }

@@ -14,27 +14,52 @@ const getApp = () => {
 };
 
 const SAFE_HOST_RE =
-  /^(?:[a-zA-Z0-9.-]+|\[[a-fA-F0-9:]+\])(?::\d{1,5})?$/;
+  /^(?:[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)*|\[[a-fA-F0-9:]+\])(?::\d{1,5})?$/;
 
-function sanitizeHost(raw?: string | string[]): string {
+export function sanitizeHost(raw?: string | string[]): string {
   const str = Array.isArray(raw) ? raw[0] : raw;
   const candidate = (str ?? "").split(",")[0].trim();
   if (!candidate || candidate.length > 255 || !SAFE_HOST_RE.test(candidate)) {
     return "localhost";
   }
-  return candidate;
+  try {
+    const parsed = new URL(`http://${candidate}/`);
+    if (
+      !parsed.hostname ||
+      parsed.username ||
+      parsed.password ||
+      parsed.pathname !== "/" ||
+      parsed.search ||
+      parsed.hash
+    ) {
+      return "localhost";
+    }
+    if (parsed.port) {
+      const portNum = Number(parsed.port);
+      if (!Number.isInteger(portNum) || portNum < 1 || portNum > 65535) {
+        return "localhost";
+      }
+    }
+    return parsed.host;
+  } catch {
+    return "localhost";
+  }
 }
 
-function sanitizeProtocol(raw?: string | string[]): "http" | "https" {
+export function sanitizeProtocol(raw?: string | string[]): "http" | "https" {
   const str = Array.isArray(raw) ? raw[0] : raw;
   const candidate = (str ?? "").split(",")[0].trim().toLowerCase();
   return candidate === "http" ? "http" : "https";
 }
 
-function sanitizeRequestPath(rawUrl?: string): string {
+export function sanitizeRequestPath(
+  rawUrl?: string,
+  baseOrigin = "https://localhost",
+): string {
   if (!rawUrl) return "/";
-  let p = rawUrl.trim();
-  if (!p.startsWith("/")) {
+  let p = rawUrl.replace(/[\x00-\x1f\x7f]/g, "").trim();
+  if (!p) return "/";
+  if (!p.startsWith("/") && !p.startsWith("\\")) {
     try {
       const parsed = new URL(p);
       p = `${parsed.pathname || "/"}${parsed.search}`;
@@ -42,19 +67,28 @@ function sanitizeRequestPath(rawUrl?: string): string {
       p = `/${p}`;
     }
   }
-  // Prevent protocol-relative `//evil.com/path` from overriding `host` in `https://host${p}`
-  if (p.startsWith("//")) {
-    const qIdx = p.indexOf("?");
-    if (qIdx === -1) {
-      p = p.replace(/^\/+/, "/");
-    } else {
-      p = p.slice(0, qIdx).replace(/^\/+/, "/") + p.slice(qIdx);
-    }
+  // Collapse leading slashes/backslashes so `//evil.com` or `/\evil.com` cannot override host
+  const qIdx = p.indexOf("?");
+  if (qIdx === -1) {
+    p = p.replace(/^[\/\\]+/, "/");
+  } else {
+    p = p.slice(0, qIdx).replace(/^[\/\\]+/, "/") + p.slice(qIdx);
   }
-  return p || "/";
+  try {
+    const resolved = new URL(p || "/", baseOrigin);
+    if (resolved.origin !== baseOrigin) {
+      return "/";
+    }
+    return `${resolved.pathname || "/"}${resolved.search}`;
+  } catch {
+    return "/";
+  }
 }
 
-const toWebRequest = (req: IncomingMessage, res?: ServerResponse): Request => {
+const toWebRequest = (
+  req: IncomingMessage,
+  res?: ServerResponse,
+): { webReq: Request; cleanup: () => void } => {
   const host = sanitizeHost(
     (req.headers["x-forwarded-host"] as string | string[] | undefined) ??
       req.headers.host,
@@ -62,16 +96,27 @@ const toWebRequest = (req: IncomingMessage, res?: ServerResponse): Request => {
   const protocol = sanitizeProtocol(
     req.headers["x-forwarded-proto"] as string | string[] | undefined,
   );
-  const safePath = sanitizeRequestPath(req.url);
-  const url = `${protocol}://${host}${safePath}`;
+  const baseOrigin = `${protocol}://${host}`;
+  const safePath = sanitizeRequestPath(req.url, baseOrigin);
+  const url = `${baseOrigin}${safePath}`;
 
   const headers = new Headers();
   for (const [key, value] of Object.entries(req.headers)) {
-    if (value === undefined) continue;
-    if (Array.isArray(value)) {
-      for (const v of value) headers.append(key, v);
-    } else {
-      headers.set(key, value);
+    if (value === undefined || key.startsWith(":")) continue;
+    try {
+      if (Array.isArray(value)) {
+        for (const v of value) headers.append(key, v);
+      } else {
+        headers.set(key, value);
+      }
+    } catch {
+      if (key.toLowerCase() === "content-length") {
+        const badHdrErr: Error & { statusCode?: number } = new Error(
+          "Bad Request: invalid Content-Length header",
+        );
+        badHdrErr.statusCode = 400;
+        throw badHdrErr;
+      }
     }
   }
 
@@ -80,25 +125,42 @@ const toWebRequest = (req: IncomingMessage, res?: ServerResponse): Request => {
 
   const controller = new AbortController();
   const onAbort = () => controller.abort();
-  req.on("aborted", onAbort);
-  req.on("close", () => {
+  const onReqClose = () => {
     if (!req.complete) onAbort();
-  });
+  };
+  const onResClose = () => {
+    if (res && !res.writableEnded) {
+      controller.abort();
+    }
+  };
+
+  if (typeof req.on === "function") {
+    req.on("aborted", onAbort);
+    req.on("close", onReqClose);
+  }
   if (res && typeof res.on === "function") {
-    res.on("close", () => {
-      if (!res.writableEnded) {
-        controller.abort();
-      }
-    });
+    res.on("close", onResClose);
   }
 
-  return new Request(url, {
+  const cleanup = () => {
+    if (typeof req.off === "function") {
+      req.off("aborted", onAbort);
+      req.off("close", onReqClose);
+    }
+    if (res && typeof res.off === "function") {
+      res.off("close", onResClose);
+    }
+  };
+
+  const webReq = new Request(url, {
     method,
     headers,
     duplex: hasBody ? "half" : undefined,
     body: hasBody ? (req as any) : undefined,
     signal: controller.signal,
   } as RequestInit & { duplex?: "half" });
+
+  return { webReq, cleanup };
 };
 
 const writeWebResponse = async (
@@ -218,26 +280,41 @@ export default async function handler(
   req: IncomingMessage,
   res: ServerResponse,
 ): Promise<void> {
+  let cleanupListeners: (() => void) | undefined;
   try {
     const app = await getApp();
-    const webReq = toWebRequest(req, res);
+    const { webReq, cleanup } = toWebRequest(req, res);
+    cleanupListeners = cleanup;
     const webRes: Response = await app.handle(webReq);
     await writeWebResponse(res, webRes, webReq.signal);
   } catch (error: any) {
     console.error("Serverless handler error:", error);
     if (!res.headersSent) {
-      res.statusCode = 500;
+      const status =
+        typeof error?.statusCode === "number" &&
+        error.statusCode >= 400 &&
+        error.statusCode < 600
+          ? error.statusCode
+          : 500;
+      res.statusCode = status;
       res.setHeader("content-type", "application/json");
       res.setHeader("x-content-type-options", "nosniff");
       const isProd =
         process.env.NODE_ENV === "production" ||
         process.env.VERCEL_ENV === "production";
       res.end(
-        JSON.stringify({
-          error: "Internal Server Error",
-          message: isProd ? "Internal Server Error" : error?.message,
-          stack: isProd ? undefined : error?.stack,
-        }),
+        JSON.stringify(
+          status === 400
+            ? {
+                success: false,
+                error: error?.message || "Bad Request",
+              }
+            : {
+                error: "Internal Server Error",
+                message: isProd ? "Internal Server Error" : error?.message,
+                stack: isProd ? undefined : error?.stack,
+              },
+        ),
       );
     } else {
       if (!res.writableEnded && !res.destroyed) {
@@ -248,5 +325,7 @@ export default async function handler(
         }
       }
     }
+  } finally {
+    cleanupListeners?.();
   }
 }

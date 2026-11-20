@@ -235,7 +235,13 @@ export async function appendMessage(
   },
 ): Promise<boolean> {
   const tid = (threadId ?? "").trim();
-  if (!tid) return false;
+  if (!tid || tid.length > MAX_STORE_ID_CHARS || /[\x00-\x1f\x7f]/.test(tid)) {
+    return false;
+  }
+  const safeContent = String(content ?? "").replace(/\x00+/g, "");
+  if (!safeContent.trim()) {
+    return false;
+  }
 
   const allowQueue = options?.allowQueue !== false;
   const maxRetries = options?.maxRetries ?? 3;
@@ -248,7 +254,7 @@ export async function appendMessage(
       async () => {
         const { error } = await supabaseUntyped
           .from("chat_message")
-          .insert({ thread_id: tid, role, content });
+          .insert({ thread_id: tid, role, content: safeContent });
         if (error) {
           throw error;
         }
@@ -259,7 +265,7 @@ export async function appendMessage(
         fallbackPayload: {
           threadId: tid,
           role,
-          content,
+          content: safeContent,
           createdAt: new Date().toISOString(),
         },
         type: "db_chat_message",

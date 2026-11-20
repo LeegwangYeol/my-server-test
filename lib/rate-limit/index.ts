@@ -42,7 +42,8 @@ export class SlidingWindowRateLimiter {
     windowMs: number,
     now: number = Date.now()
   ): RateLimitResult {
-    const safeKey = (key || "unknown").trim();
+    const rawKey = (key || "unknown").trim();
+    const safeKey = rawKey.length > 160 ? rawKey.slice(0, 160) : rawKey;
     const safeLimit = Number.isFinite(limit) && limit >= 0 ? limit : 0;
     const safeWindowMs = Number.isFinite(windowMs) && windowMs > 0 ? windowMs : 60_000;
     const safeNow = Number.isFinite(now) ? now : Date.now();
@@ -258,7 +259,7 @@ export function normalizeIp(raw: string): string {
 
   // Strip surrounding quotes if present (e.g. "1.2.3.4" or '1.2.3.4')
   ip = ip.replace(/^["']+|["']+$/g, "").trim();
-  if (!ip) return "127.0.0.1";
+  if (!ip || ip.length > 128 || /[\s\x00-\x1f\x7f]/.test(ip)) return "127.0.0.1";
 
   // Bracketed IPv6/IPv4-mapped with optional port: [2001:db8::1]:8080 or [::ffff:192.168.1.1]:8080 or [fe80::1%eth0]:8080
   const bracketMatch = ip.match(/^\[([a-zA-Z0-9:.%_\-]+)\](?::\d+)?$/);

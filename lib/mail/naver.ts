@@ -116,7 +116,14 @@ import {
 // INFO : nodemailer reports Naver's refusals as bare SMTP codes; this maps the common
 //   ones to the account-side setting that fixes them and keeps the original text.
 function explainSmtpError(err: unknown): Error {
-  const e = err as { code?: string; responseCode?: number; message?: string };
+  const e = err as {
+    code?: string;
+    responseCode?: number;
+    status?: number;
+    statusCode?: number;
+    retryAfter?: string | number;
+    message?: string;
+  };
   const raw = e?.message ?? String(err);
   let hint = "";
   if (e?.code === "EAUTH" || e?.responseCode === 535) {
@@ -133,7 +140,15 @@ function explainSmtpError(err: unknown): Error {
   } else if (e?.responseCode === 553 || e?.responseCode === 554) {
     hint = "보낸 주소 거부 — from 주소는 NAVER_MAIL_USER 와 같아야 합니다.";
   }
-  return new Error(hint ? `${hint} (${raw})` : raw);
+  const explained = new Error(
+    hint ? `${hint} (${raw})` : raw,
+  ) as Error & Record<string, unknown>;
+  if (e?.responseCode !== undefined) explained.responseCode = e.responseCode;
+  if (e?.code !== undefined) explained.code = e.code;
+  if (e?.status !== undefined) explained.status = e.status;
+  if (e?.statusCode !== undefined) explained.statusCode = e.statusCode;
+  if (e?.retryAfter !== undefined) explained.retryAfter = e.retryAfter;
+  return explained;
 }
 
 export interface SendMailInput {
@@ -252,7 +267,10 @@ export async function processMailQueue(maxBatchSize?: number): Promise<{
 }> {
   return mailFallbackQueue.processPending(
     async (job: FallbackJob<SendMailInput>) => {
-      const res = await sendNaverMail(job.payload, { allowQueue: false });
+      const res = await sendNaverMail(job.payload, {
+        allowQueue: false,
+        maxRetries: 0,
+      });
       return res.rejected.length === 0;
     },
     Date.now(),

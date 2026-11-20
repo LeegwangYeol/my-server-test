@@ -58,8 +58,12 @@ function parsePushbulletRetryMs(headers: Headers): number | undefined {
 async function fetchPushbulletWithRetry(
   url: string,
   init: Omit<RequestInit, "signal">,
+  maxRetriesOverride?: number,
 ): Promise<Response> {
-  const rawMax = Number.parseInt(process.env.PUSHBULLET_RETRY_MAX ?? "2", 10);
+  const rawMax =
+    typeof maxRetriesOverride === "number" && Number.isInteger(maxRetriesOverride)
+      ? maxRetriesOverride
+      : Number.parseInt(process.env.PUSHBULLET_RETRY_MAX ?? "2", 10);
   const maxRetries = Number.isInteger(rawMax)
     ? Math.max(0, Math.min(3, rawMax))
     : 2;
@@ -126,7 +130,8 @@ export const clearPushbulletIdenCache = clearDeviceIdenCache;
 async function resolveDeviceIden(
   base: string,
   token: string,
-  conf: ReturnType<typeof getPushbulletConfig>
+  conf: ReturnType<typeof getPushbulletConfig>,
+  maxRetriesOverride?: number,
 ): Promise<string> {
   if (conf.iden) return conf.iden;
 
@@ -148,9 +153,13 @@ async function resolveDeviceIden(
 
   let res: Response;
   try {
-    res = await fetchPushbulletWithRetry(`${base}/v2/devices`, {
-      headers: { "access-token": token },
-    });
+    res = await fetchPushbulletWithRetry(
+      `${base}/v2/devices`,
+      {
+        headers: { "access-token": token },
+      },
+      maxRetriesOverride,
+    );
   } catch (err: unknown) {
     const errorObj = err as { name?: string; message?: string } | undefined;
     const isTimeout =
@@ -225,9 +234,11 @@ export interface PushbulletResult {
 export async function sendViaPushbullet({
   phoneNumber,
   text,
+  maxRetries,
 }: {
   phoneNumber: string;
   text: string;
+  maxRetries?: number;
 }): Promise<PushbulletResult> {
   try {
     const conf = getPushbulletConfig();
@@ -245,7 +256,7 @@ export async function sendViaPushbullet({
     const base = process.env.PUSHBULLET_API_URL?.trim() || DEFAULT_API_URL;
     let device: string;
     try {
-      device = await resolveDeviceIden(base, conf.token, conf);
+      device = await resolveDeviceIden(base, conf.token, conf, maxRetries);
     } catch (err: unknown) {
       const errorObj = err as {
         name?: string;
@@ -274,20 +285,24 @@ export async function sendViaPushbullet({
       };
     }
 
-    const res = await fetchPushbulletWithRetry(`${base}/v2/texts`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "access-token": conf.token,
-      },
-      body: JSON.stringify({
-        data: {
-          target_device_iden: device,
-          addresses: [phoneNumber],
-          message: text,
+    const res = await fetchPushbulletWithRetry(
+      `${base}/v2/texts`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "access-token": conf.token,
         },
-      }),
-    });
+        body: JSON.stringify({
+          data: {
+            target_device_iden: device,
+            addresses: [phoneNumber],
+            message: text,
+          },
+        }),
+      },
+      maxRetries,
+    );
 
     let raw: unknown;
     try {
