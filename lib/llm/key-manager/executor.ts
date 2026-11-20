@@ -238,7 +238,8 @@ export async function executeWithResilientFailover(
     const reservation = await keyStore.reserveKey(attemptedKeyIds);
     if (!reservation) {
       const allStates = await keyStore.getAllStates().catch(() => []);
-      if (allStates.length > 0 && allStates.every((s) => s.status === 'EXHAUSTED')) {
+      const enabledStates = allStates.filter((s) => s.status !== 'DISABLED');
+      if (enabledStates.length > 0 && enabledStates.every((s) => s.status === 'EXHAUSTED')) {
         throw new AllAccountsExhaustedError();
       }
       throw new AllKeysRateLimitedError(5);
@@ -435,11 +436,12 @@ export async function executeWithResilientFailover(
 
   // Terminal error classification after exhausting retry attempts:
   const allStates = await keyStore.getAllStates().catch(() => []);
-  const attemptedStates = allStates.filter((s) => attemptedKeyIds.includes(s.id));
+  const enabledStates = allStates.filter((s) => s.status !== 'DISABLED');
+  const attemptedStates = enabledStates.filter((s) => attemptedKeyIds.includes(s.id));
 
-  // If all accounts/keys are exhausted (402 credits drained)
+  // If all enabled accounts/keys are exhausted (402 credits drained)
   if (
-    (allStates.length > 0 && allStates.every((s) => s.status === 'EXHAUSTED')) ||
+    (enabledStates.length > 0 && enabledStates.every((s) => s.status === 'EXHAUSTED')) ||
     (attemptedStates.length > 0 && attemptedStates.every((s) => s.status === 'EXHAUSTED'))
   ) {
     throw new AllAccountsExhaustedError();

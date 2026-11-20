@@ -242,12 +242,13 @@ if status == 200 then
 
 elseif status == 429 then
     -- CRITICAL SAFETY GUARD: NEVER overwrite permanent EXHAUSTED with temporary RATE_LIMITED!
-    if current_state ~= 'EXHAUSTED' then
+    if current_state ~= 'EXHAUSTED' and current_state ~= 'DISABLED' then
         redis.call('HINCRBY', hash, 'consecutive_429s', 1)
         redis.call('HSET', hash, 'state', 'RATE_LIMITED')
         redis.call('HSET', hash, 'cooldown_until', now + cooldown_ms)
         redis.call('HSET', hash, 'last_error_code', 429)
         redis.call('HSET', hash, 'last_error_message', err_msg)
+        redis.call('HDEL', hash, 'canary_token')
     end
 
 elseif status == 402 then
@@ -255,6 +256,7 @@ elseif status == 402 then
     redis.call('HSET', hash, 'state', 'EXHAUSTED')
     redis.call('HSET', hash, 'last_error_code', status)
     redis.call('HSET', hash, 'last_error_message', err_msg)
+    redis.call('HDEL', hash, 'canary_token')
 
     -- Bulk-invalidate all keys sharing the same account in <5ms
     if account_id ~= "" then
@@ -266,6 +268,7 @@ elseif status == 402 then
                 redis.call('HSET', lhash, 'state', 'EXHAUSTED')
                 redis.call('HSET', lhash, 'last_error_code', status)
                 redis.call('HSET', lhash, 'last_error_message', "Account credit balance exhausted")
+                redis.call('HDEL', lhash, 'canary_token')
             end
         end
     end
@@ -276,16 +279,21 @@ elseif status == 401 or status == 403 then
     redis.call('HSET', hash, 'state', 'EXHAUSTED')
     redis.call('HSET', hash, 'last_error_code', status)
     redis.call('HSET', hash, 'last_error_message', err_msg)
+    redis.call('HDEL', hash, 'canary_token')
 
 elseif status >= 500 or (status == 0 and cooldown_ms > 0) or status == 408 then
-    -- Transient network drop, timeout, or upstream 5xx
-    local fails = redis.call('HINCRBY', hash, 'consecutive_failures', 1)
-    if fails >= 3 and current_state == 'ACTIVE' then
-        redis.call('HSET', hash, 'state', 'TRANSIENT_BACKOFF')
-        redis.call('HSET', hash, 'cooldown_until', now + 2500)
+    -- Transient network drop, timeout, or upstream 5xx (never overwrite EXHAUSTED/DISABLED)
+    if current_state ~= 'EXHAUSTED' and current_state ~= 'DISABLED' then
+        local fails = redis.call('HINCRBY', hash, 'consecutive_failures', 1)
+        local backoff_ms = cooldown_ms > 0 and cooldown_ms or 2500
+        if current_state == 'WARMUP' or (fails >= 3 and current_state == 'ACTIVE') then
+            redis.call('HSET', hash, 'state', 'TRANSIENT_BACKOFF')
+            redis.call('HSET', hash, 'cooldown_until', now + backoff_ms)
+            redis.call('HDEL', hash, 'canary_token')
+        end
+        redis.call('HSET', hash, 'last_error_code', status)
+        redis.call('HSET', hash, 'last_error_message', err_msg)
     end
-    redis.call('HSET', hash, 'last_error_code', status)
-    redis.call('HSET', hash, 'last_error_message', err_msg)
 
 elseif status == 0 and cooldown_ms == 0 then
     -- Provider outage or zero-cooldown bypass: zero failure penalty

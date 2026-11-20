@@ -28,6 +28,50 @@ import {
 import { dbFallbackQueue } from "../../../lib/queue/fallback-queue";
 
 const MAX_WIDGET_ID_CHARS = 100;
+const VIEW_KNOWN_KEYS = new Set(["widgetId", "threadId"]);
+const CREATE_THREAD_KNOWN_KEYS = new Set(["widgetId"]);
+const ASK_KNOWN_KEYS = new Set([
+  "widgetId",
+  "message",
+  "threadId",
+  "browserInfo",
+  "search",
+  "accessToken",
+]);
+
+function checkUnknownFieldsLimit(
+  body: unknown,
+  allowedKeys: Set<string>,
+  maxExtraChars = 2000,
+  maxTotalKeys = 16,
+): string | null {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return null;
+  }
+  const keys = Object.keys(body as Record<string, unknown>);
+  if (keys.length > maxTotalKeys) {
+    return `request contains too many fields (${keys.length} > ${maxTotalKeys})`;
+  }
+  let extraChars = 0;
+  for (const key of keys) {
+    if (allowedKeys.has(key)) continue;
+    extraChars += key.length;
+    const val = (body as Record<string, unknown>)[key];
+    if (typeof val === "string") {
+      extraChars += val.length;
+    } else if (val !== undefined && val !== null) {
+      try {
+        extraChars += (JSON.stringify(val) ?? "").length;
+      } catch {
+        return "malformed extra payload field";
+      }
+    }
+    if (extraChars > maxExtraChars) {
+      return `extra request fields too large (${extraChars} > ${maxExtraChars} chars)`;
+    }
+  }
+  return null;
+}
 
 import crypto from "crypto";
 
@@ -185,6 +229,17 @@ export const v2WidgetEndpoints = async (app: any) => {
           }
         }
 
+        const viewExtraErr = checkUnknownFieldsLimit(
+          body,
+          VIEW_KNOWN_KEYS,
+          MAX_VIEW_AUX_CHARS,
+          12,
+        );
+        if (viewExtraErr) {
+          set.status = 413;
+          return { success: false, error: viewExtraErr };
+        }
+
         const widgetId = (typeof rawWidgetId === "string" ? rawWidgetId : "").trim();
 
         // Pull persona from the widget master table if it exists; otherwise
@@ -306,6 +361,16 @@ export const v2WidgetEndpoints = async (app: any) => {
             }
           }
         }
+        const createThreadExtraErr = checkUnknownFieldsLimit(
+          body,
+          CREATE_THREAD_KNOWN_KEYS,
+          2000,
+          12,
+        );
+        if (createThreadExtraErr) {
+          set.status = 413;
+          return { success: false, error: createThreadExtraErr };
+        }
         const widgetId = (typeof rawWidgetId === "string" ? rawWidgetId : "").trim();
         let widgetMaster = null;
         try {
@@ -382,6 +447,36 @@ export const v2WidgetEndpoints = async (app: any) => {
         }
 
         const rawWidgetId = body?.widgetId;
+        if (rawWidgetId !== undefined && rawWidgetId !== null) {
+          if (typeof rawWidgetId === "string") {
+            if (rawWidgetId.length > MAX_MESSAGE_CHARS) {
+              set.status = 413;
+              return {
+                success: false,
+                error: `widgetId too large (${rawWidgetId.length} > ${MAX_MESSAGE_CHARS} chars)`,
+              };
+            }
+          } else {
+            let serializedWid = "";
+            try {
+              serializedWid = JSON.stringify(rawWidgetId) ?? "";
+            } catch {
+              set.status = 403;
+              return {
+                success: false,
+                error:
+                  "unregistered widget_id — register it via /v2/admin/widgets/upsert first",
+              };
+            }
+            if (serializedWid.length > MAX_MESSAGE_CHARS) {
+              set.status = 413;
+              return {
+                success: false,
+                error: `widgetId too large (${serializedWid.length} > ${MAX_MESSAGE_CHARS} chars)`,
+              };
+            }
+          }
+        }
         const widgetId: string = (typeof rawWidgetId === "string" ? rawWidgetId : "").trim();
         const rawMessage = body?.message;
         let userMessage = "";
@@ -486,6 +581,41 @@ export const v2WidgetEndpoints = async (app: any) => {
             };
           }
         }
+        if (body?.accessToken !== undefined && body?.accessToken !== null) {
+          let rawTok = "";
+          try {
+            rawTok =
+              typeof body.accessToken === "string"
+                ? body.accessToken
+                : (JSON.stringify(body.accessToken) ?? "");
+          } catch {
+            set.status = 400;
+            return { success: false, error: "malformed accessToken payload" };
+          }
+          if (rawTok.length > MAX_MESSAGE_CHARS) {
+            set.status = 413;
+            return {
+              success: false,
+              error: `accessToken too large (${rawTok.length} > ${MAX_MESSAGE_CHARS} chars)`,
+            };
+          }
+        }
+        if (body && typeof body === "object" && !Array.isArray(body)) {
+          const askKeys = Object.keys(body);
+          if (askKeys.length > 32) {
+            set.status = 413;
+            return {
+              success: false,
+              error: `request contains too many fields (${askKeys.length} > 32)`,
+            };
+          }
+          // Evict unrecognized fields immediately so <1MB padding cannot stay pinned in heap during 60s SSE streams
+          for (const k of askKeys) {
+            if (!ASK_KNOWN_KEYS.has(k)) {
+              delete body[k];
+            }
+          }
+        }
 
         // ── Guard 2: 등록 위젯 화이트리스트 ──
         // widget master 테이블에 등록된 widget_id 만 /ask 를 호출할 수 있다.
@@ -510,7 +640,7 @@ export const v2WidgetEndpoints = async (app: any) => {
           };
         }
 
-        // ── Guard 2b: 비문자열/빈/공백 전용 메시지 차단 (불필요한 DB 행 생성 및 LLM 쿼터 소모 방지) ──
+        // ── Guard 2b: 비문자열/빈/공백/NUL 전용 메시지 차단 (불필요한 DB 행 생성, Postgres 22P05 및 LLM 쿼터 소모 방지) ──
         if (hasNonStringMessage) {
           set.status = 400;
           return {
@@ -518,6 +648,7 @@ export const v2WidgetEndpoints = async (app: any) => {
             error: "message must be a string",
           };
         }
+        userMessage = userMessage.replace(/\x00+/g, "");
         if (!userMessage.trim()) {
           set.status = 400;
           return {
@@ -665,7 +796,9 @@ export const v2WidgetEndpoints = async (app: any) => {
           process.env.LLM_MAX_TOKENS ?? "512",
           10,
         );
-        const maxTokens = Number.isFinite(maxTokensRaw) ? maxTokensRaw : 512;
+        const maxTokens = Number.isFinite(maxTokensRaw)
+          ? Math.min(4096, Math.max(1, maxTokensRaw))
+          : 512;
 
         // Setup double-wired abort controller
         const abortController = new AbortController();
@@ -903,6 +1036,7 @@ export const v2WidgetEndpoints = async (app: any) => {
           return new Response(stream);
         } catch (setupErr) {
           if (!streamEntered && handshakeResult) {
+            handshakeResult.cleanupAttempt?.();
             void handshakeResult.response?.body?.cancel?.().catch(() => {});
             try {
               const iter = (provider as any).streamFromHandshake?.(
@@ -1253,6 +1387,9 @@ export const v2WidgetEndpoints = async (app: any) => {
 
           const allOk = results.every((r) => r.ok);
           const pendingNotRun = pending.slice(results.length).map((m) => m.name);
+          if (!allOk) {
+            set.status = 500;
+          }
           return {
             success: allOk,
             ran: results,
@@ -1307,11 +1444,17 @@ export const v2WidgetEndpoints = async (app: any) => {
           set.status = 400;
           return { success: false, error: "widgetId required" };
         }
-        if (widgetId.length > MAX_WIDGET_ID_CHARS) {
+        if (
+          widgetId.length > MAX_WIDGET_ID_CHARS ||
+          /[\x00-\x1f\x7f]/.test(widgetId)
+        ) {
           set.status = 400;
           return {
             success: false,
-            error: `widgetId exceeds maximum length of ${MAX_WIDGET_ID_CHARS} characters`,
+            error:
+              widgetId.length > MAX_WIDGET_ID_CHARS
+                ? `widgetId exceeds maximum length of ${MAX_WIDGET_ID_CHARS} characters`
+                : "invalid widgetId (control characters prohibited)",
           };
         }
         if (!file) {
@@ -1436,6 +1579,17 @@ export const v2WidgetEndpoints = async (app: any) => {
         if (deny) return deny;
         const widgetId = body?.widgetId?.trim() ?? "";
         if (!widgetId) return { success: false, threads: [] };
+        if (
+          widgetId.length > MAX_WIDGET_ID_CHARS ||
+          /[\x00-\x1f\x7f]/.test(widgetId)
+        ) {
+          set.status = 400;
+          return {
+            success: false,
+            error: `invalid widgetId (must be <= ${MAX_WIDGET_ID_CHARS} chars without control chars)`,
+            threads: [],
+          };
+        }
         const threads = await listThreads(widgetId);
         return { success: true, threads };
       },
@@ -1474,13 +1628,23 @@ export const v2WidgetEndpoints = async (app: any) => {
         const widgetId = body?.widgetId?.trim() ?? "";
         const threadId = body?.threadId?.trim() ?? "";
         if (!widgetId || !threadId) {
-          return { success: false, reason: "widgetId+threadId required" };
-        }
-        if (widgetId.length > MAX_WIDGET_ID_CHARS || threadId.length > MAX_WIDGET_ID_CHARS) {
           set.status = 400;
           return {
             success: false,
-            error: `widgetId and threadId must be <= ${MAX_WIDGET_ID_CHARS} characters`,
+            error: "widgetId+threadId required",
+            reason: "widgetId+threadId required",
+          };
+        }
+        if (
+          widgetId.length > MAX_WIDGET_ID_CHARS ||
+          threadId.length > MAX_WIDGET_ID_CHARS ||
+          /[\x00-\x1f\x7f]/.test(widgetId) ||
+          /[\x00-\x1f\x7f]/.test(threadId)
+        ) {
+          set.status = 400;
+          return {
+            success: false,
+            error: `widgetId and threadId must be <= ${MAX_WIDGET_ID_CHARS} characters without control chars`,
           };
         }
         if (
@@ -1551,13 +1715,23 @@ export const v2WidgetEndpoints = async (app: any) => {
         const widgetId = body?.widgetId?.trim() ?? "";
         const threadId = body?.threadId?.trim() ?? "";
         if (!widgetId || !threadId) {
-          return { success: false, reason: "widgetId+threadId required" };
-        }
-        if (widgetId.length > MAX_WIDGET_ID_CHARS || threadId.length > MAX_WIDGET_ID_CHARS) {
           set.status = 400;
           return {
             success: false,
-            error: `widgetId and threadId must be <= ${MAX_WIDGET_ID_CHARS} characters`,
+            error: "widgetId+threadId required",
+            reason: "widgetId+threadId required",
+          };
+        }
+        if (
+          widgetId.length > MAX_WIDGET_ID_CHARS ||
+          threadId.length > MAX_WIDGET_ID_CHARS ||
+          /[\x00-\x1f\x7f]/.test(widgetId) ||
+          /[\x00-\x1f\x7f]/.test(threadId)
+        ) {
+          set.status = 400;
+          return {
+            success: false,
+            error: `widgetId and threadId must be <= ${MAX_WIDGET_ID_CHARS} characters without control chars`,
           };
         }
         if (
@@ -1604,6 +1778,19 @@ export const v2WidgetEndpoints = async (app: any) => {
         const threadId = body?.threadId?.trim() ?? "";
         if (!widgetId || !threadId) {
           return { success: false, messages: [] };
+        }
+        if (
+          widgetId.length > MAX_WIDGET_ID_CHARS ||
+          threadId.length > MAX_WIDGET_ID_CHARS ||
+          /[\x00-\x1f\x7f]/.test(widgetId) ||
+          /[\x00-\x1f\x7f]/.test(threadId)
+        ) {
+          set.status = 400;
+          return {
+            success: false,
+            error: `widgetId and threadId must be <= ${MAX_WIDGET_ID_CHARS} characters without control chars`,
+            messages: [],
+          };
         }
         const thread = await getThread(threadId, widgetId);
         if (!thread) return { success: false, messages: [] };

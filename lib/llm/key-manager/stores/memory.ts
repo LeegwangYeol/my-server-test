@@ -328,10 +328,11 @@ export class MemoryKeyStore implements IKeyStore {
       }
     } else if (statusCode === 429) {
       // CRITICAL SAFETY GUARD: NEVER overwrite permanent EXHAUSTED with temporary RATE_LIMITED!
-      if (record.state !== 'EXHAUSTED') {
+      if (record.state !== 'EXHAUSTED' && record.state !== 'DISABLED') {
         record.consecutive429s++;
         record.state = 'RATE_LIMITED';
         record.cooldownUntil = now + cooldown;
+        record.canaryToken = undefined;
         record.lastStatusCode = 429;
         record.lastErrorMessage = errMsg;
       }
@@ -339,6 +340,7 @@ export class MemoryKeyStore implements IKeyStore {
       // Permanent account-wide financial exhaustion (shared wallet empty)
       record.state = 'EXHAUSTED';
       record.cooldownUntil = Infinity;
+      record.canaryToken = undefined;
       record.lastStatusCode = statusCode;
       record.lastErrorMessage = errMsg;
 
@@ -353,6 +355,7 @@ export class MemoryKeyStore implements IKeyStore {
             if (linkedRecord) {
               linkedRecord.state = 'EXHAUSTED';
               linkedRecord.cooldownUntil = Infinity;
+              linkedRecord.canaryToken = undefined;
               linkedRecord.lastStatusCode = statusCode;
               linkedRecord.lastErrorMessage = 'Account credit balance exhausted';
             }
@@ -364,17 +367,25 @@ export class MemoryKeyStore implements IKeyStore {
       // exhaust ONLY this key without poisoning healthy sibling keys in the same account
       record.state = 'EXHAUSTED';
       record.cooldownUntil = Infinity;
+      record.canaryToken = undefined;
       record.lastStatusCode = statusCode;
       record.lastErrorMessage = errMsg;
     } else if (statusCode >= 500 || (statusCode === 0 && cooldown > 0) || statusCode === 408) {
-      // Transient network drop, timeout, or upstream 5xx
-      record.consecutiveFailures++;
-      if (record.consecutiveFailures >= 3 && record.state === 'ACTIVE') {
-        record.state = 'TRANSIENT_BACKOFF';
-        record.cooldownUntil = now + 2500;
+      // Transient network drop, timeout, or upstream 5xx (never overwrite EXHAUSTED/DISABLED)
+      if (record.state !== 'EXHAUSTED' && record.state !== 'DISABLED') {
+        record.consecutiveFailures++;
+        const backoffMs = cooldown > 0 && Number.isFinite(cooldown) ? cooldown : 2500;
+        if (
+          record.state === 'WARMUP' ||
+          (record.consecutiveFailures >= 3 && record.state === 'ACTIVE')
+        ) {
+          record.state = 'TRANSIENT_BACKOFF';
+          record.cooldownUntil = now + backoffMs;
+          record.canaryToken = undefined;
+        }
+        record.lastStatusCode = statusCode;
+        record.lastErrorMessage = errMsg;
       }
-      record.lastStatusCode = statusCode;
-      record.lastErrorMessage = errMsg;
     } else if (statusCode === 0 && cooldown === 0) {
       // Provider outage or zero-cooldown bypass: zero failure penalty
       record.lastStatusCode = 0;
@@ -462,6 +473,9 @@ export class MemoryKeyStore implements IKeyStore {
 
   /**
    * Manually resets an exhausted or rate-limited key back to active state.
+   * If the key belongs to an account that suffered a 402 shared-wallet exhaustion,
+   * also restores sibling keys in that account that were bulk-exhausted by 402
+   * (while strictly preserving 401/403 key-scoped revocations).
    */
   public async resetKeyToActive(keyId: string): Promise<void> {
     const record = this.records.get(keyId);
@@ -473,8 +487,25 @@ export class MemoryKeyStore implements IKeyStore {
       record.canaryToken = undefined;
       record.lastStatusCode = null;
       record.lastErrorMessage = null;
-      if (record.config.accountId) {
-        this.brokenAccounts.delete(record.config.accountId);
+      const accountId = record.config.accountId;
+      if (accountId) {
+        this.brokenAccounts.delete(accountId);
+        const linkedKeys = this.accountKeys.get(accountId);
+        if (linkedKeys) {
+          for (const linkedId of linkedKeys) {
+            if (linkedId === keyId) continue;
+            const sib = this.records.get(linkedId);
+            if (sib && sib.state === 'EXHAUSTED' && sib.lastStatusCode === 402) {
+              sib.state = 'ACTIVE';
+              sib.cooldownUntil = 0;
+              sib.consecutiveFailures = 0;
+              sib.consecutive429s = 0;
+              sib.canaryToken = undefined;
+              sib.lastStatusCode = null;
+              sib.lastErrorMessage = null;
+            }
+          }
+        }
       }
     }
   }

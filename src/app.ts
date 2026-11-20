@@ -406,7 +406,25 @@ export const createApp = async (serverless = false) => {
         const text = await readBoundedBodyText(request, MAX_REQUEST_BODY_SIZE);
         if (!text) return {};
         const parsed = JSON.parse(text);
-        if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+        if (parsed === null) {
+          return {};
+        }
+        if (typeof parsed !== "object" || Array.isArray(parsed)) {
+          let reqPath = "/";
+          try {
+            reqPath = normalizePathname(
+              new URL(request.url, "http://localhost").pathname,
+            );
+          } catch {
+            reqPath = "/";
+          }
+          if (
+            reqPath === "/v2/ask" ||
+            reqPath === "/v2/widget/create-thread" ||
+            reqPath === "/v2/widget/view"
+          ) {
+            return parsed;
+          }
           return {};
         }
         if (Object.prototype.hasOwnProperty.call(parsed, "__proto__")) {
@@ -421,7 +439,14 @@ export const createApp = async (serverless = false) => {
 
       if (mediaType === "application/x-www-form-urlencoded") {
         const text = await readBoundedBodyText(request, MAX_REQUEST_BODY_SIZE);
-        return Object.fromEntries(new URLSearchParams(text));
+        const safeObj: Record<string, string> = {};
+        for (const [k, v] of new URLSearchParams(text)) {
+          if (k === "__proto__" || k === "constructor" || k === "prototype") {
+            continue;
+          }
+          safeObj[k] = v;
+        }
+        return safeObj;
       }
 
       if (request.body) {

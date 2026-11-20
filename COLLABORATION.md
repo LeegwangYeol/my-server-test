@@ -3004,3 +3004,22 @@ This document serves as the shared communication channel between the AI Team (Ge
   - `bun test`: **325 / 325 PASS** (`my-server-test`, 2,092 assertions) + **41 / 41 PASS** (`tokki-widget`, 219 assertions) = **366 / 366 PASS (2,311 assertions)**.
   - Pre-flight builds: `bundle:api` (`api/index.js` 27.0MB, `116ms`), `type-check` (0 errors), `build` (2.67s), `build:embed` (2.04s), `export-playground` (2.46s).
   - Korean report generated at `stress_test_audit.md` (`v6.8.0-DAILY-KO`). Committed locally with `[skip ci]`.
+
+
+---
+
+## 90. Daily Quota-Safe Controlled Load & Adversarial Perimeter Audit (`[세션명: 토키 위젯 일일 부하 테스트]`, 2026-11-21)
+
+- **Session**: `[세션명: 토키 위젯 일일 부하 테스트]` (Single-Agent Focused Mode — Zero External Cloud Quota Burn).
+- **R1 Controlled Concurrency & 429/402/`WARMUP`-Canary Failover Verification**:
+  - Executed Wave 1 (18 concurrent `/v2/ask` requests via `/usr/bin/curl`: 16 full SSE streams + 2 mid-stream client aborts) + Wave 2 (12 warm steady-state concurrent requests) across a 5-key / 4-account ZSET pool (`acc-bankrupt` 2 sibling keys returning Mock 402, `acc-ratelim-1` & `acc-ratelim-2` returning Mock 429 with delta-seconds & RFC 9110 HTTP-date, `acc-healthy` returning 200 SSE).
+  - Wave 1 completed in **88.26ms** (`p50: 77.01ms`, `p95/max: 86.87ms` vs 60,000ms Vercel limit) with **100% failover** and **0 upstream calls** to sibling bankrupt key `k2-dead-b`; Wave 2 completed in **71.34ms** (`p50: 69.34ms`, `p95/max: 70.44ms`) with **0 upstream calls** to all 4 broken/cooling-down keys and post-wave $\text{ZCARD} \equiv 0$.
+- **R2 Adversarial Perimeter, Canary Spin-Loop, Payload Smuggling & Host-DOM Hardening (4 Patches Applied Across Frontend & Backend, 28/28 Live `curl` Vectors PASS)**:
+  1. `my-server-test/lib/llm/key-manager/stores/memory.ts`, `lua/scripts.ts`, `executor.ts`, `lib/llm/rotating-provider.ts`: Demoted failed `WARMUP` canary probes (`5xx`/`408`/timeout) immediately to `TRANSIENT_BACKOFF` (`now + backoffMs`) and cleared stale `canaryToken`/`canary_token` across all non-200 transitions (eliminating 0ms infinite canary spin loops), added explicit `EXHAUSTED`/`DISABLED` overwrite guards on `5xx` releases, excluded `DISABLED` keys when checking pool-wide `AllAccountsExhaustedError`, and deduplicated OpenRouter `models` fallback arrays.
+  2. `my-server-test/src/app.ts` & `src/endpoints/v2/widget-endpoints.ts`: Closed JSON Array/String root `>4,000`-char token-bomb `413` bypasses in `onParse`, stripped `__proto__`/`constructor`/`prototype` in `application/x-www-form-urlencoded`, added `widgetId`/`accessToken` `>4,000`-char and `>32`-key `HTTP 413` guards plus pre-stream unknown-key heap eviction & `LLM_MAX_TOKENS` `[1, 4096]` clamping on `/v2/ask`, and enforced `checkUnknownFieldsLimit` `413` guards on `/v2/widget/create-thread` and `/v2/widget/view`.
+  3. `tokki-widget/lib/state/chat.tsx`: Isolated third-party `streamResponseListeners` exceptions via `try/catch` with deduplication (`<= 50`), suppressed `0`-token empty `""` ghost bubbles, and unified `startVoiceQuestion` structured JSON error body + `Retry-After` parsing with `startQuestion`.
+  4. `tokki-widget/lib/export.tsx`, `lib/utils/{sanitize-css,image-parser}.ts`, `lib/components/{ChatWindow,ChatWidget,ChatMessage,MarkdownPreview,FunctionCall}.tsx`: Hardened theme lookups via `Object.prototype.hasOwnProperty.call` (blocking `"constructor"`/`"toString"` prototype chain leakage), clamped launcher offsets via `sanitizeBubbleOffset` (`[0, 500]px`), restricted code-fence-aware `parseImage()` to assistant Markdown messages, enforced `referrerPolicy="no-referrer"` + `loading="lazy"` on external images, and blocked loopback/private-IP/non-HTTPS favicon SSRF requests.
+- **R3 Verification**:
+  - `bun test`: **327 / 327 PASS** (`my-server-test`, 2,116 assertions) + **42 / 42 PASS** (`tokki-widget`, 234 assertions) = **369 / 369 PASS (2,350 assertions)**.
+  - Pre-flight builds: `bundle:api` (`api/index.js` 27.0MB, `112ms`), `type-check` (0 errors), `build` (2.62s), `build:embed` (2.02s), `export-playground` (2.47s).
+  - Korean report generated at `stress_test_audit.md` (`v6.9.0-DAILY-KO`). Committed locally with `[skip ci]`.

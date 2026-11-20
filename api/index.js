@@ -685095,7 +685095,10 @@ var require_nodemailer = __commonJS({
 // lambda-src/handler.ts
 var handler_exports = {};
 __export(handler_exports, {
-  default: () => handler
+  default: () => handler,
+  sanitizeHost: () => sanitizeHost,
+  sanitizeProtocol: () => sanitizeProtocol,
+  sanitizeRequestPath: () => sanitizeRequestPath
 });
 module.exports = __toCommonJS(handler_exports);
 
@@ -712041,8 +712044,21 @@ var OpenAICompatibleProvider = class {
     this.extraHeaders = opts.extraHeaders ?? {};
     this.chunkTimeoutMs = opts.chunkTimeoutMs;
   }
-  async *stream(req, signal) {
+  /**
+   * Phase 1: Pre-Stream Handshake
+   * Establishes upstream connection (with bounded 429/5xx retries) BEFORE `/v2/ask`
+   * commits HTTP 200 SSE headers, allowing clean HTTP 429 + Retry-After / 503 / 502 / 413 / 499 responses.
+   */
+  async preStreamHandshake(req, signal) {
     const { resp, cleanupAttempt } = await this.fetchWithRetry(req, signal);
+    return { response: resp, cleanupAttempt };
+  }
+  /**
+   * Phase 2: Stream Consumption
+   * Reads SSE frames from an established upstream response with per-chunk stall watchdog.
+   */
+  async *streamFromHandshake(handshake, signal) {
+    const { response: resp, cleanupAttempt } = handshake;
     if (!resp.body) {
       cleanupAttempt();
       throw new Error(`[${this.name}] empty response body`);
@@ -712052,6 +712068,17 @@ var OpenAICompatibleProvider = class {
     let buffer = "";
     const MAX_SSE_BUFFER_CHARS2 = 256e3;
     const effectiveChunkTimeoutMs = this.chunkTimeoutMs ?? envInt("LLM_CHUNK_TIMEOUT_MS", 25e3, 50, 55e3);
+    const onClientAbort = () => {
+      void reader.cancel().catch(() => {
+      });
+    };
+    if (signal) {
+      if (signal.aborted) {
+        onClientAbort();
+      } else {
+        signal.addEventListener("abort", onClientAbort, { once: true });
+      }
+    }
     const readChunkWithTimeout = async () => {
       if (!Number.isFinite(effectiveChunkTimeoutMs) || effectiveChunkTimeoutMs <= 0) {
         return reader.read();
@@ -712080,6 +712107,7 @@ var OpenAICompatibleProvider = class {
     };
     try {
       while (true) {
+        if (signal?.aborted) break;
         const { value, done } = await readChunkWithTimeout();
         if (done) {
           buffer += decoder.decode();
@@ -712134,6 +712162,9 @@ var OpenAICompatibleProvider = class {
         }
       }
     } finally {
+      if (signal) {
+        signal.removeEventListener("abort", onClientAbort);
+      }
       cleanupAttempt();
       try {
         await reader.cancel().catch(() => {
@@ -712142,6 +712173,10 @@ var OpenAICompatibleProvider = class {
       } catch {
       }
     }
+  }
+  async *stream(req, signal) {
+    const handshake = await this.preStreamHandshake(req, signal);
+    yield* this.streamFromHandshake(handshake, signal);
   }
   /**
    * POST the chat request; on 429/5xx (or a network error) back off and retry
@@ -712196,8 +712231,16 @@ var OpenAICompatibleProvider = class {
         clearTimeout(timer);
       } catch (err) {
         cleanupAttempt();
-        if (signal?.aborted || !timedOut && isAbortError(err) || attempt >= maxRetries) {
+        if (signal?.aborted || !timedOut && isAbortError(err)) {
           throw err;
+        }
+        if (attempt >= maxRetries) {
+          const outErr = err instanceof Error ? err : new Error(`[${this.name}] ${String(err)}`);
+          Object.assign(outErr, {
+            statusCode: 503,
+            code: "UPSTREAM_MODEL_OUTAGE"
+          });
+          throw outErr;
         }
         const wait = backoffMs(attempt);
         console.warn(
@@ -712227,12 +712270,52 @@ var OpenAICompatibleProvider = class {
         }
       }
       const text = await safeText(resp);
-      throw new Error(
+      const httpErr = new Error(
         `[${this.name}] ${resp.status} ${resp.statusText}: ${text.slice(0, 300)}`
       );
+      httpErr.status = resp.status;
+      httpErr.statusCode = resp.status;
+      if (resp.status === 429) {
+        httpErr.code = "ALL_KEYS_RATE_LIMITED";
+        httpErr.retryAfterSeconds = parseExactRetryAfterSec(
+          resp.headers.get("retry-after"),
+          resp.headers.get("date")
+        ) ?? 5;
+      } else if (resp.status === 402 || resp.status === 401 || resp.status === 403 && !/moderation|flagged/i.test(text)) {
+        httpErr.code = "ALL_ACCOUNTS_EXHAUSTED";
+      } else if (resp.status >= 500 || resp.status === 408) {
+        httpErr.code = "UPSTREAM_MODEL_OUTAGE";
+      } else {
+        httpErr.code = "UPSTREAM_CLIENT_ERROR";
+      }
+      throw httpErr;
     }
   }
 };
+function parseExactRetryAfterSec(header, dateHeader) {
+  if (!header) return void 0;
+  const v = header.trim();
+  if (!v) return void 0;
+  if (/^(?:\d+(?:\.\d*)?|\.\d+)s?$/i.test(v)) {
+    const sec = parseFloat(v);
+    if (!Number.isNaN(sec) && Number.isFinite(sec) && sec > 0) {
+      return Math.max(1, Math.min(3600, Math.ceil(sec)));
+    }
+    return void 0;
+  }
+  if (!Number.isNaN(Number(v))) return void 0;
+  const at = Date.parse(v);
+  if (!Number.isNaN(at)) {
+    let skew = 0;
+    if (dateHeader) {
+      const serverTime = Date.parse(dateHeader);
+      if (!Number.isNaN(serverTime)) skew = serverTime - Date.now();
+    }
+    const diff = at - (Date.now() + skew);
+    if (diff > 0) return Math.max(1, Math.min(3600, Math.ceil(diff / 1e3)));
+  }
+  return void 0;
+}
 var RETRYABLE_STATUS = /* @__PURE__ */ new Set([429, 500, 502, 503, 504]);
 function backoffMs(attempt) {
   const base = Math.min(500 * 2 ** attempt, 2e3);
@@ -712654,7 +712737,8 @@ async function executeWithResilientFailover(keyStore, keyConfigMap, requestFacto
     const reservation = await keyStore.reserveKey(attemptedKeyIds);
     if (!reservation) {
       const allStates2 = await keyStore.getAllStates().catch(() => []);
-      if (allStates2.length > 0 && allStates2.every((s) => s.status === "EXHAUSTED")) {
+      const enabledStates2 = allStates2.filter((s) => s.status !== "DISABLED");
+      if (enabledStates2.length > 0 && enabledStates2.every((s) => s.status === "EXHAUSTED")) {
         throw new AllAccountsExhaustedError();
       }
       throw new AllKeysRateLimitedError(5);
@@ -712809,8 +712893,9 @@ async function executeWithResilientFailover(keyStore, keyConfigMap, requestFacto
     }
   }
   const allStates = await keyStore.getAllStates().catch(() => []);
-  const attemptedStates = allStates.filter((s) => attemptedKeyIds.includes(s.id));
-  if (allStates.length > 0 && allStates.every((s) => s.status === "EXHAUSTED") || attemptedStates.length > 0 && attemptedStates.every((s) => s.status === "EXHAUSTED")) {
+  const enabledStates = allStates.filter((s) => s.status !== "DISABLED");
+  const attemptedStates = enabledStates.filter((s) => attemptedKeyIds.includes(s.id));
+  if (enabledStates.length > 0 && enabledStates.every((s) => s.status === "EXHAUSTED") || attemptedStates.length > 0 && attemptedStates.every((s) => s.status === "EXHAUSTED")) {
     throw new AllAccountsExhaustedError();
   }
   const allAttemptedRateLimited = attemptedStates.length > 0 && attemptedStates.every((s) => s.status === "RATE_LIMITED" || s.status === "EXHAUSTED");
@@ -713054,16 +713139,18 @@ var MemoryKeyStore = class {
         record.consecutiveFailures = 0;
       }
     } else if (statusCode === 429) {
-      if (record.state !== "EXHAUSTED") {
+      if (record.state !== "EXHAUSTED" && record.state !== "DISABLED") {
         record.consecutive429s++;
         record.state = "RATE_LIMITED";
         record.cooldownUntil = now + cooldown;
+        record.canaryToken = void 0;
         record.lastStatusCode = 429;
         record.lastErrorMessage = errMsg;
       }
     } else if (statusCode === 402) {
       record.state = "EXHAUSTED";
       record.cooldownUntil = Infinity;
+      record.canaryToken = void 0;
       record.lastStatusCode = statusCode;
       record.lastErrorMessage = errMsg;
       const accountId = record.config.accountId;
@@ -713076,6 +713163,7 @@ var MemoryKeyStore = class {
             if (linkedRecord) {
               linkedRecord.state = "EXHAUSTED";
               linkedRecord.cooldownUntil = Infinity;
+              linkedRecord.canaryToken = void 0;
               linkedRecord.lastStatusCode = statusCode;
               linkedRecord.lastErrorMessage = "Account credit balance exhausted";
             }
@@ -713085,16 +713173,21 @@ var MemoryKeyStore = class {
     } else if (statusCode === 401 || statusCode === 403) {
       record.state = "EXHAUSTED";
       record.cooldownUntil = Infinity;
+      record.canaryToken = void 0;
       record.lastStatusCode = statusCode;
       record.lastErrorMessage = errMsg;
     } else if (statusCode >= 500 || statusCode === 0 && cooldown > 0 || statusCode === 408) {
-      record.consecutiveFailures++;
-      if (record.consecutiveFailures >= 3 && record.state === "ACTIVE") {
-        record.state = "TRANSIENT_BACKOFF";
-        record.cooldownUntil = now + 2500;
+      if (record.state !== "EXHAUSTED" && record.state !== "DISABLED") {
+        record.consecutiveFailures++;
+        const backoffMs2 = cooldown > 0 && Number.isFinite(cooldown) ? cooldown : 2500;
+        if (record.state === "WARMUP" || record.consecutiveFailures >= 3 && record.state === "ACTIVE") {
+          record.state = "TRANSIENT_BACKOFF";
+          record.cooldownUntil = now + backoffMs2;
+          record.canaryToken = void 0;
+        }
+        record.lastStatusCode = statusCode;
+        record.lastErrorMessage = errMsg;
       }
-      record.lastStatusCode = statusCode;
-      record.lastErrorMessage = errMsg;
     } else if (statusCode === 0 && cooldown === 0) {
       record.lastStatusCode = 0;
       record.lastErrorMessage = errMsg;
@@ -713171,6 +713264,9 @@ var MemoryKeyStore = class {
   }
   /**
    * Manually resets an exhausted or rate-limited key back to active state.
+   * If the key belongs to an account that suffered a 402 shared-wallet exhaustion,
+   * also restores sibling keys in that account that were bulk-exhausted by 402
+   * (while strictly preserving 401/403 key-scoped revocations).
    */
   async resetKeyToActive(keyId) {
     const record = this.records.get(keyId);
@@ -713182,8 +713278,25 @@ var MemoryKeyStore = class {
       record.canaryToken = void 0;
       record.lastStatusCode = null;
       record.lastErrorMessage = null;
-      if (record.config.accountId) {
-        this.brokenAccounts.delete(record.config.accountId);
+      const accountId = record.config.accountId;
+      if (accountId) {
+        this.brokenAccounts.delete(accountId);
+        const linkedKeys = this.accountKeys.get(accountId);
+        if (linkedKeys) {
+          for (const linkedId of linkedKeys) {
+            if (linkedId === keyId) continue;
+            const sib = this.records.get(linkedId);
+            if (sib && sib.state === "EXHAUSTED" && sib.lastStatusCode === 402) {
+              sib.state = "ACTIVE";
+              sib.cooldownUntil = 0;
+              sib.consecutiveFailures = 0;
+              sib.consecutive429s = 0;
+              sib.canaryToken = void 0;
+              sib.lastStatusCode = null;
+              sib.lastErrorMessage = null;
+            }
+          }
+        }
       }
     }
   }
@@ -713261,6 +713374,7 @@ var RotatingLLMProvider = class {
       this.keyConfigMap,
       async (apiKey, attemptSignal) => {
         const primaryModel = req.model || this.defaultModel;
+        const fallbackModel = primaryModel === "openai/gpt-4o-mini" ? "google/gemini-2.0-flash-lite-001" : "openai/gpt-4o-mini";
         return fetch("https://openrouter.ai/api/v1/chat/completions", {
           method: "POST",
           headers: {
@@ -713270,7 +713384,7 @@ var RotatingLLMProvider = class {
           },
           body: JSON.stringify({
             model: primaryModel,
-            models: [primaryModel, "openai/gpt-4o-mini"],
+            models: [primaryModel, fallbackModel],
             messages: req.messages,
             max_tokens: req.maxTokens ?? 512,
             temperature: req.temperature ?? 0.7,
@@ -713711,12 +713825,13 @@ if status == 200 then
 
 elseif status == 429 then
     -- CRITICAL SAFETY GUARD: NEVER overwrite permanent EXHAUSTED with temporary RATE_LIMITED!
-    if current_state ~= 'EXHAUSTED' then
+    if current_state ~= 'EXHAUSTED' and current_state ~= 'DISABLED' then
         redis.call('HINCRBY', hash, 'consecutive_429s', 1)
         redis.call('HSET', hash, 'state', 'RATE_LIMITED')
         redis.call('HSET', hash, 'cooldown_until', now + cooldown_ms)
         redis.call('HSET', hash, 'last_error_code', 429)
         redis.call('HSET', hash, 'last_error_message', err_msg)
+        redis.call('HDEL', hash, 'canary_token')
     end
 
 elseif status == 402 then
@@ -713724,6 +713839,7 @@ elseif status == 402 then
     redis.call('HSET', hash, 'state', 'EXHAUSTED')
     redis.call('HSET', hash, 'last_error_code', status)
     redis.call('HSET', hash, 'last_error_message', err_msg)
+    redis.call('HDEL', hash, 'canary_token')
 
     -- Bulk-invalidate all keys sharing the same account in <5ms
     if account_id ~= "" then
@@ -713735,6 +713851,7 @@ elseif status == 402 then
                 redis.call('HSET', lhash, 'state', 'EXHAUSTED')
                 redis.call('HSET', lhash, 'last_error_code', status)
                 redis.call('HSET', lhash, 'last_error_message', "Account credit balance exhausted")
+                redis.call('HDEL', lhash, 'canary_token')
             end
         end
     end
@@ -713745,16 +713862,21 @@ elseif status == 401 or status == 403 then
     redis.call('HSET', hash, 'state', 'EXHAUSTED')
     redis.call('HSET', hash, 'last_error_code', status)
     redis.call('HSET', hash, 'last_error_message', err_msg)
+    redis.call('HDEL', hash, 'canary_token')
 
 elseif status >= 500 or (status == 0 and cooldown_ms > 0) or status == 408 then
-    -- Transient network drop, timeout, or upstream 5xx
-    local fails = redis.call('HINCRBY', hash, 'consecutive_failures', 1)
-    if fails >= 3 and current_state == 'ACTIVE' then
-        redis.call('HSET', hash, 'state', 'TRANSIENT_BACKOFF')
-        redis.call('HSET', hash, 'cooldown_until', now + 2500)
+    -- Transient network drop, timeout, or upstream 5xx (never overwrite EXHAUSTED/DISABLED)
+    if current_state ~= 'EXHAUSTED' and current_state ~= 'DISABLED' then
+        local fails = redis.call('HINCRBY', hash, 'consecutive_failures', 1)
+        local backoff_ms = cooldown_ms > 0 and cooldown_ms or 2500
+        if current_state == 'WARMUP' or (fails >= 3 and current_state == 'ACTIVE') then
+            redis.call('HSET', hash, 'state', 'TRANSIENT_BACKOFF')
+            redis.call('HSET', hash, 'cooldown_until', now + backoff_ms)
+            redis.call('HDEL', hash, 'canary_token')
+        end
+        redis.call('HSET', hash, 'last_error_code', status)
+        redis.call('HSET', hash, 'last_error_message', err_msg)
     end
-    redis.call('HSET', hash, 'last_error_code', status)
-    redis.call('HSET', hash, 'last_error_message', err_msg)
 
 elseif status == 0 and cooldown_ms == 0 then
     -- Provider outage or zero-cooldown bypass: zero failure penalty
@@ -713989,24 +714111,34 @@ var UpstashRedisKeyStore = class {
   }
   /**
    * Manually resets an exhausted or rate-limited key back to active.
+   * Restores sibling keys in the same account that were bulk-exhausted by 402
+   * while preserving 401/403 key-scoped revocations.
    */
   async resetKeyToActive(keyId) {
     const statesBefore = await this.memoryFallback.getAllStates();
     const accountId = statesBefore.find((s) => s.id === keyId)?.accountId;
+    const sibling402Ids = [];
     this.pendingPermanentExhaustions.delete(keyId);
     if (accountId) {
       for (const st of statesBefore) {
         if (st.accountId === accountId) {
-          this.pendingPermanentExhaustions.delete(st.id);
+          const pending = this.pendingPermanentExhaustions.get(st.id);
+          if (!pending || pending.statusCode === 402) {
+            this.pendingPermanentExhaustions.delete(st.id);
+          }
+          if (st.id !== keyId && st.status === "EXHAUSTED" && st.lastStatusCode === 402) {
+            sibling402Ids.push(st.id);
+          }
         }
       }
     }
     await this.memoryFallback.resetKeyToActive(keyId);
     if (this.isStorageBreakerOpen()) return;
     try {
-      const hashKey = `openrouter:key:${keyId}`;
-      const pipeline = [
-        [
+      const pipeline = [];
+      for (const targetId of [keyId, ...sibling402Ids]) {
+        const hashKey = `openrouter:key:${targetId}`;
+        pipeline.push([
           "HSET",
           hashKey,
           "state",
@@ -714017,9 +714149,15 @@ var UpstashRedisKeyStore = class {
           "0",
           "consecutive_failures",
           "0"
-        ],
-        ["HDEL", hashKey, "canary_token", "last_error_code", "last_error_message"]
-      ];
+        ]);
+        pipeline.push([
+          "HDEL",
+          hashKey,
+          "canary_token",
+          "last_error_code",
+          "last_error_message"
+        ]);
+      }
       if (accountId) {
         pipeline.push(["DEL", `openrouter:account:${accountId}:broken`]);
       }
@@ -714620,14 +714758,20 @@ async function listMessages(threadId, limit = 50) {
 }
 async function appendMessage(threadId, role, content, options) {
   const tid = (threadId ?? "").trim();
-  if (!tid) return false;
+  if (!tid || tid.length > MAX_STORE_ID_CHARS || /[\x00-\x1f\x7f]/.test(tid)) {
+    return false;
+  }
+  const safeContent = String(content ?? "").replace(/\x00+/g, "");
+  if (!safeContent.trim()) {
+    return false;
+  }
   const allowQueue = options?.allowQueue !== false;
   const maxRetries = options?.maxRetries ?? 3;
   const idempotencyKey = options?.idempotencyKey ?? `${tid}:${role}:${Date.now()}:${Math.random().toString(36).slice(2, 6)}`;
   try {
     const execRes = await executeWithFallback(
       async () => {
-        const { error } = await supabaseUntyped.from("chat_message").insert({ thread_id: tid, role, content });
+        const { error } = await supabaseUntyped.from("chat_message").insert({ thread_id: tid, role, content: safeContent });
         if (error) {
           throw error;
         }
@@ -714638,7 +714782,7 @@ async function appendMessage(threadId, role, content, options) {
         fallbackPayload: {
           threadId: tid,
           role,
-          content,
+          content: safeContent,
           createdAt: (/* @__PURE__ */ new Date()).toISOString()
         },
         type: "db_chat_message",
@@ -714974,34 +715118,100 @@ var BoundedLRUCache = class {
     return this.map.size;
   }
 };
+var STALE_CACHE_TTL_MS = 10 * 6e4;
 var widgetCache = new BoundedLRUCache(MAX_CACHE_ENTRIES);
+var staleWidgetCache = new BoundedLRUCache(MAX_CACHE_ENTRIES);
+var inflightWidgetFetches = /* @__PURE__ */ new Map();
+var cacheGeneration = 0;
 function invalidateWidgetCache(id) {
+  cacheGeneration++;
   if (id) {
+    const trimmed = id.trim();
     widgetCache.delete(id);
+    widgetCache.delete(trimmed);
+    staleWidgetCache.delete(id);
+    staleWidgetCache.delete(trimmed);
+    inflightWidgetFetches.delete(id);
+    inflightWidgetFetches.delete(trimmed);
   } else {
     widgetCache.clear();
+    staleWidgetCache.clear();
+    inflightWidgetFetches.clear();
   }
 }
 async function getWidget(id) {
-  if (!id || id.length > MAX_WIDGET_ID_CHARS) return null;
+  const trimmed = (id ?? "").trim();
+  if (!trimmed || trimmed.length > MAX_WIDGET_ID_CHARS || /[\x00-\x1f\x7f]/.test(trimmed)) {
+    return null;
+  }
   const now = Date.now();
-  const cached2 = widgetCache.get(id);
+  const cached2 = widgetCache.get(trimmed);
   if (cached2 && cached2.expiresAt > now) {
     return cached2.row;
   }
-  try {
-    const { data, error } = await supabaseUntyped.from(TABLE).select("*").eq("id", id).eq("is_deleted", false).maybeSingle();
-    if (error) {
-      console.error("[widget-store] getWidget failed:", error.message);
-      return null;
-    }
-    const result = data ? normalizeRow(data) : null;
-    widgetCache.set(id, { row: result, expiresAt: now + CACHE_TTL_MS });
-    return result;
-  } catch (err) {
-    console.warn("[widget-store] getWidget skipped:", err?.message || err);
-    return null;
+  const existingInflight = inflightWidgetFetches.get(trimmed);
+  if (existingInflight) {
+    return existingInflight;
   }
+  const startGen = cacheGeneration;
+  const fetchPromise = (async () => {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const { data, error } = await supabaseUntyped.from(TABLE).select("*").eq("id", trimmed).eq("is_deleted", false).maybeSingle();
+        if (error) {
+          if (attempt === 0 && is429OrQuotaError(error)) {
+            await new Promise(
+              (r) => setTimeout(r, 40 + Math.floor(Math.random() * 80))
+            );
+            continue;
+          }
+          console.error("[widget-store] getWidget failed:", error.message);
+          if (cacheGeneration === startGen) {
+            const stale = staleWidgetCache.get(trimmed);
+            if (stale) return stale.row;
+          }
+          return null;
+        }
+        const result = data ? normalizeRow(data) : null;
+        if (cacheGeneration === startGen) {
+          const doneNow = Date.now();
+          widgetCache.set(trimmed, {
+            row: result,
+            expiresAt: doneNow + CACHE_TTL_MS
+          });
+          if (result) {
+            staleWidgetCache.set(trimmed, {
+              row: result,
+              expiresAt: doneNow + STALE_CACHE_TTL_MS
+            });
+          } else {
+            staleWidgetCache.delete(trimmed);
+          }
+        }
+        return result;
+      } catch (err) {
+        if (attempt === 0 && is429OrQuotaError(err)) {
+          await new Promise(
+            (r) => setTimeout(r, 40 + Math.floor(Math.random() * 80))
+          );
+          continue;
+        }
+        console.warn("[widget-store] getWidget skipped:", err?.message || err);
+        if (cacheGeneration === startGen) {
+          const stale = staleWidgetCache.get(trimmed);
+          if (stale) return stale.row;
+        }
+        return null;
+      }
+    }
+    return null;
+  })().finally(() => {
+    if (inflightWidgetFetches.get(trimmed) === fetchPromise) {
+      inflightWidgetFetches.delete(trimmed);
+    }
+  });
+  inflightWidgetFetches.set(trimmed, fetchPromise);
+  return fetchPromise;
 }
 async function listWidgetsRegistered() {
   try {
@@ -715156,6 +715366,44 @@ async function deleteWidget(id) {
 // src/endpoints/v2/widget-endpoints.ts
 var import_crypto9 = __toESM(require("crypto"));
 var MAX_WIDGET_ID_CHARS2 = 100;
+var VIEW_KNOWN_KEYS = /* @__PURE__ */ new Set(["widgetId", "threadId"]);
+var CREATE_THREAD_KNOWN_KEYS = /* @__PURE__ */ new Set(["widgetId"]);
+var ASK_KNOWN_KEYS = /* @__PURE__ */ new Set([
+  "widgetId",
+  "message",
+  "threadId",
+  "browserInfo",
+  "search",
+  "accessToken"
+]);
+function checkUnknownFieldsLimit(body, allowedKeys, maxExtraChars = 2e3, maxTotalKeys = 16) {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return null;
+  }
+  const keys = Object.keys(body);
+  if (keys.length > maxTotalKeys) {
+    return `request contains too many fields (${keys.length} > ${maxTotalKeys})`;
+  }
+  let extraChars = 0;
+  for (const key of keys) {
+    if (allowedKeys.has(key)) continue;
+    extraChars += key.length;
+    const val = body[key];
+    if (typeof val === "string") {
+      extraChars += val.length;
+    } else if (val !== void 0 && val !== null) {
+      try {
+        extraChars += (JSON.stringify(val) ?? "").length;
+      } catch {
+        return "malformed extra payload field";
+      }
+    }
+    if (extraChars > maxExtraChars) {
+      return `extra request fields too large (${extraChars} > ${maxExtraChars} chars)`;
+    }
+  }
+  return null;
+}
 function timingSafeMatch(a, b) {
   if (!a || !b) return false;
   const hashA = import_crypto9.default.createHash("sha256").update(a).digest();
@@ -715260,6 +715508,16 @@ var v2WidgetEndpoints = async (app) => {
             return { success: false, error: "threadId must be a string" };
           }
         }
+        const viewExtraErr = checkUnknownFieldsLimit(
+          body,
+          VIEW_KNOWN_KEYS,
+          MAX_VIEW_AUX_CHARS,
+          12
+        );
+        if (viewExtraErr) {
+          set.status = 413;
+          return { success: false, error: viewExtraErr };
+        }
         const widgetId = (typeof rawWidgetId === "string" ? rawWidgetId : "").trim();
         let master = null;
         try {
@@ -715356,6 +715614,16 @@ var v2WidgetEndpoints = async (app) => {
             }
           }
         }
+        const createThreadExtraErr = checkUnknownFieldsLimit(
+          body,
+          CREATE_THREAD_KNOWN_KEYS,
+          2e3,
+          12
+        );
+        if (createThreadExtraErr) {
+          set.status = 413;
+          return { success: false, error: createThreadExtraErr };
+        }
         const widgetId = (typeof rawWidgetId === "string" ? rawWidgetId : "").trim();
         let widgetMaster = null;
         try {
@@ -715418,6 +715686,35 @@ var v2WidgetEndpoints = async (app) => {
           };
         }
         const rawWidgetId = body?.widgetId;
+        if (rawWidgetId !== void 0 && rawWidgetId !== null) {
+          if (typeof rawWidgetId === "string") {
+            if (rawWidgetId.length > MAX_MESSAGE_CHARS) {
+              set.status = 413;
+              return {
+                success: false,
+                error: `widgetId too large (${rawWidgetId.length} > ${MAX_MESSAGE_CHARS} chars)`
+              };
+            }
+          } else {
+            let serializedWid = "";
+            try {
+              serializedWid = JSON.stringify(rawWidgetId) ?? "";
+            } catch {
+              set.status = 403;
+              return {
+                success: false,
+                error: "unregistered widget_id \u2014 register it via /v2/admin/widgets/upsert first"
+              };
+            }
+            if (serializedWid.length > MAX_MESSAGE_CHARS) {
+              set.status = 413;
+              return {
+                success: false,
+                error: `widgetId too large (${serializedWid.length} > ${MAX_MESSAGE_CHARS} chars)`
+              };
+            }
+          }
+        }
         const widgetId = (typeof rawWidgetId === "string" ? rawWidgetId : "").trim();
         const rawMessage = body?.message;
         let userMessage = "";
@@ -715512,6 +715809,37 @@ var v2WidgetEndpoints = async (app) => {
             };
           }
         }
+        if (body?.accessToken !== void 0 && body?.accessToken !== null) {
+          let rawTok = "";
+          try {
+            rawTok = typeof body.accessToken === "string" ? body.accessToken : JSON.stringify(body.accessToken) ?? "";
+          } catch {
+            set.status = 400;
+            return { success: false, error: "malformed accessToken payload" };
+          }
+          if (rawTok.length > MAX_MESSAGE_CHARS) {
+            set.status = 413;
+            return {
+              success: false,
+              error: `accessToken too large (${rawTok.length} > ${MAX_MESSAGE_CHARS} chars)`
+            };
+          }
+        }
+        if (body && typeof body === "object" && !Array.isArray(body)) {
+          const askKeys = Object.keys(body);
+          if (askKeys.length > 32) {
+            set.status = 413;
+            return {
+              success: false,
+              error: `request contains too many fields (${askKeys.length} > 32)`
+            };
+          }
+          for (const k of askKeys) {
+            if (!ASK_KNOWN_KEYS.has(k)) {
+              delete body[k];
+            }
+          }
+        }
         let widgetMaster = null;
         try {
           widgetMaster = widgetId && widgetId.length <= 100 ? await getWidget(widgetId) : null;
@@ -715532,6 +715860,7 @@ var v2WidgetEndpoints = async (app) => {
             error: "message must be a string"
           };
         }
+        userMessage = userMessage.replace(/\x00+/g, "");
         if (!userMessage.trim()) {
           set.status = 400;
           return {
@@ -715637,7 +715966,7 @@ var v2WidgetEndpoints = async (app) => {
           process.env.LLM_MAX_TOKENS ?? "512",
           10
         );
-        const maxTokens = Number.isFinite(maxTokensRaw) ? maxTokensRaw : 512;
+        const maxTokens = Number.isFinite(maxTokensRaw) ? Math.min(4096, Math.max(1, maxTokensRaw)) : 512;
         const abortController = new AbortController();
         if (request?.signal) {
           if (request.signal.aborted) {
@@ -715817,6 +716146,7 @@ var v2WidgetEndpoints = async (app) => {
           return new Response(stream);
         } catch (setupErr) {
           if (!streamEntered && handshakeResult) {
+            handshakeResult.cleanupAttempt?.();
             void handshakeResult.response?.body?.cancel?.().catch(() => {
             });
             try {
@@ -716069,6 +716399,9 @@ var v2WidgetEndpoints = async (app) => {
           }
           const allOk = results.every((r) => r.ok);
           const pendingNotRun = pending.slice(results.length).map((m) => m.name);
+          if (!allOk) {
+            set.status = 500;
+          }
           return {
             success: allOk,
             ran: results,
@@ -716106,11 +716439,11 @@ var v2WidgetEndpoints = async (app) => {
           set.status = 400;
           return { success: false, error: "widgetId required" };
         }
-        if (widgetId.length > MAX_WIDGET_ID_CHARS2) {
+        if (widgetId.length > MAX_WIDGET_ID_CHARS2 || /[\x00-\x1f\x7f]/.test(widgetId)) {
           set.status = 400;
           return {
             success: false,
-            error: `widgetId exceeds maximum length of ${MAX_WIDGET_ID_CHARS2} characters`
+            error: widgetId.length > MAX_WIDGET_ID_CHARS2 ? `widgetId exceeds maximum length of ${MAX_WIDGET_ID_CHARS2} characters` : "invalid widgetId (control characters prohibited)"
           };
         }
         if (!file2) {
@@ -716214,6 +716547,14 @@ var v2WidgetEndpoints = async (app) => {
         if (deny) return deny;
         const widgetId = body?.widgetId?.trim() ?? "";
         if (!widgetId) return { success: false, threads: [] };
+        if (widgetId.length > MAX_WIDGET_ID_CHARS2 || /[\x00-\x1f\x7f]/.test(widgetId)) {
+          set.status = 400;
+          return {
+            success: false,
+            error: `invalid widgetId (must be <= ${MAX_WIDGET_ID_CHARS2} chars without control chars)`,
+            threads: []
+          };
+        }
         const threads = await listThreads(widgetId);
         return { success: true, threads };
       },
@@ -716234,13 +716575,18 @@ var v2WidgetEndpoints = async (app) => {
         const widgetId = body?.widgetId?.trim() ?? "";
         const threadId = body?.threadId?.trim() ?? "";
         if (!widgetId || !threadId) {
-          return { success: false, reason: "widgetId+threadId required" };
-        }
-        if (widgetId.length > MAX_WIDGET_ID_CHARS2 || threadId.length > MAX_WIDGET_ID_CHARS2) {
           set.status = 400;
           return {
             success: false,
-            error: `widgetId and threadId must be <= ${MAX_WIDGET_ID_CHARS2} characters`
+            error: "widgetId+threadId required",
+            reason: "widgetId+threadId required"
+          };
+        }
+        if (widgetId.length > MAX_WIDGET_ID_CHARS2 || threadId.length > MAX_WIDGET_ID_CHARS2 || /[\x00-\x1f\x7f]/.test(widgetId) || /[\x00-\x1f\x7f]/.test(threadId)) {
+          set.status = 400;
+          return {
+            success: false,
+            error: `widgetId and threadId must be <= ${MAX_WIDGET_ID_CHARS2} characters without control chars`
           };
         }
         if (typeof body?.system_prompt === "string" && (body.system_prompt.length > 2e4 || body.system_prompt.includes("\0"))) {
@@ -716288,13 +716634,18 @@ var v2WidgetEndpoints = async (app) => {
         const widgetId = body?.widgetId?.trim() ?? "";
         const threadId = body?.threadId?.trim() ?? "";
         if (!widgetId || !threadId) {
-          return { success: false, reason: "widgetId+threadId required" };
-        }
-        if (widgetId.length > MAX_WIDGET_ID_CHARS2 || threadId.length > MAX_WIDGET_ID_CHARS2) {
           set.status = 400;
           return {
             success: false,
-            error: `widgetId and threadId must be <= ${MAX_WIDGET_ID_CHARS2} characters`
+            error: "widgetId+threadId required",
+            reason: "widgetId+threadId required"
+          };
+        }
+        if (widgetId.length > MAX_WIDGET_ID_CHARS2 || threadId.length > MAX_WIDGET_ID_CHARS2 || /[\x00-\x1f\x7f]/.test(widgetId) || /[\x00-\x1f\x7f]/.test(threadId)) {
+          set.status = 400;
+          return {
+            success: false,
+            error: `widgetId and threadId must be <= ${MAX_WIDGET_ID_CHARS2} characters without control chars`
           };
         }
         if (typeof body?.title === "string" && (body.title.length > 200 || /[\x00-\x1f\x7f]/.test(body.title))) {
@@ -716333,6 +716684,14 @@ var v2WidgetEndpoints = async (app) => {
         const threadId = body?.threadId?.trim() ?? "";
         if (!widgetId || !threadId) {
           return { success: false, messages: [] };
+        }
+        if (widgetId.length > MAX_WIDGET_ID_CHARS2 || threadId.length > MAX_WIDGET_ID_CHARS2 || /[\x00-\x1f\x7f]/.test(widgetId) || /[\x00-\x1f\x7f]/.test(threadId)) {
+          set.status = 400;
+          return {
+            success: false,
+            error: `widgetId and threadId must be <= ${MAX_WIDGET_ID_CHARS2} characters without control chars`,
+            messages: []
+          };
         }
         const thread = await getThread(threadId, widgetId);
         if (!thread) return { success: false, messages: [] };
@@ -716519,7 +716878,15 @@ function explainSmtpError(err) {
   } else if (e?.responseCode === 553 || e?.responseCode === 554) {
     hint = "\uBCF4\uB0B8 \uC8FC\uC18C \uAC70\uBD80 \u2014 from \uC8FC\uC18C\uB294 NAVER_MAIL_USER \uC640 \uAC19\uC544\uC57C \uD569\uB2C8\uB2E4.";
   }
-  return new Error(hint ? `${hint} (${raw})` : raw);
+  const explained = new Error(
+    hint ? `${hint} (${raw})` : raw
+  );
+  if (e?.responseCode !== void 0) explained.responseCode = e.responseCode;
+  if (e?.code !== void 0) explained.code = e.code;
+  if (e?.status !== void 0) explained.status = e.status;
+  if (e?.statusCode !== void 0) explained.statusCode = e.statusCode;
+  if (e?.retryAfter !== void 0) explained.retryAfter = e.retryAfter;
+  return explained;
 }
 function isNaverMailConfigured() {
   const { user, pass } = resolveCreds();
@@ -716598,7 +716965,10 @@ async function sendNaverMail(input, options) {
 async function processMailQueue(maxBatchSize) {
   return mailFallbackQueue.processPending(
     async (job) => {
-      const res = await sendNaverMail(job.payload, { allowQueue: false });
+      const res = await sendNaverMail(job.payload, {
+        allowQueue: false,
+        maxRetries: 0
+      });
       return res.rejected.length === 0;
     },
     Date.now(),
@@ -716815,8 +717185,8 @@ function parsePushbulletRetryMs(headers) {
   }
   return void 0;
 }
-async function fetchPushbulletWithRetry(url, init) {
-  const rawMax = Number.parseInt(process.env.PUSHBULLET_RETRY_MAX ?? "2", 10);
+async function fetchPushbulletWithRetry(url, init, maxRetriesOverride) {
+  const rawMax = typeof maxRetriesOverride === "number" && Number.isInteger(maxRetriesOverride) ? maxRetriesOverride : Number.parseInt(process.env.PUSHBULLET_RETRY_MAX ?? "2", 10);
   const maxRetries = Number.isInteger(rawMax) ? Math.max(0, Math.min(3, rawMax)) : 2;
   for (let attempt = 0; ; attempt++) {
     const res = await fetch(url, {
@@ -716851,7 +717221,7 @@ function isPushbulletConfigured() {
 }
 var MAX_IDEN_CACHE_ENTRIES = 100;
 var idenCache = /* @__PURE__ */ new Map();
-async function resolveDeviceIden(base, token, conf) {
+async function resolveDeviceIden(base, token, conf, maxRetriesOverride) {
   if (conf.iden) return conf.iden;
   const cacheKey = `${conf.mode}:${token}:${conf.nickname?.toLowerCase() ?? ""}:${base}`;
   const cached2 = idenCache.get(cacheKey);
@@ -716867,9 +717237,13 @@ async function resolveDeviceIden(base, token, conf) {
   }
   let res;
   try {
-    res = await fetchPushbulletWithRetry(`${base}/v2/devices`, {
-      headers: { "access-token": token }
-    });
+    res = await fetchPushbulletWithRetry(
+      `${base}/v2/devices`,
+      {
+        headers: { "access-token": token }
+      },
+      maxRetriesOverride
+    );
   } catch (err) {
     const errorObj = err;
     const isTimeout = errorObj?.name === "TimeoutError" || errorObj?.name === "AbortError" || errorObj?.message?.toLowerCase().includes("timeout") || errorObj?.message?.toLowerCase().includes("aborted") || errorObj?.message?.includes("\uC2DC\uAC04 \uCD08\uACFC");
@@ -716913,7 +717287,8 @@ async function resolveDeviceIden(base, token, conf) {
 }
 async function sendViaPushbullet({
   phoneNumber,
-  text
+  text,
+  maxRetries
 }) {
   try {
     const conf = getPushbulletConfig();
@@ -716928,7 +717303,7 @@ async function sendViaPushbullet({
     const base = process.env.PUSHBULLET_API_URL?.trim() || DEFAULT_API_URL;
     let device;
     try {
-      device = await resolveDeviceIden(base, conf.token, conf);
+      device = await resolveDeviceIden(base, conf.token, conf, maxRetries);
     } catch (err) {
       const errorObj = err;
       const isTimeout = errorObj?.name === "TimeoutError" || errorObj?.name === "AbortError" || errorObj?.message?.toLowerCase().includes("timeout") || errorObj?.message?.toLowerCase().includes("aborted") || errorObj?.message?.includes("\uC2DC\uAC04 \uCD08\uACFC");
@@ -716941,20 +717316,24 @@ async function sendViaPushbullet({
         ...typeof errorObj?.retryAfterSeconds === "number" ? { retryAfterSeconds: errorObj.retryAfterSeconds } : {}
       };
     }
-    const res = await fetchPushbulletWithRetry(`${base}/v2/texts`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "access-token": conf.token
+    const res = await fetchPushbulletWithRetry(
+      `${base}/v2/texts`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "access-token": conf.token
+        },
+        body: JSON.stringify({
+          data: {
+            target_device_iden: device,
+            addresses: [phoneNumber],
+            message: text
+          }
+        })
       },
-      body: JSON.stringify({
-        data: {
-          target_device_iden: device,
-          addresses: [phoneNumber],
-          message: text
-        }
-      })
-    });
+      maxRetries
+    );
     let raw;
     try {
       raw = await res.json();
@@ -717022,7 +717401,11 @@ async function sendSms({ phoneNumber, text }, options) {
     );
   }
   const allowQueue = options?.allowQueue !== false;
-  const detail = await sendViaPushbullet({ phoneNumber, text });
+  const detail = await sendViaPushbullet({
+    phoneNumber,
+    text,
+    maxRetries: options?.maxRetries
+  });
   if (!detail.ok && detail.status === 429 && allowQueue) {
     const initialDelayMs = detail.retryAfterSeconds ? Math.min(3e4, detail.retryAfterSeconds * 1e3) : void 0;
     const job = smsFallbackQueue.enqueue(
@@ -717060,7 +717443,10 @@ async function sendSms({ phoneNumber, text }, options) {
 async function processSmsQueue(maxBatchSize) {
   return smsFallbackQueue.processPending(
     async (job) => {
-      const res = await sendSms(job.payload, { allowQueue: false });
+      const res = await sendSms(job.payload, {
+        allowQueue: false,
+        maxRetries: 0
+      });
       if (!res.ok) {
         const detail = res.detail;
         if (detail?.status === 429) {
@@ -717260,7 +717646,8 @@ var SlidingWindowRateLimiter = class {
    * Check rate limit for a given key using two-window sliding counter interpolation.
    */
   check(key, limit, windowMs, now = Date.now()) {
-    const safeKey = (key || "unknown").trim();
+    const rawKey = (key || "unknown").trim();
+    const safeKey = rawKey.length > 160 ? rawKey.slice(0, 160) : rawKey;
     const safeLimit = Number.isFinite(limit) && limit >= 0 ? limit : 0;
     const safeWindowMs = Number.isFinite(windowMs) && windowMs > 0 ? windowMs : 6e4;
     const safeNow = Number.isFinite(now) ? now : Date.now();
@@ -717407,7 +717794,7 @@ function normalizeIp(raw) {
   let ip = (raw || "").trim();
   if (!ip) return "127.0.0.1";
   ip = ip.replace(/^["']+|["']+$/g, "").trim();
-  if (!ip) return "127.0.0.1";
+  if (!ip || ip.length > 128 || /[\s\x00-\x1f\x7f]/.test(ip)) return "127.0.0.1";
   const bracketMatch = ip.match(/^\[([a-zA-Z0-9:.%_\-]+)\](?::\d+)?$/);
   if (bracketMatch) {
     return bracketMatch[1].toLowerCase();
@@ -717823,7 +718210,21 @@ var createApp = async (serverless = false) => {
       const text = await readBoundedBodyText(request, MAX_REQUEST_BODY_SIZE);
       if (!text) return {};
       const parsed = JSON.parse(text);
-      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      if (parsed === null) {
+        return {};
+      }
+      if (typeof parsed !== "object" || Array.isArray(parsed)) {
+        let reqPath = "/";
+        try {
+          reqPath = normalizePathname(
+            new URL(request.url, "http://localhost").pathname
+          );
+        } catch {
+          reqPath = "/";
+        }
+        if (reqPath === "/v2/ask" || reqPath === "/v2/widget/create-thread" || reqPath === "/v2/widget/view") {
+          return parsed;
+        }
         return {};
       }
       if (Object.prototype.hasOwnProperty.call(parsed, "__proto__")) {
@@ -717836,7 +718237,14 @@ var createApp = async (serverless = false) => {
     }
     if (mediaType === "application/x-www-form-urlencoded") {
       const text = await readBoundedBodyText(request, MAX_REQUEST_BODY_SIZE);
-      return Object.fromEntries(new URLSearchParams(text));
+      const safeObj = {};
+      for (const [k, v] of new URLSearchParams(text)) {
+        if (k === "__proto__" || k === "constructor" || k === "prototype") {
+          continue;
+        }
+        safeObj[k] = v;
+      }
+      return safeObj;
     }
     if (request.body) {
       const text = await readBoundedBodyText(request, MAX_REQUEST_BODY_SIZE);
@@ -717905,24 +718313,39 @@ var getApp = () => {
   }
   return appPromise;
 };
-var SAFE_HOST_RE = /^(?:[a-zA-Z0-9.-]+|\[[a-fA-F0-9:]+\])(?::\d{1,5})?$/;
+var SAFE_HOST_RE = /^(?:[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)*|\[[a-fA-F0-9:]+\])(?::\d{1,5})?$/;
 function sanitizeHost(raw) {
   const str = Array.isArray(raw) ? raw[0] : raw;
   const candidate = (str ?? "").split(",")[0].trim();
   if (!candidate || candidate.length > 255 || !SAFE_HOST_RE.test(candidate)) {
     return "localhost";
   }
-  return candidate;
+  try {
+    const parsed = new URL(`http://${candidate}/`);
+    if (!parsed.hostname || parsed.username || parsed.password || parsed.pathname !== "/" || parsed.search || parsed.hash) {
+      return "localhost";
+    }
+    if (parsed.port) {
+      const portNum = Number(parsed.port);
+      if (!Number.isInteger(portNum) || portNum < 1 || portNum > 65535) {
+        return "localhost";
+      }
+    }
+    return parsed.host;
+  } catch {
+    return "localhost";
+  }
 }
 function sanitizeProtocol(raw) {
   const str = Array.isArray(raw) ? raw[0] : raw;
   const candidate = (str ?? "").split(",")[0].trim().toLowerCase();
   return candidate === "http" ? "http" : "https";
 }
-function sanitizeRequestPath(rawUrl) {
+function sanitizeRequestPath(rawUrl, baseOrigin = "https://localhost") {
   if (!rawUrl) return "/";
-  let p = rawUrl.trim();
-  if (!p.startsWith("/")) {
+  let p = rawUrl.replace(/[\x00-\x1f\x7f]/g, "").trim();
+  if (!p) return "/";
+  if (!p.startsWith("/") && !p.startsWith("\\")) {
     try {
       const parsed = new URL(p);
       p = `${parsed.pathname || "/"}${parsed.search}`;
@@ -717930,15 +718353,21 @@ function sanitizeRequestPath(rawUrl) {
       p = `/${p}`;
     }
   }
-  if (p.startsWith("//")) {
-    const qIdx = p.indexOf("?");
-    if (qIdx === -1) {
-      p = p.replace(/^\/+/, "/");
-    } else {
-      p = p.slice(0, qIdx).replace(/^\/+/, "/") + p.slice(qIdx);
-    }
+  const qIdx = p.indexOf("?");
+  if (qIdx === -1) {
+    p = p.replace(/^[\/\\]+/, "/");
+  } else {
+    p = p.slice(0, qIdx).replace(/^[\/\\]+/, "/") + p.slice(qIdx);
   }
-  return p || "/";
+  try {
+    const resolved = new URL(p || "/", baseOrigin);
+    if (resolved.origin !== baseOrigin) {
+      return "/";
+    }
+    return `${resolved.pathname || "/"}${resolved.search}`;
+  } catch {
+    return "/";
+  }
 }
 var toWebRequest = (req, res) => {
   const host = sanitizeHost(
@@ -717947,39 +718376,64 @@ var toWebRequest = (req, res) => {
   const protocol = sanitizeProtocol(
     req.headers["x-forwarded-proto"]
   );
-  const safePath = sanitizeRequestPath(req.url);
-  const url = `${protocol}://${host}${safePath}`;
+  const baseOrigin = `${protocol}://${host}`;
+  const safePath = sanitizeRequestPath(req.url, baseOrigin);
+  const url = `${baseOrigin}${safePath}`;
   const headers = new Headers();
   for (const [key, value] of Object.entries(req.headers)) {
-    if (value === void 0) continue;
-    if (Array.isArray(value)) {
-      for (const v of value) headers.append(key, v);
-    } else {
-      headers.set(key, value);
+    if (value === void 0 || key.startsWith(":")) continue;
+    try {
+      if (Array.isArray(value)) {
+        for (const v of value) headers.append(key, v);
+      } else {
+        headers.set(key, value);
+      }
+    } catch {
+      if (key.toLowerCase() === "content-length") {
+        const badHdrErr = new Error(
+          "Bad Request: invalid Content-Length header"
+        );
+        badHdrErr.statusCode = 400;
+        throw badHdrErr;
+      }
     }
   }
   const method = (req.method ?? "GET").toUpperCase();
   const hasBody = method !== "GET" && method !== "HEAD";
   const controller = new AbortController();
   const onAbort = () => controller.abort();
-  req.on("aborted", onAbort);
-  req.on("close", () => {
+  const onReqClose = () => {
     if (!req.complete) onAbort();
-  });
-  if (res && typeof res.on === "function") {
-    res.on("close", () => {
-      if (!res.writableEnded) {
-        controller.abort();
-      }
-    });
+  };
+  const onResClose = () => {
+    if (res && !res.writableEnded) {
+      controller.abort();
+    }
+  };
+  if (typeof req.on === "function") {
+    req.on("aborted", onAbort);
+    req.on("close", onReqClose);
   }
-  return new Request(url, {
+  if (res && typeof res.on === "function") {
+    res.on("close", onResClose);
+  }
+  const cleanup = () => {
+    if (typeof req.off === "function") {
+      req.off("aborted", onAbort);
+      req.off("close", onReqClose);
+    }
+    if (res && typeof res.off === "function") {
+      res.off("close", onResClose);
+    }
+  };
+  const webReq = new Request(url, {
     method,
     headers,
     duplex: hasBody ? "half" : void 0,
     body: hasBody ? req : void 0,
     signal: controller.signal
   });
+  return { webReq, cleanup };
 };
 var writeWebResponse = async (res, webRes, signal) => {
   res.statusCode = webRes.status;
@@ -718084,24 +718538,32 @@ var writeWebResponse = async (res, webRes, signal) => {
   }
 };
 async function handler(req, res) {
+  let cleanupListeners;
   try {
     const app = await getApp();
-    const webReq = toWebRequest(req, res);
+    const { webReq, cleanup } = toWebRequest(req, res);
+    cleanupListeners = cleanup;
     const webRes = await app.handle(webReq);
     await writeWebResponse(res, webRes, webReq.signal);
   } catch (error) {
     console.error("Serverless handler error:", error);
     if (!res.headersSent) {
-      res.statusCode = 500;
+      const status2 = typeof error?.statusCode === "number" && error.statusCode >= 400 && error.statusCode < 600 ? error.statusCode : 500;
+      res.statusCode = status2;
       res.setHeader("content-type", "application/json");
       res.setHeader("x-content-type-options", "nosniff");
       const isProd = process.env.NODE_ENV === "production" || process.env.VERCEL_ENV === "production";
       res.end(
-        JSON.stringify({
-          error: "Internal Server Error",
-          message: isProd ? "Internal Server Error" : error?.message,
-          stack: isProd ? void 0 : error?.stack
-        })
+        JSON.stringify(
+          status2 === 400 ? {
+            success: false,
+            error: error?.message || "Bad Request"
+          } : {
+            error: "Internal Server Error",
+            message: isProd ? "Internal Server Error" : error?.message,
+            stack: isProd ? void 0 : error?.stack
+          }
+        )
       );
     } else {
       if (!res.writableEnded && !res.destroyed) {
@@ -718111,5 +718573,13 @@ async function handler(req, res) {
         }
       }
     }
+  } finally {
+    cleanupListeners?.();
   }
 }
+// Annotate the CommonJS export names for ESM import in node:
+0 && (module.exports = {
+  sanitizeHost,
+  sanitizeProtocol,
+  sanitizeRequestPath
+});

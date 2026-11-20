@@ -97,6 +97,10 @@ export class RotatingLLMProvider implements LLMProvider {
       this.keyConfigMap,
       async (apiKey: string, attemptSignal?: AbortSignal) => {
         const primaryModel = req.model || this.defaultModel;
+        const fallbackModel =
+          primaryModel === "openai/gpt-4o-mini"
+            ? "google/gemini-2.0-flash-lite-001"
+            : "openai/gpt-4o-mini";
         return fetch("https://openrouter.ai/api/v1/chat/completions", {
           method: "POST",
           headers: {
@@ -106,7 +110,7 @@ export class RotatingLLMProvider implements LLMProvider {
           },
           body: JSON.stringify({
             model: primaryModel,
-            models: [primaryModel, "openai/gpt-4o-mini"],
+            models: [primaryModel, fallbackModel],
             messages: req.messages,
             max_tokens: req.maxTokens ?? 512,
             temperature: req.temperature ?? 0.7,

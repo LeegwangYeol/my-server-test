@@ -1352,6 +1352,188 @@ describe("Adversarial Security Test Suite (Requirement R2)", () => {
         );
         expect(resPlainViewBomb.status).toBe(413);
       });
+
+      test("2026-11-21 Hardening: demotes failed WARMUP canary probes to TRANSIENT_BACKOFF (preventing 0ms spin loops), protects EXHAUSTED from 5xx overwrite, and deduplicates OpenRouter fallback models", async () => {
+        const { MemoryKeyStore } = await import("../lib/llm/key-manager/stores/memory");
+        const { RELEASE_KEY_LUA } = await import("../lib/llm/key-manager/lua/scripts");
+        const { RotatingLLMProvider } = await import("../lib/llm/rotating-provider");
+        const {
+          AllAccountsExhaustedError,
+          executeWithResilientFailover,
+        } = await import("../lib/llm/key-manager/executor");
+
+        let fakeNow = 1_700_000_000_000;
+        const memStore = new MemoryKeyStore({ clock: () => fakeNow });
+        const keys = [
+          { id: "k-canary", apiKey: "sk-canary", tier: 0, weight: 100, maxConcurrency: 5 },
+          { id: "k-backup", apiKey: "sk-backup", tier: 1, weight: 50, maxConcurrency: 5 },
+        ];
+        await memStore.syncKeys(keys);
+
+        // 1. Put k-canary into RATE_LIMITED for 1,000ms, then advance clock so it becomes WARMUP
+        const r0 = await memStore.reserveKey();
+        expect(r0?.keyId).toBe("k-canary");
+        await memStore.releaseKey("k-canary", r0!.leaseToken, 429, 1000, "Rate limit");
+        fakeNow += 1200;
+
+        const rCanary = await memStore.reserveKey();
+        expect(rCanary?.keyId).toBe("k-canary");
+        expect((await memStore.getKeyMetrics("k-canary")).state).toBe("WARMUP");
+
+        // 2. WARMUP canary fails with 502: must immediately enter TRANSIENT_BACKOFF (NOT spin in WARMUP at 0ms!)
+        await memStore.releaseKey("k-canary", rCanary!.leaseToken, 502, 2500, "Bad Gateway");
+        const canaryMetrics = await memStore.getKeyMetrics("k-canary");
+        expect(canaryMetrics.state).toBe("TRANSIENT_BACKOFF");
+        expect(canaryMetrics.cooldownUntil).toBe(fakeNow + 2500);
+
+        // Immediate next reservation must route to k-backup instead of re-spinning k-canary!
+        const rNext = await memStore.reserveKey();
+        expect(rNext?.keyId).toBe("k-backup");
+        await memStore.releaseKey("k-backup", rNext!.leaseToken, 200, 0);
+
+        // 3. EXHAUSTED (402) key must NEVER be overwritten to TRANSIENT_BACKOFF by a late 502 release
+        await memStore.releaseKey("k-canary", "late-402", 402, Infinity, "Wallet empty");
+        await memStore.releaseKey("k-canary", "late-502-1", 502, 2500, "Late 502");
+        await memStore.releaseKey("k-canary", "late-502-2", 502, 2500, "Late 502");
+        await memStore.releaseKey("k-canary", "late-502-3", 502, 2500, "Late 502");
+        expect((await memStore.getKeyMetrics("k-canary")).state).toBe("EXHAUSTED");
+
+        // Lua parity check: RELEASE_KEY_LUA handles WARMUP -> TRANSIENT_BACKOFF and clears canary_token
+        expect(RELEASE_KEY_LUA).toContain("current_state == 'WARMUP'");
+        expect(RELEASE_KEY_LUA).toContain("'canary_token'");
+
+        // 4. Pool with EXHAUSTED + DISABLED keys throws AllAccountsExhaustedError (503, not false 429)
+        const mixedStore = new MemoryKeyStore();
+        await mixedStore.syncKeys([
+          { id: "k-ex", apiKey: "sk-ex", tier: 0, weight: 10, maxConcurrency: 5 },
+        ]);
+        await mixedStore.releaseKey("k-ex", "init", 402, Infinity, "Empty");
+        const origGetStates = mixedStore.getAllStates.bind(mixedStore);
+        mixedStore.getAllStates = async () => [
+          ...(await origGetStates()),
+          {
+            id: "k-dis",
+            status: "DISABLED",
+            circuitState: "OPEN",
+            inFlightRequests: 0,
+            consecutiveFailures: 0,
+            consecutive429s: 0,
+            cooldownUntil: 0,
+            healthScore: 0,
+            lastUsedAt: 0,
+            totalRequests: 0,
+            lastStatusCode: null,
+            lastErrorMessage: null,
+          },
+        ];
+        let mixedErr: any = null;
+        try {
+          await executeWithResilientFailover(
+            mixedStore,
+            new Map([["k-ex", { id: "k-ex", apiKey: "sk-ex", tier: 0, weight: 10, maxConcurrency: 5 }]]),
+            async () => new Response("ok", { status: 200 }),
+            3,
+          );
+        } catch (e) {
+          mixedErr = e;
+        }
+        expect(mixedErr instanceof AllAccountsExhaustedError).toBe(true);
+
+        // 5. RotatingLLMProvider sends distinct non-duplicate fallback models
+        const origFetch = globalThis.fetch;
+        try {
+          let sentModels: string[] = [];
+          globalThis.fetch = (async (_url: any, init?: RequestInit) => {
+            const parsed = JSON.parse(String(init?.body ?? "{}"));
+            sentModels = parsed.models ?? [];
+            return new Response("data: [DONE]\n\n", { status: 200 });
+          }) as any;
+          const okStore = new MemoryKeyStore();
+          const cfg = { id: "k-ok", apiKey: "sk-ok", tier: 0, weight: 10, maxConcurrency: 5 };
+          await okStore.syncKeys([cfg]);
+          const provider = new RotatingLLMProvider(okStore, new Map([["k-ok", cfg]]));
+          for await (const _ of provider.stream({ messages: [{ role: "user", content: "hi" }] })) {}
+          expect(sentModels.length).toBe(2);
+          expect(new Set(sentModels).size).toBe(2);
+        } finally {
+          globalThis.fetch = origFetch;
+        }
+      });
+
+      test("2026-11-21 Hardening: blocks JSON Array/String >4,000-char bombs, /v2/ask oversized widgetId, unknown-property heap-pinning smuggling (413), and form __proto__ pollution", async () => {
+        // 1. JSON Array & JSON String root >4,000-char token bombs -> HTTP 413 (NOT swallowed into {})
+        const resJsonArrBomb = await postJson(app, "/v2/ask", ["A".repeat(4500)]);
+        expect(resJsonArrBomb.status).toBe(413);
+
+        const resJsonStrBomb = await postJson(
+          app,
+          "/v2/ask",
+          JSON.stringify("S".repeat(4500)),
+        );
+        expect(resJsonStrBomb.status).toBe(413);
+
+        const resThreadArrBomb = await postJson(app, "/v2/widget/create-thread", [
+          "T".repeat(4500),
+        ]);
+        expect(resThreadArrBomb.status).toBe(413);
+
+        const resViewArrBomb = await postJson(app, "/v2/widget/view", [
+          "V".repeat(2500),
+        ]);
+        expect(resViewArrBomb.status).toBe(413);
+
+        // 2. Oversized widgetId (>4,000 chars string or nested object) on /v2/ask -> HTTP 413
+        const resAskWidBomb = await postJson(app, "/v2/ask", {
+          widgetId: "W".repeat(4500),
+          message: "안녕",
+        });
+        expect(resAskWidBomb.status).toBe(413);
+
+        const resAskWidObjBomb = await postJson(app, "/v2/ask", {
+          widgetId: { nested: "W".repeat(4500) },
+          message: "안녕",
+        });
+        expect(resAskWidObjBomb.status).toBe(413);
+
+        // 3. Oversized accessToken (>4,000 chars) & key-flooding (>32 keys) on /v2/ask, plus unknown-property smuggling on /v2/widget/create-thread & /v2/widget/view -> HTTP 413
+        const resAskTokenBomb = await postJson(app, "/v2/ask", {
+          widgetId: VALID_WIDGET_ID,
+          message: "안녕",
+          accessToken: "T".repeat(4500),
+        });
+        expect(resAskTokenBomb.status).toBe(413);
+
+        const floodedBody: Record<string, string> = {
+          widgetId: VALID_WIDGET_ID,
+          message: "안녕",
+        };
+        for (let i = 0; i < 40; i++) floodedBody[`extra_${i}`] = "1";
+        const resAskKeyFlood = await postJson(app, "/v2/ask", floodedBody);
+        expect(resAskKeyFlood.status).toBe(413);
+
+        const resCreateExtraBomb = await postJson(app, "/v2/widget/create-thread", {
+          widgetId: VALID_WIDGET_ID,
+          smuggledHeapBomb: "X".repeat(5000),
+        });
+        expect(resCreateExtraBomb.status).toBe(413);
+
+        const resViewExtraBomb = await postJson(app, "/v2/widget/view", {
+          widgetId: VALID_WIDGET_ID,
+          smuggledHeapBomb: "X".repeat(5000),
+        });
+        expect(resViewExtraBomb.status).toBe(413);
+
+        // 4. application/x-www-form-urlencoded __proto__ pollution attempt is safely stripped
+        const resFormProto = await app.handle(
+          new Request("http://localhost/v2/ask", {
+            method: "POST",
+            headers: { "content-type": "application/x-www-form-urlencoded" },
+            body: "__proto__=polluted&constructor=bad&widgetId=unreg&message=hi",
+          }),
+        );
+        expect(resFormProto.status).toBe(403);
+        expect(({} as any).polluted).toBeUndefined();
+      });
     });
   });
 });
