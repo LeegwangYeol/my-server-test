@@ -253,7 +253,9 @@ export async function sendViaPushbullet({
       };
     }
 
-    const base = process.env.PUSHBULLET_API_URL?.trim() || DEFAULT_API_URL;
+    const base = (
+      process.env.PUSHBULLET_API_URL?.trim() || DEFAULT_API_URL
+    ).replace(/\/+$/, "");
     let device: string;
     try {
       device = await resolveDeviceIden(base, conf.token, conf, maxRetries);

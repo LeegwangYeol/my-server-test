@@ -1,25 +1,65 @@
 import { createClient } from "@supabase/supabase-js";
 import { Database } from "./database.types";
 
+const DEFAULT_SUPABASE_TIMEOUT_MS = 8_000;
+
+function resolveSupabaseTimeoutMs(): number {
+  const raw = process.env.SUPABASE_FETCH_TIMEOUT_MS?.trim();
+  if (!raw) return DEFAULT_SUPABASE_TIMEOUT_MS;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isInteger(parsed) && parsed >= 50 && parsed <= 55_000
+    ? parsed
+    : DEFAULT_SUPABASE_TIMEOUT_MS;
+}
+
+const boundedSupabaseFetch: typeof fetch = (input, init) => {
+  const timeoutMs = resolveSupabaseTimeoutMs();
+  const controller = new AbortController();
+  const timer = setTimeout(() => {
+    const abortErr = Object.assign(
+      new Error(`Supabase request timed out after ${timeoutMs}ms`),
+      { name: "AbortError" },
+    );
+    controller.abort(abortErr);
+  }, timeoutMs);
+
+  const callerSignal = init?.signal;
+  const onCallerAbort = () => controller.abort(callerSignal?.reason);
+  if (callerSignal) {
+    if (callerSignal.aborted) {
+      clearTimeout(timer);
+      controller.abort(callerSignal.reason);
+    } else {
+      callerSignal.addEventListener("abort", onCallerAbort, { once: true });
+    }
+  }
+
+  return globalThis.fetch(input, { ...init, signal: controller.signal }).finally(() => {
+    clearTimeout(timer);
+    if (callerSignal) {
+      callerSignal.removeEventListener("abort", onCallerAbort);
+    }
+  });
+};
+
 export const createSupabaseClient = <T extends keyof Database>(schema: T) => {
-  const supabase = createClient<Database, any>(
-    process.env.SUPABASE_URL ??
-      (() => {
-        throw new Error("SUPABASE_URL is not set");
-      })(),
-    process.env.SUPABASE_SERVICE_KEY ??
-      (() => {
-        throw new Error("SUPABASE_SERVICE_KEY is not set");
-      })(),
-    {
-      auth: {
-        persistSession: false,
-        autoRefreshToken: false,
-        detectSessionInUrl: false,
-      },
-      db: { schema: schema as any },
+  const url = process.env.SUPABASE_URL?.trim();
+  if (!url) {
+    throw new Error("SUPABASE_URL is not set");
+  }
+  const key = process.env.SUPABASE_SERVICE_KEY?.trim();
+  if (!key) {
+    throw new Error("SUPABASE_SERVICE_KEY is not set");
+  }
+  const supabase = createClient<Database, any>(url, key, {
+    auth: {
+      persistSession: false,
+      autoRefreshToken: false,
+      detectSessionInUrl: false,
     },
-  );
+    db: { schema: schema as any },
+    global: { fetch: boundedSupabaseFetch },
+  });
 
   return supabase;
 };
@@ -31,8 +71,8 @@ let _cachedClient: ReturnType<typeof createSupabaseClient<"public">> | null = nu
 let _cachedSig: string | null = null;
 
 const getClient = () => {
-  const url = process.env.SUPABASE_URL;
-  const key = process.env.SUPABASE_SERVICE_KEY;
+  const url = process.env.SUPABASE_URL?.trim();
+  const key = process.env.SUPABASE_SERVICE_KEY?.trim();
   const sig = url && key ? `${url}\0${key}` : null;
   if (!_cachedClient || !sig || _cachedSig !== sig) {
     _cachedClient = null;

@@ -273,10 +273,11 @@ elseif status == 402 then
         if linked_keys then
             for _, linked_id in ipairs(linked_keys) do
                 local lhash = "openrouter:key:" .. linked_id
-                local ldata = redis.call('HMGET', lhash, 'state', 'last_error_code')
+                local ldata = redis.call('HMGET', lhash, 'state', 'last_error_code', 'account_id')
                 local lstate = ldata[1] or 'ACTIVE'
                 local lcode = tonumber(ldata[2]) or 0
-                if lstate ~= 'DISABLED' and not (lstate == 'EXHAUSTED' and (lcode == 401 or lcode == 403)) then
+                local lacc = ldata[3] or account_id
+                if lacc == account_id and lstate ~= 'DISABLED' and not (lstate == 'EXHAUSTED' and (lcode == 401 or lcode == 403)) then
                     redis.call('HSET', lhash, 'state', 'EXHAUSTED')
                     redis.call('HSET', lhash, 'last_error_code', status)
                     if linked_id ~= key_id then

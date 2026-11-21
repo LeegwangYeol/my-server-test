@@ -29,7 +29,14 @@ export const v1AuthCreate = (app: any) => {
   app
     .post(
       "/auth/create",
-      async ({ body }: { body: any }) => {
+      async ({ body, set }: { body: any; set: any }) => {
+        if (!isValidOAuthRedirectUri(String(body?.redirectUri ?? "").trim())) {
+          set.status = 400;
+          return {
+            success: false,
+            message: "유효하지 않은 redirectUri 값입니다.",
+          };
+        }
         const oauth2Client = new google.auth.OAuth2(
           body.clientId,
           body.clientSecret,
@@ -81,13 +88,19 @@ export const v1AuthCreate = (app: any) => {
             pattern: "^https?://[\\w.-]+(?::\\d{1,5})?/[^\\s\\\\\\x00-\\x1f\\x7f]*$",
           }),
         }),
-        response: t.Object({
-          success: t.Boolean(),
-          message: t.String(),
-          data: t.Object({
-            url: t.String(),
+        response: {
+          200: t.Object({
+            success: t.Boolean(),
+            message: t.String(),
+            data: t.Object({
+              url: t.String(),
+            }),
           }),
-        }),
+          400: t.Object({
+            success: t.Boolean(),
+            message: t.String(),
+          }),
+        },
       },
     )
     .get(
@@ -150,8 +163,10 @@ export const v1AuthCreate = (app: any) => {
             transporterOptions: { timeout: 10_000 },
           });
 
-          const { tokens } = await executeYoutubeWithRetry(() =>
-            oauth2Client.getToken(code as string),
+          const { tokens } = await executeYoutubeWithRetry(
+            () => oauth2Client.getToken(code as string),
+            1,
+            true,
           );
           if (!tokens?.access_token) {
             set.status = 400;

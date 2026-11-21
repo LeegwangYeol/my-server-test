@@ -702269,7 +702269,14 @@ function isValidOAuthRedirectUri(raw) {
 var v1AuthCreate = (app) => {
   app.post(
     "/auth/create",
-    async ({ body }) => {
+    async ({ body, set }) => {
+      if (!isValidOAuthRedirectUri(String(body?.redirectUri ?? "").trim())) {
+        set.status = 400;
+        return {
+          success: false,
+          message: "\uC720\uD6A8\uD558\uC9C0 \uC54A\uC740 redirectUri \uAC12\uC785\uB2C8\uB2E4."
+        };
+      }
       const oauth2Client = new import_googleapis.google.auth.OAuth2(
         body.clientId,
         body.clientSecret,
@@ -702318,13 +702325,19 @@ var v1AuthCreate = (app) => {
           pattern: "^https?://[\\w.-]+(?::\\d{1,5})?/[^\\s\\\\\\x00-\\x1f\\x7f]*$"
         })
       }),
-      response: t.Object({
-        success: t.Boolean(),
-        message: t.String(),
-        data: t.Object({
-          url: t.String()
+      response: {
+        200: t.Object({
+          success: t.Boolean(),
+          message: t.String(),
+          data: t.Object({
+            url: t.String()
+          })
+        }),
+        400: t.Object({
+          success: t.Boolean(),
+          message: t.String()
         })
-      })
+      }
     }
   ).get(
     "/auth/confirm",
@@ -702359,7 +702372,9 @@ var v1AuthCreate = (app) => {
           transporterOptions: { timeout: 1e4 }
         });
         const { tokens } = await executeYoutubeWithRetry(
-          () => oauth2Client.getToken(code)
+          () => oauth2Client.getToken(code),
+          1,
+          true
         );
         if (!tokens?.access_token) {
           set.status = 400;
@@ -702426,7 +702441,7 @@ var v1Comment = (app) => {
     async ({ body, set }) => {
       const accessToken = sanitizeYoutubeAccessToken(body?.accessToken);
       const videoId = String(body?.videoId ?? "").trim();
-      const commentText = String(body?.commentText ?? "").trim();
+      const commentText = String(body?.commentText ?? "").replace(/\x00+/g, "").trim();
       if (!videoId || videoId.length > 128 || /[\s\x00-\x1f\x7f]/.test(videoId)) {
         set.status = 400;
         return {
@@ -702513,8 +702528,7 @@ var v1Comment = (app) => {
         videoId: t.String({
           description: "YouTube Video ID",
           error: "YouTube \uBE44\uB514\uC624 ID\uAC00 \uD544\uC694\uD569\uB2C8\uB2E4.",
-          minLength: 1,
-          maxLength: 100
+          minLength: 1
         }),
         commentText: t.String({
           description: "\uB313\uAE00 \uB0B4\uC6A9",
@@ -702587,7 +702601,8 @@ var v1CommentList = (app) => {
           message: "\uC720\uD6A8\uD55C accessToken \uAC12\uC774 \uC81C\uACF5\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4."
         };
       }
-      if (typeof pageToken === "string" && pageToken.trim().length > 512) {
+      const trimmedPageToken = typeof pageToken === "string" ? pageToken.trim() : "";
+      if (trimmedPageToken.length > 512 || trimmedPageToken.length > 0 && /[\s\x00-\x1f\x7f]/.test(trimmedPageToken)) {
         set.status = 400;
         return {
           success: false,
@@ -702808,7 +702823,7 @@ var v1Reply = (app) => {
     "/reply",
     async ({ body, set }) => {
       const parentId = String(body?.parentId ?? "").trim();
-      const text = String(body?.text ?? "").trim();
+      const text = String(body?.text ?? "").replace(/\x00+/g, "").trim();
       const accessToken = sanitizeYoutubeAccessToken(body?.accessToken);
       if (!parentId || parentId.length > 256 || /[\s\x00-\x1f\x7f]/.test(parentId)) {
         set.status = 400;
@@ -702933,7 +702948,8 @@ var v1ReplyList = (app) => {
           message: "\uC720\uD6A8\uD55C accessToken \uAC12\uC774 \uC81C\uACF5\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4."
         };
       }
-      if (typeof pageToken === "string" && pageToken.trim().length > 512) {
+      const trimmedPageToken = typeof pageToken === "string" ? pageToken.trim() : "";
+      if (trimmedPageToken.length > 512 || trimmedPageToken.length > 0 && /[\s\x00-\x1f\x7f]/.test(trimmedPageToken)) {
         set.status = 400;
         return {
           success: false,
@@ -703052,8 +703068,11 @@ var v1ReplyList = (app) => {
                   authorProfileImageUrl: t.Optional(t.String()),
                   authorChannelUrl: t.Optional(t.String()),
                   authorChannelId: t.Optional(t.Any()),
+                  channelId: t.Optional(t.String()),
                   canRate: t.Optional(t.Boolean()),
+                  viewerRating: t.Optional(t.String()),
                   likeCount: t.Optional(t.Number()),
+                  moderationStatus: t.Optional(t.String()),
                   publishedAt: t.Optional(t.String()),
                   updatedAt: t.Optional(t.String())
                 })
@@ -703092,7 +703111,8 @@ var v1ChannelInfo = (app) => {
           message: "\uC720\uD6A8\uD55C accessToken \uAC12\uC774 \uC81C\uACF5\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4."
         };
       }
-      if (typeof pageToken === "string" && pageToken.trim().length > 512) {
+      const trimmedPageToken = typeof pageToken === "string" ? pageToken.trim() : "";
+      if (trimmedPageToken.length > 512 || trimmedPageToken.length > 0 && /[\s\x00-\x1f\x7f]/.test(trimmedPageToken)) {
         set.status = 400;
         return {
           success: false,
@@ -703249,7 +703269,8 @@ var v1VideoList = (app) => {
           message: "\uC720\uD6A8\uD55C accessToken \uAC12\uC774 \uC81C\uACF5\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4."
         };
       }
-      if (typeof pageToken === "string" && pageToken.trim().length > 512) {
+      const trimmedPageToken = typeof pageToken === "string" ? pageToken.trim() : "";
+      if (trimmedPageToken.length > 512 || trimmedPageToken.length > 0 && /[\s\x00-\x1f\x7f]/.test(trimmedPageToken)) {
         set.status = 400;
         return {
           success: false,
@@ -711993,30 +712014,65 @@ function shouldShowDeprecationWarning() {
 if (shouldShowDeprecationWarning()) console.warn("\u26A0\uFE0F  Node.js 18 and below are deprecated and will no longer be supported in future versions of @supabase/supabase-js. Please upgrade to Node.js 20 or later. For more information, visit: https://github.com/orgs/supabase/discussions/37217");
 
 // lib/supabase/client.ts
-var createSupabaseClient = (schema) => {
-  const supabase = createClient(
-    process.env.SUPABASE_URL ?? (() => {
-      throw new Error("SUPABASE_URL is not set");
-    })(),
-    process.env.SUPABASE_SERVICE_KEY ?? (() => {
-      throw new Error("SUPABASE_SERVICE_KEY is not set");
-    })(),
-    {
-      auth: {
-        persistSession: false,
-        autoRefreshToken: false,
-        detectSessionInUrl: false
-      },
-      db: { schema }
+var DEFAULT_SUPABASE_TIMEOUT_MS = 8e3;
+function resolveSupabaseTimeoutMs() {
+  const raw = process.env.SUPABASE_FETCH_TIMEOUT_MS?.trim();
+  if (!raw) return DEFAULT_SUPABASE_TIMEOUT_MS;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isInteger(parsed) && parsed >= 50 && parsed <= 55e3 ? parsed : DEFAULT_SUPABASE_TIMEOUT_MS;
+}
+var boundedSupabaseFetch = (input, init) => {
+  const timeoutMs = resolveSupabaseTimeoutMs();
+  const controller = new AbortController();
+  const timer = setTimeout(() => {
+    const abortErr = Object.assign(
+      new Error(`Supabase request timed out after ${timeoutMs}ms`),
+      { name: "AbortError" }
+    );
+    controller.abort(abortErr);
+  }, timeoutMs);
+  const callerSignal = init?.signal;
+  const onCallerAbort = () => controller.abort(callerSignal?.reason);
+  if (callerSignal) {
+    if (callerSignal.aborted) {
+      clearTimeout(timer);
+      controller.abort(callerSignal.reason);
+    } else {
+      callerSignal.addEventListener("abort", onCallerAbort, { once: true });
     }
-  );
+  }
+  return globalThis.fetch(input, { ...init, signal: controller.signal }).finally(() => {
+    clearTimeout(timer);
+    if (callerSignal) {
+      callerSignal.removeEventListener("abort", onCallerAbort);
+    }
+  });
+};
+var createSupabaseClient = (schema) => {
+  const url = process.env.SUPABASE_URL?.trim();
+  if (!url) {
+    throw new Error("SUPABASE_URL is not set");
+  }
+  const key = process.env.SUPABASE_SERVICE_KEY?.trim();
+  if (!key) {
+    throw new Error("SUPABASE_SERVICE_KEY is not set");
+  }
+  const supabase = createClient(url, key, {
+    auth: {
+      persistSession: false,
+      autoRefreshToken: false,
+      detectSessionInUrl: false
+    },
+    db: { schema },
+    global: { fetch: boundedSupabaseFetch }
+  });
   return supabase;
 };
 var _cachedClient = null;
 var _cachedSig = null;
 var getClient = () => {
-  const url = process.env.SUPABASE_URL;
-  const key = process.env.SUPABASE_SERVICE_KEY;
+  const url = process.env.SUPABASE_URL?.trim();
+  const key = process.env.SUPABASE_SERVICE_KEY?.trim();
   const sig = url && key ? `${url}\0${key}` : null;
   if (!_cachedClient || !sig || _cachedSig !== sig) {
     _cachedClient = null;
@@ -712039,9 +712095,20 @@ var OpenAICompatibleProvider = class {
   constructor(opts) {
     this.name = opts.name;
     this.baseUrl = opts.baseUrl.replace(/\/+$/, "");
-    this.apiKey = opts.apiKey;
+    this.apiKey = opts.apiKey.trim();
     this.defaultModel = opts.defaultModel;
-    this.extraHeaders = opts.extraHeaders ?? {};
+    const sanitizedExtra = {};
+    if (opts.extraHeaders) {
+      for (const [k, v] of Object.entries(opts.extraHeaders)) {
+        const cleanVal = String(v ?? "").replace(/[\r\n\x00-\x1f\x7f]+/g, " ").trim();
+        let byteSafe = "";
+        for (const ch of cleanVal) {
+          byteSafe += (ch.codePointAt(0) ?? 0) > 255 ? encodeURIComponent(ch) : ch;
+        }
+        sanitizedExtra[k] = byteSafe;
+      }
+    }
+    this.extraHeaders = sanitizedExtra;
     this.chunkTimeoutMs = opts.chunkTimeoutMs;
   }
   /**
@@ -713355,10 +713422,20 @@ var RotatingLLMProvider = class {
     this.keyStore = keyStore;
     this.keyConfigMap = keyConfigMap;
     this.defaultModel = options?.defaultModel ?? "openai/gpt-4o-mini";
-    this.extraHeaders = options?.extraHeaders ?? {
+    const rawExtra = options?.extraHeaders ?? {
       "HTTP-Referer": "https://tokki.app",
       "X-Title": "Tokki AI"
     };
+    const safeExtra = {};
+    for (const [k, v] of Object.entries(rawExtra)) {
+      const cleanVal = String(v ?? "").replace(/[\r\n\x00-\x1f\x7f]+/g, " ").trim();
+      let byteSafe = "";
+      for (const ch of cleanVal) {
+        byteSafe += (ch.codePointAt(0) ?? 0) > 255 ? encodeURIComponent(ch) : ch;
+      }
+      safeExtra[k] = byteSafe;
+    }
+    this.extraHeaders = safeExtra;
     this.maxAttempts = options?.maxAttempts ?? Math.max(3, Math.min(keyConfigMap.size, 5));
     this.perAttemptTimeoutMs = options?.perAttemptTimeoutMs ?? 6e3;
     this.chunkTimeoutMs = options?.chunkTimeoutMs ?? 25e3;
@@ -713875,10 +713952,11 @@ elseif status == 402 then
         if linked_keys then
             for _, linked_id in ipairs(linked_keys) do
                 local lhash = "openrouter:key:" .. linked_id
-                local ldata = redis.call('HMGET', lhash, 'state', 'last_error_code')
+                local ldata = redis.call('HMGET', lhash, 'state', 'last_error_code', 'account_id')
                 local lstate = ldata[1] or 'ACTIVE'
                 local lcode = tonumber(ldata[2]) or 0
-                if lstate ~= 'DISABLED' and not (lstate == 'EXHAUSTED' and (lcode == 401 or lcode == 403)) then
+                local lacc = ldata[3] or account_id
+                if lacc == account_id and lstate ~= 'DISABLED' and not (lstate == 'EXHAUSTED' and (lcode == 401 or lcode == 403)) then
                     redis.call('HSET', lhash, 'state', 'EXHAUSTED')
                     redis.call('HSET', lhash, 'last_error_code', status)
                     if linked_id ~= key_id then
@@ -714354,14 +714432,27 @@ var UpstashRedisKeyStore = class {
 };
 
 // lib/llm/factory.ts
+function sanitizeHttpHeaderValue(raw, fallback) {
+  const cleaned = String(raw ?? "").replace(/[\r\n\x00-\x1f\x7f]+/g, " ").trim();
+  if (!cleaned) return fallback;
+  let safe = "";
+  for (const ch of cleaned) {
+    const cp = ch.codePointAt(0) ?? 0;
+    safe += cp > 255 ? encodeURIComponent(ch) : ch;
+  }
+  return safe.slice(0, 1024) || fallback;
+}
 var PRESETS = {
   openrouter: {
     baseUrl: "https://openrouter.ai/api/v1",
     defaultModel: "openai/gpt-4o-mini",
     extraHeaders: () => ({
       // OpenRouter uses these to attribute traffic on its leaderboard.
-      "HTTP-Referer": process.env.LLM_REFERER ?? "https://tokki.app",
-      "X-Title": process.env.LLM_TITLE ?? "Tokki AI"
+      "HTTP-Referer": sanitizeHttpHeaderValue(
+        process.env.LLM_REFERER,
+        "https://tokki.app"
+      ),
+      "X-Title": sanitizeHttpHeaderValue(process.env.LLM_TITLE, "Tokki AI")
     })
   },
   openai: {
@@ -714423,28 +714514,51 @@ function parseKeyConfigsFromEnv() {
   const rawDefaultConc = Number(process.env.DEFAULT_KEY_MAX_CONCURRENCY);
   const defaultMaxConcurrency = Number.isFinite(rawDefaultConc) && rawDefaultConc >= 1 ? Math.min(1e3, Math.floor(rawDefaultConc)) : 5;
   const configs = [];
+  const seenIds = /* @__PURE__ */ new Set();
+  const allocateUniqueId = (rawId, fallbackIdx) => {
+    const base = (rawId ?? "").trim().replace(/[,\s\x00-\x1f\x7f]+/g, "_") || `openrouter-key-${fallbackIdx}`;
+    let candidate = base;
+    let suffix = 2;
+    while (seenIds.has(candidate)) {
+      candidate = `${base}-${suffix++}`;
+    }
+    seenIds.add(candidate);
+    return candidate;
+  };
+  const sanitizeBearerKey = (raw) => {
+    if (typeof raw !== "string") return null;
+    const trimmed = raw.trim();
+    if (!trimmed || /[\s\x00-\x1f\x7f]/.test(trimmed)) return null;
+    return trimmed;
+  };
   if (rawOpenRouterKeys) {
     if (rawOpenRouterKeys.startsWith("[") && rawOpenRouterKeys.endsWith("]")) {
       try {
         const parsed = JSON.parse(rawOpenRouterKeys);
         if (Array.isArray(parsed)) {
           parsed.forEach((item, idx) => {
-            if (typeof item === "string" && item.trim()) {
+            const strKey = sanitizeBearerKey(item);
+            if (strKey) {
               configs.push({
-                id: `openrouter-key-${idx + 1}`,
-                apiKey: item.trim(),
+                id: allocateUniqueId(void 0, idx + 1),
+                apiKey: strKey,
                 tier: idx === 0 ? 0 : 1,
                 weight: 10,
                 maxConcurrency: defaultMaxConcurrency
               });
-            } else if (typeof item === "object" && item !== null && typeof item.apiKey === "string" && item.apiKey.trim()) {
+            } else if (typeof item === "object" && item !== null) {
+              const objKey = sanitizeBearerKey(item.apiKey);
+              if (!objKey) return;
               const rawTier = Number(item.tier);
               const rawWeight = Number(item.weight);
               const rawMaxConc = Number(item.maxConcurrency);
               configs.push({
-                id: typeof item.id === "string" && item.id.trim() ? item.id.trim() : `openrouter-key-${idx + 1}`,
-                apiKey: item.apiKey.trim(),
-                accountId: typeof item.accountId === "string" && item.accountId.trim() ? item.accountId.trim() : void 0,
+                id: allocateUniqueId(
+                  typeof item.id === "string" ? item.id : void 0,
+                  idx + 1
+                ),
+                apiKey: objKey,
+                accountId: typeof item.accountId === "string" && item.accountId.trim() ? item.accountId.trim().replace(/[\x00-\x1f\x7f]+/g, "") : void 0,
                 tier: Number.isFinite(rawTier) && rawTier >= 0 ? Math.floor(rawTier) : idx === 0 ? 0 : 1,
                 weight: Number.isFinite(rawWeight) && rawWeight >= 1 ? Math.floor(rawWeight) : 10,
                 maxConcurrency: Number.isFinite(rawMaxConc) && rawMaxConc >= 1 ? Math.min(1e3, Math.floor(rawMaxConc)) : defaultMaxConcurrency
@@ -714460,10 +714574,10 @@ function parseKeyConfigsFromEnv() {
       }
     }
     if (configs.length === 0) {
-      const tokens = rawOpenRouterKeys.split(/[,\n]/).map((s) => s.trim()).filter(Boolean);
+      const tokens = rawOpenRouterKeys.split(/[,\n]/).map((s) => sanitizeBearerKey(s)).filter((s) => Boolean(s));
       tokens.forEach((key, idx) => {
         configs.push({
-          id: `openrouter-key-${idx + 1}`,
+          id: allocateUniqueId(void 0, idx + 1),
           apiKey: key,
           tier: idx === 0 ? 0 : 1,
           weight: 10,
@@ -714473,10 +714587,10 @@ function parseKeyConfigsFromEnv() {
     }
   }
   if (configs.length === 0 && rawSingleKey && rawSingleKey.includes(",")) {
-    const tokens = rawSingleKey.split(",").map((s) => s.trim()).filter(Boolean);
+    const tokens = rawSingleKey.split(",").map((s) => sanitizeBearerKey(s)).filter((s) => Boolean(s));
     tokens.forEach((key, idx) => {
       configs.push({
-        id: `openrouter-key-${idx + 1}`,
+        id: allocateUniqueId(void 0, idx + 1),
         apiKey: key,
         tier: idx === 0 ? 0 : 1,
         weight: 10,
@@ -714496,12 +714610,18 @@ function createRotatingOrConfiguredProvider() {
     const configs = parseKeyConfigsFromEnv();
     if (configs.length > 1 || configs.length === 1 && hasExplicitOpenRouterPool) {
       const defaultModel = process.env.LLM_MODEL?.trim() || "openai/gpt-4o-mini";
-      const referer = process.env.LLM_REFERER ?? "https://tokki.app";
-      const title = process.env.LLM_TITLE ?? "Tokki AI";
+      const referer = sanitizeHttpHeaderValue(
+        process.env.LLM_REFERER,
+        "https://tokki.app"
+      );
+      const title = sanitizeHttpHeaderValue(process.env.LLM_TITLE, "Tokki AI");
       const sig = JSON.stringify([
         process.env.OPENROUTER_API_KEYS ?? "",
         process.env.LLM_API_KEYS ?? "",
         hasExplicitOpenRouterPool ? "" : process.env.LLM_API_KEY ?? "",
+        process.env.DEFAULT_KEY_MAX_CONCURRENCY ?? "",
+        process.env.UPSTASH_REDIS_REST_URL?.trim() ?? "",
+        process.env.UPSTASH_REDIS_REST_TOKEN?.trim() ?? "",
         defaultModel,
         referer,
         title
@@ -714733,70 +714853,119 @@ create policy "widget-icons service-role write"
 // lib/chat-store.ts
 var MAX_STORE_ID_CHARS = 100;
 var OPPORTUNISTIC_DB_DRAIN_BATCH = 10;
-async function createThread(widgetId) {
-  const wid = (widgetId ?? "").trim();
-  if (!wid || wid.length > MAX_STORE_ID_CHARS) return null;
-  try {
-    const { data, error } = await supabaseUntyped.from("chat_thread").insert({ widget_id: wid }).select("id").single();
-    if (error) {
-      console.error("[chat-store] createThread failed:", error.message);
-      return null;
-    }
-    return data?.id ?? null;
-  } catch (err) {
-    console.warn(
-      "[chat-store] createThread database query failed or skipped:",
-      err?.message || err
-    );
+function normalizeStoreId(raw) {
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trim();
+  if (!trimmed || trimmed.length > MAX_STORE_ID_CHARS || /[\x00-\x1f\x7f]/.test(trimmed)) {
     return null;
   }
+  return trimmed;
+}
+var jitterSleep429 = () => new Promise(
+  (resolve) => setTimeout(resolve, 40 + Math.floor(Math.random() * 80))
+);
+async function createThread(widgetId) {
+  const wid = normalizeStoreId(widgetId);
+  if (!wid) return null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const { data, error } = await supabaseUntyped.from("chat_thread").insert({ widget_id: wid }).select("id").single();
+      if (error) {
+        if (attempt === 0 && is429OrQuotaError(error)) {
+          await jitterSleep429();
+          continue;
+        }
+        console.error("[chat-store] createThread failed:", error.message);
+        return null;
+      }
+      return data?.id ?? null;
+    } catch (err) {
+      if (attempt === 0 && is429OrQuotaError(err)) {
+        await jitterSleep429();
+        continue;
+      }
+      console.warn(
+        "[chat-store] createThread database query failed or skipped:",
+        err?.message || err
+      );
+      return null;
+    }
+  }
+  return null;
 }
 async function getThread(threadId, widgetId) {
-  const wid = (widgetId ?? "").trim();
-  const tid = (threadId ?? "").trim();
-  if (!wid || !tid || wid.length > MAX_STORE_ID_CHARS || tid.length > MAX_STORE_ID_CHARS) {
+  const wid = normalizeStoreId(widgetId);
+  const tid = normalizeStoreId(threadId);
+  if (!wid || !tid) {
     return null;
   }
-  try {
-    const { data, error } = await supabaseUntyped.from("chat_thread").select("*").eq("id", tid).eq("widget_id", wid).eq("is_deleted", false).maybeSingle();
-    if (error) {
-      console.error("[chat-store] getThread failed:", error.message);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const { data, error } = await supabaseUntyped.from("chat_thread").select("*").eq("id", tid).eq("widget_id", wid).eq("is_deleted", false).maybeSingle();
+      if (error) {
+        if (attempt === 0 && is429OrQuotaError(error)) {
+          await jitterSleep429();
+          continue;
+        }
+        console.error("[chat-store] getThread failed:", error.message);
+        return null;
+      }
+      return data ?? null;
+    } catch (err) {
+      if (attempt === 0 && is429OrQuotaError(err)) {
+        await jitterSleep429();
+        continue;
+      }
+      console.warn(
+        "[chat-store] getThread database query skipped:",
+        err?.message || err
+      );
       return null;
     }
-    return data ?? null;
-  } catch (err) {
-    console.warn(
-      "[chat-store] getThread database query skipped:",
-      err?.message || err
-    );
-    return null;
   }
+  return null;
 }
 async function listMessages(threadId, limit = 50) {
-  const tid = (threadId ?? "").trim();
-  if (!tid || tid.length > MAX_STORE_ID_CHARS) return [];
+  const tid = normalizeStoreId(threadId);
+  if (!tid) return [];
   const safeLimit = Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 1e3) : 50;
   let rows = [];
-  try {
-    const { data, error } = await supabaseUntyped.from("chat_message").select("*").eq("thread_id", tid).order("created_at", { ascending: false }).order("id", { ascending: false }).limit(safeLimit);
-    if (data) {
-      rows = data.slice().reverse();
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const { data, error } = await supabaseUntyped.from("chat_message").select("*").eq("thread_id", tid).order("created_at", { ascending: false }).order("id", { ascending: false }).limit(safeLimit);
+      if (error) {
+        if (attempt === 0 && is429OrQuotaError(error)) {
+          await jitterSleep429();
+          continue;
+        }
+        console.error("[chat-store] listMessages failed:", error.message);
+      } else if (data) {
+        rows = data.slice().reverse();
+      }
+      break;
+    } catch (err) {
+      if (attempt === 0 && is429OrQuotaError(err)) {
+        await jitterSleep429();
+        continue;
+      }
+      console.warn(
+        "[chat-store] listMessages database query failed or skipped:",
+        err?.message || err
+      );
+      break;
     }
-    if (error) {
-      console.error("[chat-store] listMessages failed:", error.message);
-    }
-  } catch (err) {
-    console.warn(
-      "[chat-store] listMessages database query failed or skipped:",
-      err?.message || err
-    );
   }
   const queuedRows = getQueuedMessagesForThread(tid);
   if (queuedRows.length > 0) {
     rows = [...rows, ...queuedRows];
-    rows.sort(
-      (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
-    );
+    rows.sort((a, b) => {
+      const dt = new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
+      if (dt !== 0) return dt;
+      const aQueued = a.id < 0;
+      const bQueued = b.id < 0;
+      if (aQueued !== bQueued) return aQueued ? 1 : -1;
+      return aQueued ? Math.abs(a.id) - Math.abs(b.id) : a.id - b.id;
+    });
     if (rows.length > safeLimit) {
       rows = rows.slice(-safeLimit);
     }
@@ -714944,8 +715113,8 @@ async function listWidgets(limit = 1e3) {
   }
 }
 async function listThreads(widgetId, limit = 100) {
-  const wid = (widgetId ?? "").trim();
-  if (!wid || wid.length > MAX_STORE_ID_CHARS) return [];
+  const wid = normalizeStoreId(widgetId);
+  if (!wid) return [];
   const safeLimit = Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 500) : 100;
   try {
     const { data: threads, error } = await supabaseUntyped.from("chat_thread").select("*").eq("widget_id", wid).eq("is_deleted", false).order("updated_at", { ascending: false }).limit(safeLimit);
@@ -714964,18 +715133,17 @@ async function listThreads(widgetId, limit = 100) {
       );
     }
     const byThread = /* @__PURE__ */ new Map();
-    const combinedMsgs = [
-      ...(msgs ?? []).slice()
-    ];
+    const dbMsgs = msgs ?? [];
+    let combinedMsgs = dbMsgs;
     if (dbFallbackQueue.size > 0) {
       const queued = getQueuedMessagesForThreads(new Set(ids));
       if (queued.length > 0) {
-        combinedMsgs.push(...queued);
+        combinedMsgs = [...dbMsgs, ...queued];
+        combinedMsgs.sort(
+          (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+        );
       }
     }
-    combinedMsgs.sort(
-      (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
-    );
     for (const m of combinedMsgs) {
       const entry = byThread.get(m.thread_id) ?? { count: 0, lastUser: null };
       entry.count += 1;
@@ -715005,12 +715173,13 @@ async function listThreads(widgetId, limit = 100) {
   }
 }
 async function renameThread(threadId, widgetId, title) {
-  const tid = (threadId ?? "").trim();
-  const wid = (widgetId ?? "").trim();
-  if (!tid || !wid || tid.length > MAX_STORE_ID_CHARS || wid.length > MAX_STORE_ID_CHARS) {
+  const tid = normalizeStoreId(threadId);
+  const wid = normalizeStoreId(widgetId);
+  if (!tid || !wid) {
     return false;
   }
-  const normalized = title && title.trim().length > 0 ? title.trim().slice(0, 200) : null;
+  const cleanTitle = typeof title === "string" ? title.replace(/[\x00-\x1f\x7f]+/g, "").trim() : "";
+  const normalized = cleanTitle.length > 0 ? cleanTitle.slice(0, 200) : null;
   try {
     const { error } = await supabaseUntyped.from("chat_thread").update({ title: normalized }).eq("id", tid).eq("widget_id", wid).eq("is_deleted", false);
     if (error) {
@@ -715024,18 +715193,18 @@ async function renameThread(threadId, widgetId, title) {
   }
 }
 async function updateThreadPrompt(threadId, widgetId, patch) {
-  const tid = (threadId ?? "").trim();
-  const wid = (widgetId ?? "").trim();
-  if (!tid || !wid || tid.length > MAX_STORE_ID_CHARS || wid.length > MAX_STORE_ID_CHARS) {
+  const tid = normalizeStoreId(threadId);
+  const wid = normalizeStoreId(widgetId);
+  if (!tid || !wid) {
     return false;
   }
   const update = {};
   if (patch.system_prompt !== void 0) {
-    const v = patch.system_prompt?.trim() ?? "";
+    const v = (patch.system_prompt ?? "").replace(/\x00+/g, "").trim();
     update.system_prompt = v.length > 0 ? v.slice(0, 2e4) : null;
   }
   if (patch.context_text !== void 0) {
-    const v = patch.context_text?.trim() ?? "";
+    const v = (patch.context_text ?? "").replace(/\x00+/g, "").trim();
     update.context_text = v.length > 0 ? v.slice(0, 2e4) : null;
   }
   if (Object.keys(update).length === 0) return true;
@@ -716001,7 +716170,7 @@ var v2WidgetEndpoints = async (app) => {
           ...refText ? [
             {
               role: "system",
-              content: "\uB2E4\uC74C\uC740 \uC774 \uC138\uC158 \uC804\uC6A9 \uCC38\uACE0 \uC790\uB8CC\uC785\uB2C8\uB2E4. \uC0AC\uC6A9\uC790 \uC9C8\uBB38\uC5D0 \uB2F5\uD560 \uB54C \uC774 \uC790\uB8CC\uB97C \uCD5C\uC6B0\uC120 \uADFC\uAC70\uB85C \uD65C\uC6A9\uD558\uACE0, \uC790\uB8CC\uC5D0 \uC5C6\uB294 \uB0B4\uC6A9\uC740 \uCD94\uCE21\uD558\uC9C0 \uB9D0\uACE0 \uBAA8\uB978\uB2E4\uACE0 \uB2F5\uD558\uC138\uC694.\n\n\u2500\u2500\u2500 \uCC38\uACE0 \uC790\uB8CC \u2500\u2500\u2500\n" + refText.slice(0, 1e4) + "\n\u2500\u2500\u2500 \uCC38\uACE0 \uC790\uB8CC \uB05D \u2500\u2500\u2500"
+              content: "\uB2E4\uC74C\uC740 \uC774 \uC138\uC158 \uC804\uC6A9 \uCC38\uACE0 \uC790\uB8CC\uC785\uB2C8\uB2E4. \uC0AC\uC6A9\uC790 \uC9C8\uBB38\uC5D0 \uB2F5\uD560 \uB54C \uC774 \uC790\uB8CC\uB97C \uCD5C\uC6B0\uC120 \uADFC\uAC70\uB85C \uD65C\uC6A9\uD558\uACE0, \uC790\uB8CC\uC5D0 \uC5C6\uB294 \uB0B4\uC6A9\uC740 \uCD94\uCE21\uD558\uC9C0 \uB9D0\uACE0 \uBAA8\uB978\uB2E4\uACE0 \uB2F5\uD558\uC138\uC694.\n\n\u2500\u2500\u2500 \uCC38\uACE0 \uC790\uB8CC \u2500\u2500\u2500\n" + refText.slice(0, 2e4) + "\n\u2500\u2500\u2500 \uCC38\uACE0 \uC790\uB8CC \uB05D \u2500\u2500\u2500"
             }
           ] : [],
           ...boundedHistory.map((m) => ({
@@ -716143,6 +716312,7 @@ var v2WidgetEndpoints = async (app) => {
 
 `));
           };
+          const MAX_ASSISTANT_RESPONSE_CHARS = 1e5;
           let assistantBuffer = "";
           const stream = new ReadableStream({
             async start(controller) {
@@ -716157,7 +716327,10 @@ var v2WidgetEndpoints = async (app) => {
                 );
                 for await (const token of tokenStream) {
                   if (abortController.signal.aborted) break;
-                  assistantBuffer += token;
+                  if (assistantBuffer.length < MAX_ASSISTANT_RESPONSE_CHARS) {
+                    const remain = MAX_ASSISTANT_RESPONSE_CHARS - assistantBuffer.length;
+                    assistantBuffer += token.length <= remain ? token : token.slice(0, remain);
+                  }
                   sendChunk(controller, token);
                 }
               } catch (err) {
@@ -716246,8 +716419,8 @@ var v2WidgetEndpoints = async (app) => {
             welcome_message: reg?.welcome_message ?? null,
             system_prompt: reg?.system_prompt ?? null,
             suggested_questions: reg?.suggested_questions ?? null,
-            icon_url: reg?.icon_url ?? null,
-            chat_bubble_size: reg?.chat_bubble_size ?? null,
+            icon_url: reg?.icon_url && isValidWidgetIconUrl(reg.icon_url) ? reg.icon_url.trim() : null,
+            chat_bubble_size: reg?.chat_bubble_size && isValidWidgetBubbleSize(reg.chat_bubble_size) ? reg.chat_bubble_size.trim() : null,
             thread_count: act?.thread_count ?? 0,
             latest_updated_at: act?.latest_updated_at ?? reg?.updated_at ?? (/* @__PURE__ */ new Date(0)).toISOString()
           };
@@ -716433,7 +716606,7 @@ var v2WidgetEndpoints = async (app) => {
               results.push({ name: m.name, ok: false, error: execErr.message });
               break;
             }
-            const { error: trackErr } = await supabaseClient.from("_migration_history").insert({ name: m.name });
+            const { error: trackErr } = await supabaseClient.from("_migration_history").upsert({ name: m.name }, { onConflict: "name" });
             if (trackErr) {
               results.push({
                 name: m.name,
@@ -717094,11 +717267,11 @@ var v2MailEndpoints = async (app) => {
           return { success: false, error: "text or html required" };
         }
         const rawIdempotencyKey = (headers["idempotency-key"] || headers["x-idempotency-key"] || "").trim();
-        if (rawIdempotencyKey.length > 256) {
+        if (rawIdempotencyKey.length > 256 || /[\x00-\x1f\x7f]/.test(rawIdempotencyKey)) {
           set.status = 400;
           return {
             success: false,
-            error: "idempotency-key exceeds maximum length of 256 characters"
+            error: rawIdempotencyKey.length > 256 ? "idempotency-key exceeds maximum length of 256 characters" : "invalid idempotency-key (control characters prohibited)"
           };
         }
         if (!isNaverMailConfigured()) {
@@ -717347,7 +717520,7 @@ async function sendViaPushbullet({
         error: `[${conf.mode}] PUSHBULLET_${conf.mode}_ACCESS_TOKEN \uD658\uACBD\uBCC0\uC218\uAC00 \uC124\uC815\uB418\uC5B4\uC57C \uD569\uB2C8\uB2E4. (pushbullet.com > Settings > Access Token)`
       };
     }
-    const base = process.env.PUSHBULLET_API_URL?.trim() || DEFAULT_API_URL;
+    const base = (process.env.PUSHBULLET_API_URL?.trim() || DEFAULT_API_URL).replace(/\/+$/, "");
     let device;
     try {
       device = await resolveDeviceIden(base, conf.token, conf, maxRetries);
@@ -717563,6 +717736,15 @@ var v2SmsEndpoints = async (app) => {
             error: "text exceeds maximum length of 2000 characters"
           };
         }
+        const rawIdem = (headers["idempotency-key"] || headers["x-idempotency-key"] || "").trim();
+        if (rawIdem.length > 256 || /[\x00-\x1f\x7f]/.test(rawIdem)) {
+          set.status = 400;
+          return {
+            success: false,
+            error: rawIdem.length > 256 ? "idempotency-key exceeds maximum length of 256 characters" : "invalid idempotency-key (control characters prohibited)"
+          };
+        }
+        const idempotencyKey = rawIdem || void 0;
         if (!isSmsConfigured()) {
           set.status = 500;
           return {
@@ -717570,15 +717752,6 @@ var v2SmsEndpoints = async (app) => {
             error: `SMS provider(${activeProvider()}) \uD658\uACBD\uBCC0\uC218 \uBBF8\uC124\uC815 \u2014 PUSHBULLET_ACCESS_TOKEN \uACFC (PUSHBULLET_DEVICE_NICKNAME \uB610\uB294 PUSHBULLET_DEVICE_IDEN) \uC744 \uD655\uC778\uD558\uC138\uC694.`
           };
         }
-        const rawIdem = (headers["idempotency-key"] || headers["x-idempotency-key"] || "").trim();
-        if (rawIdem.length > 256) {
-          set.status = 400;
-          return {
-            success: false,
-            error: "idempotency-key exceeds maximum length of 256 characters"
-          };
-        }
-        const idempotencyKey = rawIdem || void 0;
         try {
           const result = await sendSms(
             { phoneNumber: to, text },

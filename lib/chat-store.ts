@@ -45,27 +45,56 @@ export interface ChatThreadRow {
 const MAX_STORE_ID_CHARS = 100;
 const OPPORTUNISTIC_DB_DRAIN_BATCH = 10;
 
-export async function createThread(widgetId: string): Promise<string | null> {
-  const wid = (widgetId ?? "").trim();
-  if (!wid || wid.length > MAX_STORE_ID_CHARS) return null;
-  try {
-    const { data, error } = await supabaseUntyped
-      .from("chat_thread")
-      .insert({ widget_id: wid })
-      .select("id")
-      .single();
-    if (error) {
-      console.error("[chat-store] createThread failed:", error.message);
-      return null;
-    }
-    return (data as { id: string } | null)?.id ?? null;
-  } catch (err: any) {
-    console.warn(
-      "[chat-store] createThread database query failed or skipped:",
-      err?.message || err,
-    );
+function normalizeStoreId(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trim();
+  if (
+    !trimmed ||
+    trimmed.length > MAX_STORE_ID_CHARS ||
+    /[\x00-\x1f\x7f]/.test(trimmed)
+  ) {
     return null;
   }
+  return trimmed;
+}
+
+const jitterSleep429 = () =>
+  new Promise<void>((resolve) =>
+    setTimeout(resolve, 40 + Math.floor(Math.random() * 80)),
+  );
+
+export async function createThread(widgetId: string): Promise<string | null> {
+  const wid = normalizeStoreId(widgetId);
+  if (!wid) return null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const { data, error } = await supabaseUntyped
+        .from("chat_thread")
+        .insert({ widget_id: wid })
+        .select("id")
+        .single();
+      if (error) {
+        if (attempt === 0 && is429OrQuotaError(error)) {
+          await jitterSleep429();
+          continue;
+        }
+        console.error("[chat-store] createThread failed:", error.message);
+        return null;
+      }
+      return (data as { id: string } | null)?.id ?? null;
+    } catch (err: any) {
+      if (attempt === 0 && is429OrQuotaError(err)) {
+        await jitterSleep429();
+        continue;
+      }
+      console.warn(
+        "[chat-store] createThread database query failed or skipped:",
+        err?.message || err,
+      );
+      return null;
+    }
+  }
+  return null;
 }
 
 /**
@@ -78,32 +107,43 @@ export async function getThread(
   threadId: string,
   widgetId: string,
 ): Promise<ChatThreadRow | null> {
-  const wid = (widgetId ?? "").trim();
-  const tid = (threadId ?? "").trim();
-  if (!wid || !tid || wid.length > MAX_STORE_ID_CHARS || tid.length > MAX_STORE_ID_CHARS) {
+  const wid = normalizeStoreId(widgetId);
+  const tid = normalizeStoreId(threadId);
+  if (!wid || !tid) {
     return null;
   }
 
-  try {
-    const { data, error } = await supabaseUntyped
-      .from("chat_thread")
-      .select("*")
-      .eq("id", tid)
-      .eq("widget_id", wid)
-      .eq("is_deleted", false)
-      .maybeSingle();
-    if (error) {
-      console.error("[chat-store] getThread failed:", error.message);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const { data, error } = await supabaseUntyped
+        .from("chat_thread")
+        .select("*")
+        .eq("id", tid)
+        .eq("widget_id", wid)
+        .eq("is_deleted", false)
+        .maybeSingle();
+      if (error) {
+        if (attempt === 0 && is429OrQuotaError(error)) {
+          await jitterSleep429();
+          continue;
+        }
+        console.error("[chat-store] getThread failed:", error.message);
+        return null;
+      }
+      return (data as ChatThreadRow | null) ?? null;
+    } catch (err: any) {
+      if (attempt === 0 && is429OrQuotaError(err)) {
+        await jitterSleep429();
+        continue;
+      }
+      console.warn(
+        "[chat-store] getThread database query skipped:",
+        err?.message || err,
+      );
       return null;
     }
-    return (data as ChatThreadRow | null) ?? null;
-  } catch (err: any) {
-    console.warn(
-      "[chat-store] getThread database query skipped:",
-      err?.message || err,
-    );
-    return null;
   }
+  return null;
 }
 
 /**
@@ -116,9 +156,9 @@ export async function deleteThread(
   threadId: string,
   widgetId: string,
 ): Promise<boolean> {
-  const wid = (widgetId ?? "").trim();
-  const tid = (threadId ?? "").trim();
-  if (!wid || !tid || wid.length > MAX_STORE_ID_CHARS || tid.length > MAX_STORE_ID_CHARS) {
+  const wid = normalizeStoreId(widgetId);
+  const tid = normalizeStoreId(threadId);
+  if (!wid || !tid) {
     return false;
   }
 
@@ -144,12 +184,13 @@ export async function deleteThread(
  * Soft-deletes the thread so callers can clean up orphan threads when initial message persistence fails.
  */
 export async function rollbackThread(threadId: string): Promise<boolean> {
-  if (!threadId) return false;
+  const tid = normalizeStoreId(threadId);
+  if (!tid) return false;
   try {
     const { error } = await supabaseUntyped
       .from("chat_thread")
       .update({ is_deleted: true })
-      .eq("id", threadId);
+      .eq("id", tid);
     if (error) {
       console.error("[chat-store] rollbackThread failed:", error.message);
       return false;
@@ -177,45 +218,63 @@ export async function listMessages(
   threadId: string,
   limit = 50,
 ): Promise<ChatMessageRow[]> {
-  const tid = (threadId ?? "").trim();
-  if (!tid || tid.length > MAX_STORE_ID_CHARS) return [];
+  const tid = normalizeStoreId(threadId);
+  if (!tid) return [];
   const safeLimit =
     Number.isFinite(limit) && limit > 0
       ? Math.min(Math.floor(limit), 1000)
       : 50;
   let rows: ChatMessageRow[] = [];
-  try {
-    // Query newest `safeLimit` rows first (DESC) so threads > 50 turns never
-    // drop recent messages, then reverse into chronological ascending order.
-    const { data, error } = await supabaseUntyped
-      .from("chat_message")
-      .select("*")
-      .eq("thread_id", tid)
-      .order("created_at", { ascending: false })
-      .order("id", { ascending: false })
-      .limit(safeLimit);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      // Query newest `safeLimit` rows first (DESC) so threads > 50 turns never
+      // drop recent messages, then reverse into chronological ascending order.
+      const { data, error } = await supabaseUntyped
+        .from("chat_message")
+        .select("*")
+        .eq("thread_id", tid)
+        .order("created_at", { ascending: false })
+        .order("id", { ascending: false })
+        .limit(safeLimit);
 
-    if (data) {
-      rows = (data as ChatMessageRow[]).slice().reverse();
+      if (error) {
+        if (attempt === 0 && is429OrQuotaError(error)) {
+          await jitterSleep429();
+          continue;
+        }
+        console.error("[chat-store] listMessages failed:", error.message);
+      } else if (data) {
+        rows = (data as ChatMessageRow[]).slice().reverse();
+      }
+      break;
+    } catch (err: any) {
+      if (attempt === 0 && is429OrQuotaError(err)) {
+        await jitterSleep429();
+        continue;
+      }
+      console.warn(
+        "[chat-store] listMessages database query failed or skipped:",
+        err?.message || err,
+      );
+      break;
     }
-    if (error) {
-      console.error("[chat-store] listMessages failed:", error.message);
-    }
-  } catch (err: any) {
-    console.warn(
-      "[chat-store] listMessages database query failed or skipped:",
-      err?.message || err,
-    );
   }
 
   // Merge any pending unpersisted messages in dbFallbackQueue for this thread
   const queuedRows = getQueuedMessagesForThread(tid);
   if (queuedRows.length > 0) {
     rows = [...rows, ...(queuedRows as ChatMessageRow[])];
-    rows.sort(
-      (a, b) =>
-        new Date(a.created_at).getTime() - new Date(b.created_at).getTime(),
-    );
+    rows.sort((a, b) => {
+      const dt =
+        new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
+      if (dt !== 0) return dt;
+      // Same-millisecond tie-breaker: persisted DB rows (id >= 0) precede queued rows (id < 0),
+      // and within each group preserve insertion order.
+      const aQueued = a.id < 0;
+      const bQueued = b.id < 0;
+      if (aQueued !== bQueued) return aQueued ? 1 : -1;
+      return aQueued ? Math.abs(a.id) - Math.abs(b.id) : a.id - b.id;
+    });
     if (rows.length > safeLimit) {
       rows = rows.slice(-safeLimit);
     }
@@ -462,8 +521,8 @@ export async function listThreads(
   widgetId: string,
   limit = 100,
 ): Promise<ThreadSummary[]> {
-  const wid = (widgetId ?? "").trim();
-  if (!wid || wid.length > MAX_STORE_ID_CHARS) return [];
+  const wid = normalizeStoreId(widgetId);
+  if (!wid) return [];
   const safeLimit =
     Number.isFinite(limit) && limit > 0
       ? Math.min(Math.floor(limit), 500)
@@ -505,19 +564,18 @@ export async function listThreads(
       string,
       { count: number; lastUser: string | null }
     >();
-    const combinedMsgs: ChatMessageRow[] = [
-      ...(((msgs as ChatMessageRow[]) ?? []).slice()),
-    ];
+    const dbMsgs = (msgs as ChatMessageRow[]) ?? [];
+    let combinedMsgs: ChatMessageRow[] = dbMsgs;
     if (dbFallbackQueue.size > 0) {
       const queued = getQueuedMessagesForThreads(new Set(ids)) as ChatMessageRow[];
       if (queued.length > 0) {
-        combinedMsgs.push(...queued);
+        combinedMsgs = [...dbMsgs, ...queued];
+        combinedMsgs.sort(
+          (a, b) =>
+            new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
+        );
       }
     }
-    combinedMsgs.sort(
-      (a, b) =>
-        new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
-    );
 
     for (const m of combinedMsgs) {
       const entry = byThread.get(m.thread_id) ?? { count: 0, lastUser: null };
@@ -564,13 +622,16 @@ export async function renameThread(
   widgetId: string,
   title: string | null,
 ): Promise<boolean> {
-  const tid = (threadId ?? "").trim();
-  const wid = (widgetId ?? "").trim();
-  if (!tid || !wid || tid.length > MAX_STORE_ID_CHARS || wid.length > MAX_STORE_ID_CHARS) {
+  const tid = normalizeStoreId(threadId);
+  const wid = normalizeStoreId(widgetId);
+  if (!tid || !wid) {
     return false;
   }
-  const normalized =
-    title && title.trim().length > 0 ? title.trim().slice(0, 200) : null;
+  const cleanTitle =
+    typeof title === "string"
+      ? title.replace(/[\x00-\x1f\x7f]+/g, "").trim()
+      : "";
+  const normalized = cleanTitle.length > 0 ? cleanTitle.slice(0, 200) : null;
   try {
     const { error } = await supabaseUntyped
       .from("chat_thread")
@@ -603,19 +664,19 @@ export async function updateThreadPrompt(
     context_text?: string | null;
   },
 ): Promise<boolean> {
-  const tid = (threadId ?? "").trim();
-  const wid = (widgetId ?? "").trim();
-  if (!tid || !wid || tid.length > MAX_STORE_ID_CHARS || wid.length > MAX_STORE_ID_CHARS) {
+  const tid = normalizeStoreId(threadId);
+  const wid = normalizeStoreId(widgetId);
+  if (!tid || !wid) {
     return false;
   }
   const update: Record<string, unknown> = {};
   if (patch.system_prompt !== undefined) {
-    const v = patch.system_prompt?.trim() ?? "";
+    const v = (patch.system_prompt ?? "").replace(/\x00+/g, "").trim();
     // Hard cap matching context_text so oversized prompts cannot blow up LLM context window.
     update.system_prompt = v.length > 0 ? v.slice(0, 20000) : null;
   }
   if (patch.context_text !== undefined) {
-    const v = patch.context_text?.trim() ?? "";
+    const v = (patch.context_text ?? "").replace(/\x00+/g, "").trim();
     // Hard cap so a copy-pasted novel doesn't blow up the LLM context window.
     update.context_text = v.length > 0 ? v.slice(0, 20000) : null;
   }

@@ -54,9 +54,20 @@ export class OpenAICompatibleProvider implements LLMProvider {
   }) {
     this.name = opts.name;
     this.baseUrl = opts.baseUrl.replace(/\/+$/, "");
-    this.apiKey = opts.apiKey;
+    this.apiKey = opts.apiKey.trim();
     this.defaultModel = opts.defaultModel;
-    this.extraHeaders = opts.extraHeaders ?? {};
+    const sanitizedExtra: Record<string, string> = {};
+    if (opts.extraHeaders) {
+      for (const [k, v] of Object.entries(opts.extraHeaders)) {
+        const cleanVal = String(v ?? "").replace(/[\r\n\x00-\x1f\x7f]+/g, " ").trim();
+        let byteSafe = "";
+        for (const ch of cleanVal) {
+          byteSafe += (ch.codePointAt(0) ?? 0) > 0xff ? encodeURIComponent(ch) : ch;
+        }
+        sanitizedExtra[k] = byteSafe;
+      }
+    }
+    this.extraHeaders = sanitizedExtra;
     this.chunkTimeoutMs = opts.chunkTimeoutMs;
   }
 

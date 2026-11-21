@@ -82,6 +82,23 @@ export const v2SmsEndpoints = async (app: any) => {
           };
         }
 
+        const rawIdem = (
+          headers["idempotency-key"] ||
+          headers["x-idempotency-key"] ||
+          ""
+        ).trim();
+        if (rawIdem.length > 256 || /[\x00-\x1f\x7f]/.test(rawIdem)) {
+          set.status = 400;
+          return {
+            success: false,
+            error:
+              rawIdem.length > 256
+                ? "idempotency-key exceeds maximum length of 256 characters"
+                : "invalid idempotency-key (control characters prohibited)",
+          };
+        }
+        const idempotencyKey = rawIdem || undefined;
+
         if (!isSmsConfigured()) {
           set.status = 500;
           return {
@@ -89,20 +106,6 @@ export const v2SmsEndpoints = async (app: any) => {
             error: `SMS provider(${activeProvider()}) 환경변수 미설정 — PUSHBULLET_ACCESS_TOKEN 과 (PUSHBULLET_DEVICE_NICKNAME 또는 PUSHBULLET_DEVICE_IDEN) 을 확인하세요.`,
           };
         }
-
-        const rawIdem = (
-          headers["idempotency-key"] ||
-          headers["x-idempotency-key"] ||
-          ""
-        ).trim();
-        if (rawIdem.length > 256) {
-          set.status = 400;
-          return {
-            success: false,
-            error: "idempotency-key exceeds maximum length of 256 characters",
-          };
-        }
-        const idempotencyKey = rawIdem || undefined;
 
         try {
           const result = await sendSms(

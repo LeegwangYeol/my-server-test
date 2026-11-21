@@ -71,7 +71,11 @@ export const v1VideoList = (app: any) => {
           message: "유효한 accessToken 값이 제공되지 않았습니다.",
         };
       }
-      if (typeof pageToken === "string" && pageToken.trim().length > 512) {
+      const trimmedPageToken = typeof pageToken === "string" ? pageToken.trim() : "";
+      if (
+        trimmedPageToken.length > 512 ||
+        (trimmedPageToken.length > 0 && /[\s\x00-\x1f\x7f]/.test(trimmedPageToken))
+      ) {
         set.status = 400;
         return {
           success: false,

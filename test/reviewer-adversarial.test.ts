@@ -2809,4 +2809,573 @@ describe("Adversarial Reviewer Verification Suite", () => {
       globalThis.fetch = origFetch;
     }
   });
+
+  it("VULN-59: Non-ASCII Korean LLM_TITLE / CRLF headers are ByteString-encoded without crashing fetch(), and parseKeyConfigsFromEnv deduplicates/sanitizes comma-bearing IDs", async () => {
+    const {
+      parseKeyConfigsFromEnv,
+      sanitizeHttpHeaderValue,
+      createRotatingOrConfiguredProvider,
+      resetCachedProviderForTesting,
+    } = await import("../lib/llm/factory");
+
+    const prevKeys = process.env.OPENROUTER_API_KEYS;
+    const prevTitle = process.env.LLM_TITLE;
+    const prevRef = process.env.LLM_REFERER;
+    const origFetch = globalThis.fetch;
+
+    try {
+      // 1. Korean title + CRLF injection converts to validWHATWG ByteString
+      const safeTitle = sanitizeHttpHeaderValue("토키 AI\r\nInjected: bad", "Tokki AI");
+      expect(() => new Headers({ "X-Title": safeTitle })).not.toThrow();
+      expect(safeTitle).not.toContain("\r");
+      expect(safeTitle).not.toContain("\n");
+      expect(decodeURIComponent(safeTitle)).toBe("토키 AI Injected: bad");
+
+      // 2. parseKeyConfigsFromEnv sanitizes commas/spaces in IDs, deduplicates IDs, and filters invalid bearer tokens
+      process.env.OPENROUTER_API_KEYS = JSON.stringify([
+        { id: "key,with,commas 1", apiKey: "  sk-valid-1  ", tier: 0 },
+        { id: "key_with_commas_1", apiKey: "sk-valid-2", tier: 1 },
+        { id: "bad-space-key", apiKey: "sk-bad token\nwith-newline" },
+      ]);
+      const parsed = parseKeyConfigsFromEnv();
+      expect(parsed.length).toBe(2);
+      expect(parsed[0].id).toBe("key_with_commas_1");
+      expect(parsed[1].id).toBe("key_with_commas_1-2");
+      expect(parsed[0].apiKey).toBe("sk-valid-1");
+
+      // 3. End-to-end RotatingLLMProvider handshake succeeds with Korean LLM_TITLE
+      process.env.LLM_TITLE = "무련 도우미";
+      process.env.LLM_REFERER = "https://tokki.app/챗봇";
+      resetCachedProviderForTesting();
+      let capturedHeaders: Headers | null = null;
+      globalThis.fetch = (async (_input: any, init?: RequestInit) => {
+        capturedHeaders = new Headers(init?.headers);
+        return new Response("data: [DONE]\n\n", {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      }) as any;
+
+      const provider: any = createRotatingOrConfiguredProvider();
+      const hs = await provider.preStreamHandshake({
+        messages: [{ role: "user", content: "안녕" }],
+      });
+      expect(capturedHeaders?.get("x-title")).toBeTruthy();
+      for await (const _ of provider.streamFromHandshake(hs)) {
+        /* drain */
+      }
+    } finally {
+      globalThis.fetch = origFetch;
+      resetCachedProviderForTesting();
+      if (prevKeys === undefined) delete process.env.OPENROUTER_API_KEYS;
+      else process.env.OPENROUTER_API_KEYS = prevKeys;
+      if (prevTitle === undefined) delete process.env.LLM_TITLE;
+      else process.env.LLM_TITLE = prevTitle;
+      if (prevRef === undefined) delete process.env.LLM_REFERER;
+      else process.env.LLM_REFERER = prevRef;
+    }
+  });
+
+  it("VULN-60: Supabase client trims whitespace credentials, rejects blank strings, and aborts hung PostgREST sockets via SUPABASE_FETCH_TIMEOUT_MS", async () => {
+    const { supabaseClient } = await import("../lib/supabase/client");
+    const prevUrl = process.env.SUPABASE_URL;
+    const prevKey = process.env.SUPABASE_SERVICE_KEY;
+    const prevTimeout = process.env.SUPABASE_FETCH_TIMEOUT_MS;
+    const origFetch = globalThis.fetch;
+
+    try {
+      // 1. Whitespace-only SUPABASE_URL throws explicit missing-env error instead of caching broken empty client
+      process.env.SUPABASE_URL = "   ";
+      process.env.SUPABASE_SERVICE_KEY = "mock-key";
+      expect(() => (supabaseClient as any).from("widget")).toThrow("SUPABASE_URL is not set");
+
+      // 2. Hung PostgREST socket aborts cleanly within SUPABASE_FETCH_TIMEOUT_MS (60ms)
+      process.env.SUPABASE_URL = "  https://mock-supa-timeout-60.local  ";
+      process.env.SUPABASE_SERVICE_KEY = "  mock-service-key-60\n ";
+      process.env.SUPABASE_FETCH_TIMEOUT_MS = "60";
+
+      globalThis.fetch = (async (_input: any, init?: RequestInit) => {
+        return await new Promise<Response>((_resolve, reject) => {
+          if (init?.signal?.aborted) {
+            reject(init.signal.reason || new Error("Aborted"));
+            return;
+          }
+          init?.signal?.addEventListener(
+            "abort",
+            () => reject(init.signal?.reason || new Error("TimeoutAbort")),
+            { once: true },
+          );
+        });
+      }) as any;
+
+      const t0 = performance.now();
+      const res = await (supabaseClient as any).from("widget").select("*").maybeSingle();
+      const elapsed = performance.now() - t0;
+      expect(elapsed).toBeLessThan(1000);
+      expect(res.error).toBeTruthy();
+    } finally {
+      globalThis.fetch = origFetch;
+      if (prevUrl === undefined) delete process.env.SUPABASE_URL;
+      else process.env.SUPABASE_URL = prevUrl;
+      if (prevKey === undefined) delete process.env.SUPABASE_SERVICE_KEY;
+      else process.env.SUPABASE_SERVICE_KEY = prevKey;
+      if (prevTimeout === undefined) delete process.env.SUPABASE_FETCH_TIMEOUT_MS;
+      else process.env.SUPABASE_FETCH_TIMEOUT_MS = prevTimeout;
+    }
+  });
+
+  it("VULN-61: /v2/admin/db/migrate tracks history idempotently via upsert, /v2/ask preserves full 20,000-char context_text, and /v2/admin/widgets sanitizes stored icon_url & chat_bubble_size", async () => {
+    const prevAdmin = process.env.ADMIN_TOKEN;
+    const prevSupaUrl = process.env.SUPABASE_URL;
+    const prevSupaKey = process.env.SUPABASE_SERVICE_KEY;
+    const prevLlmKey = process.env.LLM_API_KEY;
+    const prevOrKeys = process.env.OPENROUTER_API_KEYS;
+    const prevProvider = process.env.LLM_PROVIDER;
+    const origFetch = globalThis.fetch;
+
+    try {
+      process.env.ADMIN_TOKEN = "test-admin-v61";
+      process.env.SUPABASE_URL = "https://mock-supa-61.local";
+      process.env.SUPABASE_SERVICE_KEY = "mock-key-61";
+      process.env.LLM_PROVIDER = "openai";
+      process.env.LLM_API_KEY = "sk-test-v61";
+      delete process.env.OPENROUTER_API_KEYS;
+
+      const longContext = "R".repeat(17_500) + "TAIL_MARKER_17500";
+      let historyPostPrefer = "";
+      let capturedLlmMessages: any[] = [];
+
+      globalThis.fetch = (async (input: any, init?: RequestInit) => {
+        const u = new URL(typeof input === "string" ? input : input.url);
+        if (u.hostname === "mock-supa-61.local") {
+          const method = (init?.method ?? "GET").toUpperCase();
+          if (u.pathname.endsWith("/_migration_history")) {
+            if (method === "POST") {
+              const h = new Headers(init?.headers);
+              historyPostPrefer = h.get("prefer") || "";
+              return new Response(JSON.stringify([]), {
+                status: 201,
+                headers: { "content-type": "application/json" },
+              });
+            }
+            return new Response(JSON.stringify([]), {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            });
+          }
+          if (u.pathname.includes("/rpc/admin_exec_sql")) {
+            return new Response(null, { status: 204 });
+          }
+          if (u.pathname.endsWith("/widget")) {
+            if (u.search.includes("id=eq.")) {
+              return new Response(
+                JSON.stringify({
+                  id: "registered-valid-widget",
+                  name: "Bot",
+                  theme: "noir",
+                  description: "",
+                  welcome_message: "",
+                  system_prompt: null,
+                  suggested_questions: [],
+                  icon_url: null,
+                  chat_bubble_size: null,
+                  is_deleted: false,
+                  created_at: new Date().toISOString(),
+                  updated_at: new Date().toISOString(),
+                }),
+                { status: 200, headers: { "content-type": "application/json" } },
+              );
+            }
+            return new Response(
+              JSON.stringify([
+                {
+                  id: "poisoned-admin-widget",
+                  name: "Poisoned",
+                  theme: "noir",
+                  description: "",
+                  welcome_message: "",
+                  system_prompt: null,
+                  suggested_questions: [],
+                  icon_url: "javascript:alert(1)",
+                  chat_bubble_size: "100vw",
+                  is_deleted: false,
+                  created_at: new Date().toISOString(),
+                  updated_at: new Date().toISOString(),
+                },
+              ]),
+              { status: 200, headers: { "content-type": "application/json" } },
+            );
+          }
+          if (u.pathname.endsWith("/chat_thread")) {
+            if (u.search.includes("id=eq.")) {
+              return new Response(
+                JSON.stringify({
+                  id: "thread-rag-20k",
+                  widget_id: "registered-valid-widget",
+                  is_deleted: false,
+                  created_at: new Date().toISOString(),
+                  updated_at: new Date().toISOString(),
+                  title: null,
+                  system_prompt: null,
+                  context_text: longContext,
+                }),
+                { status: 200, headers: { "content-type": "application/json" } },
+              );
+            }
+            return new Response(JSON.stringify([]), {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            });
+          }
+          if (u.pathname.endsWith("/chat_message")) {
+            return new Response(JSON.stringify([]), {
+              status: method === "POST" ? 201 : 200,
+              headers: { "content-type": "application/json" },
+            });
+          }
+        }
+        if (u.hostname === "api.openai.com") {
+          const parsedBody = JSON.parse(String(init?.body ?? "{}"));
+          capturedLlmMessages = parsedBody.messages ?? [];
+          return new Response(
+            'data: {"choices":[{"delta":{"content":"답변"}}]}\n\ndata: [DONE]\n\n',
+            { status: 200, headers: { "content-type": "text/event-stream" } },
+          );
+        }
+        return origFetch(input, init);
+      }) as any;
+
+      const app = await createApp(true);
+
+      // 1. /v2/admin/db/migrate uses PostgREST upsert (Prefer: resolution=merge-duplicates)
+      const migRes = await app.handle(
+        new Request("http://localhost/v2/admin/db/migrate", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-admin-token": "test-admin-v61",
+          },
+          body: JSON.stringify({ dryRun: false }),
+        }),
+      );
+      expect(migRes.status).toBe(200);
+      expect(historyPostPrefer).toContain("resolution=merge-duplicates");
+
+      // 2. /v2/admin/widgets sanitizes poisoned stored icon_url and chat_bubble_size when returned from store
+      const adminWidgetsRes = await app.handle(
+        new Request("http://localhost/v2/admin/widgets", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-admin-token": "test-admin-v61",
+          },
+          body: "{}",
+        }),
+      );
+      expect(adminWidgetsRes.status).toBe(200);
+      const adminWidgetsJson = (await adminWidgetsRes.json()) as any;
+      const poisonedRow = adminWidgetsJson.widgets?.find(
+        (w: any) => w.widget_id === "poisoned-admin-widget",
+      );
+      if (poisonedRow) {
+        expect(poisonedRow.icon_url).toBeNull();
+        expect(poisonedRow.chat_bubble_size).toBeNull();
+      }
+
+      // 3. /v2/ask forwards full 17,500+ char thread context_text without truncating at 10,000
+      const askRes = await app.handle(
+        new Request("http://localhost/v2/ask", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            widgetId: "registered-valid-widget",
+            threadId: "thread-rag-20k",
+            message: "참고 자료 확인",
+          }),
+        }),
+      );
+      expect(askRes.status).toBe(200);
+      await askRes.text();
+      const ragSystemMsg = capturedLlmMessages.find(
+        (m) => m.role === "system" && String(m.content).includes("참고 자료"),
+      );
+      if (ragSystemMsg) {
+        expect(ragSystemMsg.content).toContain("TAIL_MARKER_17500");
+      }
+    } finally {
+      globalThis.fetch = origFetch;
+      if (prevAdmin === undefined) delete process.env.ADMIN_TOKEN;
+      else process.env.ADMIN_TOKEN = prevAdmin;
+      if (prevSupaUrl === undefined) delete process.env.SUPABASE_URL;
+      else process.env.SUPABASE_URL = prevSupaUrl;
+      if (prevSupaKey === undefined) delete process.env.SUPABASE_SERVICE_KEY;
+      else process.env.SUPABASE_SERVICE_KEY = prevSupaKey;
+      if (prevLlmKey === undefined) delete process.env.LLM_API_KEY;
+      else process.env.LLM_API_KEY = prevLlmKey;
+      if (prevOrKeys === undefined) delete process.env.OPENROUTER_API_KEYS;
+      else process.env.OPENROUTER_API_KEYS = prevOrKeys;
+      if (prevProvider === undefined) delete process.env.LLM_PROVIDER;
+      else process.env.LLM_PROVIDER = prevProvider;
+    }
+  });
+
+  it("VULN-62: chat-store retries transient PostgREST 429s on getThread/listMessages/createThread without orphaning threads and rejects control-char IDs with 0 DB calls", async () => {
+    const prevUrl = process.env.SUPABASE_URL;
+    const prevKey = process.env.SUPABASE_SERVICE_KEY;
+    const origFetch = globalThis.fetch;
+    const realChatStore: any = await import("../lib/chat-store?real-v62" as any);
+    const { dbFallbackQueue } = await import("../lib/queue/fallback-queue");
+
+    try {
+      process.env.SUPABASE_URL = "https://mock-supa-62.local";
+      process.env.SUPABASE_SERVICE_KEY = "mock-key-62";
+      dbFallbackQueue.clear();
+
+      let getThreadCalls = 0;
+      let listMsgCalls = 0;
+      let createThreadCalls62 = 0;
+      let totalDbCalls = 0;
+      const fixedIso = "2026-11-22T00:00:00.000Z";
+
+      globalThis.fetch = (async (input: any, init?: RequestInit) => {
+        const u = new URL(typeof input === "string" ? input : input.url);
+        if (u.hostname === "mock-supa-62.local") {
+          totalDbCalls++;
+          if (u.pathname.endsWith("/chat_thread") && init?.method === "POST") {
+            createThreadCalls62++;
+            if (createThreadCalls62 === 1) {
+              return new Response(JSON.stringify({ message: "429 Too Many Requests" }), {
+                status: 429,
+                headers: { "content-type": "application/json" },
+              });
+            }
+            return new Response(JSON.stringify({ id: "tid-created-after-429" }), {
+              status: 201,
+              headers: { "content-type": "application/json" },
+            });
+          }
+          if (u.pathname.endsWith("/chat_thread")) {
+            getThreadCalls++;
+            if (getThreadCalls === 1) {
+              return new Response(JSON.stringify({ message: "429 rate limit" }), {
+                status: 429,
+                headers: { "content-type": "application/json" },
+              });
+            }
+            return new Response(
+              JSON.stringify({
+                id: "tid-62",
+                widget_id: "wid-62",
+                is_deleted: false,
+                created_at: fixedIso,
+                updated_at: fixedIso,
+                title: null,
+                system_prompt: "Keep session",
+                context_text: null,
+              }),
+              { status: 200, headers: { "content-type": "application/json" } },
+            );
+          }
+          if (u.pathname.endsWith("/chat_message")) {
+            listMsgCalls++;
+            if (listMsgCalls === 1) {
+              return new Response(JSON.stringify({ message: "429 rate limit" }), {
+                status: 429,
+                headers: { "content-type": "application/json" },
+              });
+            }
+            return new Response(
+              JSON.stringify([
+                { id: 10, thread_id: "tid-62", role: "user", content: "DB first", created_at: fixedIso },
+              ]),
+              { status: 200, headers: { "content-type": "application/json" } },
+            );
+          }
+        }
+        return origFetch(input, init);
+      }) as any;
+
+      // 1. Control-char IDs fail locally with 0 DB round trips
+      expect(await realChatStore.getThread("tid\u0000bad", "wid-62")).toBeNull();
+      expect(await realChatStore.listMessages("tid\nnewline")).toEqual([]);
+      expect(await realChatStore.createThread("wid\u0007bell")).toBeNull();
+      expect(totalDbCalls).toBe(0);
+
+      // 2. Transient 429 on createThread, getThread, and listMessages recovers on single jittered retry
+      expect(await realChatStore.createThread("wid-62")).toBe("tid-created-after-429");
+      expect(createThreadCalls62).toBe(2);
+
+      const thread = await realChatStore.getThread("tid-62", "wid-62");
+      expect(thread?.id).toBe("tid-62");
+      expect(thread?.system_prompt).toBe("Keep session");
+      expect(getThreadCalls).toBe(2);
+
+      // 3. Same-millisecond tie-breaking keeps persisted DB message (id > 0) ahead of queued fallback message (id < 0)
+      dbFallbackQueue.enqueue(
+        {
+          threadId: "tid-62",
+          role: "assistant",
+          content: "Queued reply",
+          createdAt: fixedIso,
+        },
+        { type: "db_chat_message" },
+      );
+      const msgs = await realChatStore.listMessages("tid-62", 10);
+      expect(listMsgCalls).toBe(2);
+      expect(msgs.map((m: any) => m.content)).toEqual(["DB first", "Queued reply"]);
+    } finally {
+      dbFallbackQueue.clear();
+      globalThis.fetch = origFetch;
+      if (prevUrl === undefined) delete process.env.SUPABASE_URL;
+      else process.env.SUPABASE_URL = prevUrl;
+      if (prevKey === undefined) delete process.env.SUPABASE_SERVICE_KEY;
+      else process.env.SUPABASE_SERVICE_KEY = prevKey;
+    }
+  });
+
+  it("VULN-63: Pushbullet strips trailing slashes on PUSHBULLET_API_URL, mail/sms reject control-char Idempotency-Key, and YouTube endpoints enforce port/pageToken/schema symmetry", async () => {
+    const { sendViaPushbullet, clearPushbulletIdenCache } = await import(
+      "../lib/sms/pushbullet"
+    );
+    const { google } = await import("googleapis");
+    const origYoutube = google.youtube;
+    const origFetch = globalThis.fetch;
+    const prevPbUrl = process.env.PUSHBULLET_API_URL;
+    const prevPbTok = process.env.PUSHBULLET_ACCESS_TOKEN;
+    const prevPbIden = process.env.PUSHBULLET_DEVICE_IDEN;
+    const prevAdmin = process.env.ADMIN_TOKEN;
+
+    try {
+      // 1. Trailing-slash PUSHBULLET_API_URL resolves to single-slash /v2/texts
+      process.env.PUSHBULLET_API_URL = "https://mock-pb-63.local///";
+      process.env.PUSHBULLET_ACCESS_TOKEN = "pb-tok-63";
+      process.env.PUSHBULLET_DEVICE_IDEN = "dev-63";
+      process.env.ADMIN_TOKEN = "test-admin-v63";
+      clearPushbulletIdenCache();
+
+      let pbRequestedUrl = "";
+      globalThis.fetch = (async (input: any, init?: RequestInit) => {
+        const urlStr = typeof input === "string" ? input : input.url;
+        if (urlStr.includes("mock-pb-63.local")) {
+          pbRequestedUrl = urlStr;
+          return new Response(JSON.stringify({ iden: "msg-63" }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return origFetch(input, init);
+      }) as any;
+
+      const pbRes = await sendViaPushbullet({
+        phoneNumber: "01012345678",
+        text: "안녕하세요",
+      });
+      expect(pbRes.ok).toBe(true);
+      expect(pbRequestedUrl).toBe("https://mock-pb-63.local/v2/texts");
+
+      const app = await createApp(true);
+
+      // 2. Control characters in Idempotency-Key -> HTTP 400 on both mail & sms endpoints
+      for (const [route, payload] of [
+        ["/v2/admin/mail/send", { to: "a@b.com", subject: "Hi", text: "Body" }],
+        ["/v2/admin/sms/send", { to: "01012345678", text: "Body" }],
+      ] as const) {
+        const res = await app.handle(
+          new Request(`http://localhost${route}`, {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              "x-admin-token": "test-admin-v63",
+              "idempotency-key": "idem\u0007bad",
+            },
+            body: JSON.stringify(payload),
+          }),
+        );
+        expect(res.status).toBe(400);
+      }
+
+      // 3. YouTube /auth/create rejects port > 65535 (HTTP 400), pageToken with whitespace/control chars fails locally (0 outbound calls), and reply/list preserves channelId/viewerRating/moderationStatus
+      const badPortAuth = await app.handle(
+        new Request("http://localhost/v1/youtube/auth/create", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            clientId: "123-abc.apps.googleusercontent.com",
+            clientSecret: "GOCSPX-secret",
+            redirectUri: "https://example.com:99999/callback",
+          }),
+        }),
+      );
+      expect(badPortAuth.status).toBe(400);
+
+      let ytCalls = 0;
+      (google as any).youtube = () => ({
+        comments: {
+          list: async () => {
+            ytCalls++;
+            return {
+              data: {
+                items: [
+                  {
+                    id: "reply-1",
+                    snippet: {
+                      textDisplay: "Great!",
+                      channelId: "UC1no5Q01M2LmT-QLgLlUN0Q",
+                      viewerRating: "none",
+                      moderationStatus: "published",
+                    },
+                  },
+                ],
+                pageInfo: { totalResults: 1, resultsPerPage: 20 },
+              },
+            };
+          },
+        },
+      });
+
+      const badPageTok = await app.handle(
+        new Request("http://localhost/v1/youtube/reply/list", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            parentId: "parent-1",
+            accessToken: "valid-token",
+            pageToken: "CAUQAA bad-space",
+          }),
+        }),
+      );
+      expect(badPageTok.status).toBe(400);
+      expect(ytCalls).toBe(0);
+
+      const okReplyList = await app.handle(
+        new Request("http://localhost/v1/youtube/reply/list", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            parentId: "parent-1",
+            accessToken: "valid-token",
+          }),
+        }),
+      );
+      expect(okReplyList.status).toBe(200);
+      const replyJson = (await okReplyList.json()) as any;
+      expect(replyJson.data.items[0].snippet.channelId).toBe(
+        "UC1no5Q01M2LmT-QLgLlUN0Q",
+      );
+      expect(replyJson.data.items[0].snippet.viewerRating).toBe("none");
+      expect(replyJson.data.items[0].snippet.moderationStatus).toBe("published");
+    } finally {
+      google.youtube = origYoutube;
+      globalThis.fetch = origFetch;
+      clearPushbulletIdenCache();
+      if (prevPbUrl === undefined) delete process.env.PUSHBULLET_API_URL;
+      else process.env.PUSHBULLET_API_URL = prevPbUrl;
+      if (prevPbTok === undefined) delete process.env.PUSHBULLET_ACCESS_TOKEN;
+      else process.env.PUSHBULLET_ACCESS_TOKEN = prevPbTok;
+      if (prevPbIden === undefined) delete process.env.PUSHBULLET_DEVICE_IDEN;
+      else process.env.PUSHBULLET_DEVICE_IDEN = prevPbIden;
+      if (prevAdmin === undefined) delete process.env.ADMIN_TOKEN;
+      else process.env.ADMIN_TOKEN = prevAdmin;
+    }
+  });
 });

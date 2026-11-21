@@ -29,7 +29,11 @@ export const v1ReplyList = (app: any) => {
           message: "유효한 accessToken 값이 제공되지 않았습니다.",
         };
       }
-      if (typeof pageToken === "string" && pageToken.trim().length > 512) {
+      const trimmedPageToken = typeof pageToken === "string" ? pageToken.trim() : "";
+      if (
+        trimmedPageToken.length > 512 ||
+        (trimmedPageToken.length > 0 && /[\s\x00-\x1f\x7f]/.test(trimmedPageToken))
+      ) {
         set.status = 400;
         return {
           success: false,
@@ -163,8 +167,11 @@ export const v1ReplyList = (app: any) => {
                   authorProfileImageUrl: t.Optional(t.String()),
                   authorChannelUrl: t.Optional(t.String()),
                   authorChannelId: t.Optional(t.Any()),
+                  channelId: t.Optional(t.String()),
                   canRate: t.Optional(t.Boolean()),
+                  viewerRating: t.Optional(t.String()),
                   likeCount: t.Optional(t.Number()),
+                  moderationStatus: t.Optional(t.String()),
                   publishedAt: t.Optional(t.String()),
                   updatedAt: t.Optional(t.String()),
                 }),

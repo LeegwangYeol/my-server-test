@@ -13,7 +13,9 @@ export const v1Comment = (app: any) => {
     async ({ body, set }: { body: any; set: any }) => {
       const accessToken = sanitizeYoutubeAccessToken(body?.accessToken);
       const videoId = String(body?.videoId ?? "").trim();
-      const commentText = String(body?.commentText ?? "").trim();
+      const commentText = String(body?.commentText ?? "")
+        .replace(/\x00+/g, "")
+        .trim();
 
       if (!videoId || videoId.length > 128 || /[\s\x00-\x1f\x7f]/.test(videoId)) {
         set.status = 400;
@@ -113,7 +115,6 @@ export const v1Comment = (app: any) => {
           description: "YouTube Video ID",
           error: "YouTube 비디오 ID가 필요합니다.",
           minLength: 1,
-          maxLength: 100,
         }),
         commentText: t.String({
           description: "댓글 내용",

@@ -12,7 +12,7 @@ export const v1Reply = (app: any) => {
     "/reply",
     async ({ body, set }: { body: any; set: any }) => {
       const parentId = String(body?.parentId ?? "").trim();
-      const text = String(body?.text ?? "").trim();
+      const text = String(body?.text ?? "").replace(/\x00+/g, "").trim();
       const accessToken = sanitizeYoutubeAccessToken(body?.accessToken);
 
       if (!parentId || parentId.length > 256 || /[\s\x00-\x1f\x7f]/.test(parentId)) {

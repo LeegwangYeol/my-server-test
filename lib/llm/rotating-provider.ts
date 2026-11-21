@@ -50,10 +50,20 @@ export class RotatingLLMProvider implements LLMProvider {
     this.keyStore = keyStore;
     this.keyConfigMap = keyConfigMap;
     this.defaultModel = options?.defaultModel ?? "openai/gpt-4o-mini";
-    this.extraHeaders = options?.extraHeaders ?? {
+    const rawExtra = options?.extraHeaders ?? {
       "HTTP-Referer": "https://tokki.app",
       "X-Title": "Tokki AI",
     };
+    const safeExtra: Record<string, string> = {};
+    for (const [k, v] of Object.entries(rawExtra)) {
+      const cleanVal = String(v ?? "").replace(/[\r\n\x00-\x1f\x7f]+/g, " ").trim();
+      let byteSafe = "";
+      for (const ch of cleanVal) {
+        byteSafe += (ch.codePointAt(0) ?? 0) > 0xff ? encodeURIComponent(ch) : ch;
+      }
+      safeExtra[k] = byteSafe;
+    }
+    this.extraHeaders = safeExtra;
     this.maxAttempts =
       options?.maxAttempts ?? Math.max(3, Math.min(keyConfigMap.size, 5));
     this.perAttemptTimeoutMs = options?.perAttemptTimeoutMs ?? 6000;

@@ -6,6 +6,24 @@ import { UpstashRedisKeyStore } from "./key-manager/stores/upstash-redis";
 import { MemoryKeyStore } from "./key-manager/stores/memory";
 
 /**
+ * Ensures HTTP header values conform to WHATWG Fetch ByteString (code points <= 0xFF,
+ * no CTL/CRLF), percent-encoding non-Latin1 characters (e.g. Korean LLM_TITLE) so
+ * Node 24 undici and Bun `fetch()` never throw synchronous TypeErrors.
+ */
+export function sanitizeHttpHeaderValue(raw: string | undefined, fallback: string): string {
+  const cleaned = String(raw ?? "")
+    .replace(/[\r\n\x00-\x1f\x7f]+/g, " ")
+    .trim();
+  if (!cleaned) return fallback;
+  let safe = "";
+  for (const ch of cleaned) {
+    const cp = ch.codePointAt(0) ?? 0;
+    safe += cp > 0xff ? encodeURIComponent(ch) : ch;
+  }
+  return safe.slice(0, 1024) || fallback;
+}
+
+/**
  * Built-in preset for each supported vendor. Custom hosts can still be
  * used by setting LLM_PROVIDER=custom and LLM_BASE_URL=https://...
  */
@@ -22,9 +40,11 @@ const PRESETS: Record<
     defaultModel: "openai/gpt-4o-mini",
     extraHeaders: () => ({
       // OpenRouter uses these to attribute traffic on its leaderboard.
-      "HTTP-Referer":
-        process.env.LLM_REFERER ?? "https://tokki.app",
-      "X-Title": process.env.LLM_TITLE ?? "Tokki AI",
+      "HTTP-Referer": sanitizeHttpHeaderValue(
+        process.env.LLM_REFERER,
+        "https://tokki.app",
+      ),
+      "X-Title": sanitizeHttpHeaderValue(process.env.LLM_TITLE, "Tokki AI"),
     }),
   },
   openai: {
@@ -105,6 +125,27 @@ export function parseKeyConfigsFromEnv(): KeyConfig[] {
       : 5;
 
   const configs: KeyConfig[] = [];
+  const seenIds = new Set<string>();
+  const allocateUniqueId = (rawId: string | undefined, fallbackIdx: number): string => {
+    // Strip commas and whitespace so RESERVE_KEY_LUA comma-delimited excludeKeyIds cannot split key IDs
+    const base =
+      (rawId ?? "")
+        .trim()
+        .replace(/[,\s\x00-\x1f\x7f]+/g, "_") || `openrouter-key-${fallbackIdx}`;
+    let candidate = base;
+    let suffix = 2;
+    while (seenIds.has(candidate)) {
+      candidate = `${base}-${suffix++}`;
+    }
+    seenIds.add(candidate);
+    return candidate;
+  };
+  const sanitizeBearerKey = (raw: unknown): string | null => {
+    if (typeof raw !== "string") return null;
+    const trimmed = raw.trim();
+    if (!trimmed || /[\s\x00-\x1f\x7f]/.test(trimmed)) return null;
+    return trimmed;
+  };
 
   if (rawOpenRouterKeys) {
     if (rawOpenRouterKeys.startsWith("[") && rawOpenRouterKeys.endsWith("]")) {
@@ -112,32 +153,30 @@ export function parseKeyConfigsFromEnv(): KeyConfig[] {
         const parsed = JSON.parse(rawOpenRouterKeys);
         if (Array.isArray(parsed)) {
           parsed.forEach((item, idx) => {
-            if (typeof item === "string" && item.trim()) {
+            const strKey = sanitizeBearerKey(item);
+            if (strKey) {
               configs.push({
-                id: `openrouter-key-${idx + 1}`,
-                apiKey: item.trim(),
+                id: allocateUniqueId(undefined, idx + 1),
+                apiKey: strKey,
                 tier: idx === 0 ? 0 : 1,
                 weight: 10,
                 maxConcurrency: defaultMaxConcurrency,
               });
-            } else if (
-              typeof item === "object" &&
-              item !== null &&
-              typeof item.apiKey === "string" &&
-              item.apiKey.trim()
-            ) {
+            } else if (typeof item === "object" && item !== null) {
+              const objKey = sanitizeBearerKey(item.apiKey);
+              if (!objKey) return;
               const rawTier = Number(item.tier);
               const rawWeight = Number(item.weight);
               const rawMaxConc = Number(item.maxConcurrency);
               configs.push({
-                id:
-                  typeof item.id === "string" && item.id.trim()
-                    ? item.id.trim()
-                    : `openrouter-key-${idx + 1}`,
-                apiKey: item.apiKey.trim(),
+                id: allocateUniqueId(
+                  typeof item.id === "string" ? item.id : undefined,
+                  idx + 1,
+                ),
+                apiKey: objKey,
                 accountId:
                   typeof item.accountId === "string" && item.accountId.trim()
-                    ? item.accountId.trim()
+                    ? item.accountId.trim().replace(/[\x00-\x1f\x7f]+/g, "")
                     : undefined,
                 tier: Number.isFinite(rawTier) && rawTier >= 0 ? Math.floor(rawTier) : (idx === 0 ? 0 : 1),
                 weight: Number.isFinite(rawWeight) && rawWeight >= 1 ? Math.floor(rawWeight) : 10,
@@ -158,10 +197,13 @@ export function parseKeyConfigsFromEnv(): KeyConfig[] {
     }
 
     if (configs.length === 0) {
-      const tokens = rawOpenRouterKeys.split(/[,\n]/).map((s) => s.trim()).filter(Boolean);
+      const tokens = rawOpenRouterKeys
+        .split(/[,\n]/)
+        .map((s) => sanitizeBearerKey(s))
+        .filter((s): s is string => Boolean(s));
       tokens.forEach((key, idx) => {
         configs.push({
-          id: `openrouter-key-${idx + 1}`,
+          id: allocateUniqueId(undefined, idx + 1),
           apiKey: key,
           tier: idx === 0 ? 0 : 1,
           weight: 10,
@@ -173,10 +215,13 @@ export function parseKeyConfigsFromEnv(): KeyConfig[] {
 
   // If OPENROUTER_API_KEYS was omitted but LLM_API_KEY contains commas:
   if (configs.length === 0 && rawSingleKey && rawSingleKey.includes(",")) {
-    const tokens = rawSingleKey.split(",").map((s) => s.trim()).filter(Boolean);
+    const tokens = rawSingleKey
+      .split(",")
+      .map((s) => sanitizeBearerKey(s))
+      .filter((s): s is string => Boolean(s));
     tokens.forEach((key, idx) => {
       configs.push({
-        id: `openrouter-key-${idx + 1}`,
+        id: allocateUniqueId(undefined, idx + 1),
         apiKey: key,
         tier: idx === 0 ? 0 : 1,
         weight: 10,
@@ -222,12 +267,18 @@ export function createRotatingOrConfiguredProvider(): LLMProvider | null {
     // Trigger rotation if multiple keys configured OR OPENROUTER_API_KEYS explicitly provided
     if (configs.length > 1 || (configs.length === 1 && hasExplicitOpenRouterPool)) {
       const defaultModel = process.env.LLM_MODEL?.trim() || "openai/gpt-4o-mini";
-      const referer = process.env.LLM_REFERER ?? "https://tokki.app";
-      const title = process.env.LLM_TITLE ?? "Tokki AI";
+      const referer = sanitizeHttpHeaderValue(
+        process.env.LLM_REFERER,
+        "https://tokki.app",
+      );
+      const title = sanitizeHttpHeaderValue(process.env.LLM_TITLE, "Tokki AI");
       const sig = JSON.stringify([
         process.env.OPENROUTER_API_KEYS ?? "",
         process.env.LLM_API_KEYS ?? "",
         hasExplicitOpenRouterPool ? "" : (process.env.LLM_API_KEY ?? ""),
+        process.env.DEFAULT_KEY_MAX_CONCURRENCY ?? "",
+        process.env.UPSTASH_REDIS_REST_URL?.trim() ?? "",
+        process.env.UPSTASH_REDIS_REST_TOKEN?.trim() ?? "",
         defaultModel,
         referer,
         title,

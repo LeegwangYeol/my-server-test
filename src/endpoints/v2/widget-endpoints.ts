@@ -781,7 +781,7 @@ export const v2WidgetEndpoints = async (app: any) => {
                     "사용자 질문에 답할 때 이 자료를 최우선 근거로 활용하고, " +
                     "자료에 없는 내용은 추측하지 말고 모른다고 답하세요.\n\n" +
                     "─── 참고 자료 ───\n" +
-                    refText.slice(0, 10000) +
+                    refText.slice(0, 20000) +
                     "\n─── 참고 자료 끝 ───",
                 },
               ]
@@ -984,6 +984,7 @@ export const v2WidgetEndpoints = async (app: any) => {
             controller.enqueue(enc.encode(`data: ${safe}\n\n`));
           };
 
+          const MAX_ASSISTANT_RESPONSE_CHARS = 100_000;
           let assistantBuffer = "";
           const stream = new ReadableStream({
             async start(controller) {
@@ -1001,7 +1002,12 @@ export const v2WidgetEndpoints = async (app: any) => {
 
                 for await (const token of tokenStream) {
                   if (abortController.signal.aborted) break;
-                  assistantBuffer += token;
+                  if (assistantBuffer.length < MAX_ASSISTANT_RESPONSE_CHARS) {
+                    const remain =
+                      MAX_ASSISTANT_RESPONSE_CHARS - assistantBuffer.length;
+                    assistantBuffer +=
+                      token.length <= remain ? token : token.slice(0, remain);
+                  }
                   sendChunk(controller, token);
                 }
               } catch (err: any) {
@@ -1106,8 +1112,14 @@ export const v2WidgetEndpoints = async (app: any) => {
             welcome_message: reg?.welcome_message ?? null,
             system_prompt: reg?.system_prompt ?? null,
             suggested_questions: reg?.suggested_questions ?? null,
-            icon_url: reg?.icon_url ?? null,
-            chat_bubble_size: reg?.chat_bubble_size ?? null,
+            icon_url:
+              reg?.icon_url && isValidWidgetIconUrl(reg.icon_url)
+                ? reg.icon_url.trim()
+                : null,
+            chat_bubble_size:
+              reg?.chat_bubble_size && isValidWidgetBubbleSize(reg.chat_bubble_size)
+                ? reg.chat_bubble_size.trim()
+                : null,
             thread_count: act?.thread_count ?? 0,
             latest_updated_at:
               act?.latest_updated_at ??
@@ -1373,7 +1385,7 @@ export const v2WidgetEndpoints = async (app: any) => {
             }
             const { error: trackErr } = await (supabaseClient as any)
               .from("_migration_history")
-              .insert({ name: m.name });
+              .upsert({ name: m.name }, { onConflict: "name" });
             if (trackErr) {
               results.push({
                 name: m.name,

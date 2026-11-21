@@ -108,11 +108,14 @@ export const v2MailEndpoints = async (app: any) => {
           headers["x-idempotency-key"] ||
           ""
         ).trim();
-        if (rawIdempotencyKey.length > 256) {
+        if (rawIdempotencyKey.length > 256 || /[\x00-\x1f\x7f]/.test(rawIdempotencyKey)) {
           set.status = 400;
           return {
             success: false,
-            error: "idempotency-key exceeds maximum length of 256 characters",
+            error:
+              rawIdempotencyKey.length > 256
+                ? "idempotency-key exceeds maximum length of 256 characters"
+                : "invalid idempotency-key (control characters prohibited)",
           };
         }
 
