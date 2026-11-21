@@ -1534,6 +1534,122 @@ describe("Adversarial Security Test Suite (Requirement R2)", () => {
         expect(resFormProto.status).toBe(403);
         expect(({} as any).polluted).toBeUndefined();
       });
+
+      test("2026-11-22 Hardening: preserves 401/403 revoked siblings across 402 account exhaustion & reset, prevents <=0 maxConcurrency / >=999 tier deadlocks, and blocks duplicate-key / HPP / multipart / padded-null 413 & 403 bypasses", async () => {
+        const { MemoryKeyStore } = await import("../lib/llm/key-manager/stores/memory");
+        const { UpstashRedisKeyStore } = await import(
+          "../lib/llm/key-manager/stores/upstash-redis"
+        );
+        const { RELEASE_KEY_LUA, RESERVE_KEY_LUA } = await import(
+          "../lib/llm/key-manager/lua/scripts"
+        );
+
+        // 1. 402 account bulk-invalidation must NOT overwrite 401/403 revoked sibling status or resurrect revoked keys on resetKeyToActive
+        const now = 1_750_000_000_000;
+        const store = new MemoryKeyStore({ clock: () => now });
+        await store.syncKeys([
+          { id: "k-wallet", apiKey: "sk-w", accountId: "acc-mix", tier: 0, weight: 10, maxConcurrency: 5 },
+          { id: "k-revoked", apiKey: "sk-r", accountId: "acc-mix", tier: 0, weight: 10, maxConcurrency: 5 },
+          { id: "k-sib-ok", apiKey: "sk-s", accountId: "acc-mix", tier: 0, weight: 10, maxConcurrency: 5 },
+        ]);
+        // Revoke k-revoked with HTTP 401 first
+        await store.releaseKey("k-revoked", "init-401", 401, Infinity, "Invalid API key");
+        // Now k-wallet hits HTTP 402 (shared account wallet empty)
+        await store.releaseKey("k-wallet", "init-402", 402, Infinity, "Insufficient credits");
+
+        const statesDuring402 = await store.getAllStates();
+        expect(statesDuring402.find((s) => s.id === "k-revoked")?.lastStatusCode).toBe(401);
+        expect(statesDuring402.find((s) => s.id === "k-sib-ok")?.lastStatusCode).toBe(402);
+
+        // Operator tops up account and calls resetKeyToActive("k-wallet"):
+        // k-wallet and k-sib-ok must become ACTIVE, while k-revoked (401) MUST remain EXHAUSTED!
+        await store.resetKeyToActive("k-wallet");
+        const statesAfterTopUp = await store.getAllStates();
+        expect(statesAfterTopUp.find((s) => s.id === "k-wallet")?.status).toBe("ACTIVE");
+        expect(statesAfterTopUp.find((s) => s.id === "k-sib-ok")?.status).toBe("ACTIVE");
+        expect(statesAfterTopUp.find((s) => s.id === "k-revoked")?.status).toBe("EXHAUSTED");
+        expect(statesAfterTopUp.find((s) => s.id === "k-revoked")?.lastStatusCode).toBe(401);
+
+        // Verify Lua & Upstash parity
+        expect(RELEASE_KEY_LUA).toContain("lcode == 401 or lcode == 403");
+        expect(RESERVE_KEY_LUA).toContain("math.huge");
+        const upstashFallback = new MemoryKeyStore({ clock: () => now });
+        const upstashStore = new UpstashRedisKeyStore("http://127.0.0.1:1", "tok", {
+          timeoutMs: 10,
+          breakerDurationMs: 60_000,
+          memoryFallback: upstashFallback,
+        });
+        await upstashStore.syncKeys([
+          { id: "u-wallet", apiKey: "sk-uw", accountId: "acc-u", tier: 0, weight: 10, maxConcurrency: 0 },
+          { id: "u-revoked", apiKey: "sk-ur", accountId: "acc-u", tier: 1500, weight: 0, maxConcurrency: -5 },
+        ]);
+        // Non-positive maxConcurrency (0 / -5) and high backup tier (1500) must NOT deadlock reservation!
+        const r1 = await upstashFallback.reserveKey();
+        expect(r1?.keyId).toBe("u-wallet");
+        const r2 = await upstashFallback.reserveKey(["u-wallet"]);
+        expect(r2?.keyId).toBe("u-revoked");
+        await upstashFallback.releaseKey("u-wallet", r1!.leaseToken, 429, 0, "Zero-cooldown 429 guard");
+        await upstashFallback.releaseKey("u-revoked", r2!.leaseToken, 200, 0);
+        // 429 with cooldown <= 0 enforces >= 1000ms floor so key cannot spin at 0ms
+        const mWallet = await upstashFallback.getKeyMetrics("u-wallet");
+        expect(mWallet.cooldownUntil).toBeGreaterThanOrEqual(now + 1000);
+
+        // 2. Duplicate JSON key token-bomb (`{"message":"<5000>","message":"hi"}` and Unicode-escaped `\u006dessage`) -> HTTP 413
+        const dupMsgBombJson = `{"widgetId":"${VALID_WIDGET_ID}","message":"${"A".repeat(4500)}","message":"hi"}`;
+        const resDupJsonBomb = await postJson(app, "/v2/ask", dupMsgBombJson);
+        expect(resDupJsonBomb.status).toBe(413);
+
+        const dupEscapedBombJson = `{"widgetId":"${VALID_WIDGET_ID}","\\u006dessage":"${"B".repeat(4500)}","message":"hi"}`;
+        const resDupEscapedBomb = await postJson(app, "/v2/ask", dupEscapedBombJson);
+        expect(resDupEscapedBomb.status).toBe(413);
+
+        // 3. Duplicate JSON `widgetId` WAF/proxy smuggling (`{"widgetId":"evil","widgetId":"registered"}`) -> HTTP 403
+        const dupWidSmuggleJson = `{"widgetId":"evil-unreg","widgetId":"${VALID_WIDGET_ID}","message":"hi"}`;
+        const resDupWidAsk = await postJson(app, "/v2/ask", dupWidSmuggleJson);
+        expect(resDupWidAsk.status).toBe(403);
+        const resDupWidThread = await postJson(
+          app,
+          "/v2/widget/create-thread",
+          `{"widgetId":"evil-unreg","widgetId":"${VALID_WIDGET_ID}"}`,
+        );
+        expect(resDupWidThread.status).toBe(403);
+
+        // 4. x-www-form-urlencoded HTTP Parameter Pollution token bomb (`message=<4500>&message=hi`) -> HTTP 413, duplicate widgetId -> HTTP 403
+        const resFormHppBomb = await app.handle(
+          new Request("http://localhost/v2/ask", {
+            method: "POST",
+            headers: { "content-type": "application/x-www-form-urlencoded" },
+            body: `widgetId=${VALID_WIDGET_ID}&message=${"F".repeat(4500)}&message=hi`,
+          }),
+        );
+        expect(resFormHppBomb.status).toBe(413);
+
+        const resFormHppWid = await app.handle(
+          new Request("http://localhost/v2/ask", {
+            method: "POST",
+            headers: { "content-type": "application/x-www-form-urlencoded" },
+            body: `widgetId=evil-unreg&widgetId=${VALID_WIDGET_ID}&message=hi`,
+          }),
+        );
+        expect(resFormHppWid.status).toBe(403);
+
+        // 5. Non-upload multipart/form-data bomb & whitespace-padded JSON `null` bomb -> HTTP 413
+        const resMpAskBomb = await app.handle(
+          new Request("http://localhost/v2/ask", {
+            method: "POST",
+            headers: { "content-type": "multipart/form-data; boundary=---b" },
+            body: "M".repeat(4500),
+          }),
+        );
+        expect(resMpAskBomb.status).toBe(413);
+
+        const resNullPaddedBomb = await postJson(
+          app,
+          "/v2/widget/view",
+          `${" ".repeat(2500)}null`,
+        );
+        expect(resNullPaddedBomb.status).toBe(413);
+      });
     });
   });
 });

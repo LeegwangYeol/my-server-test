@@ -190,7 +190,7 @@ export class RotatingLLMProvider implements LLMProvider {
         streamErrorMessage = errMsg;
       } else if (code === 429) {
         streamStatusCode = 429;
-        streamCooldownMs = 3000;
+        streamCooldownMs = HealthAndCooldownEngine.calculate429Cooldown({}, 1);
         streamErrorMessage = errMsg;
       } else {
         streamStatusCode = code >= 500 || code === 408 ? code : 502;

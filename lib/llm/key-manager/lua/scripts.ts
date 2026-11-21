@@ -45,9 +45,9 @@ if not key_ids or #key_ids == 0 then
 end
 
 local best_key = nil
-local lowest_tier = 999
-local lowest_load_score = 999999999
-local oldest_used = 9999999999999
+local lowest_tier = math.huge
+local lowest_load_score = math.huge
+local oldest_used = math.huge
 
 for _, key_id in ipairs(key_ids) do
     if not excluded[key_id] then
@@ -63,6 +63,8 @@ for _, key_id in ipairs(key_ids) do
         local tier = tonumber(data[2]) or 0
         local cooldown_until = tonumber(data[3]) or 0
         local max_conc = tonumber(data[4]) or default_max_conc
+        if max_conc < 1 then max_conc = default_max_conc end
+        if max_conc < 1 then max_conc = 5 end
         local weight = tonumber(data[5]) or 1
         if weight <= 0 then weight = 1 end
         local last_used = tonumber(data[6]) or 0
@@ -243,20 +245,26 @@ if status == 200 then
 elseif status == 429 then
     -- CRITICAL SAFETY GUARD: NEVER overwrite permanent EXHAUSTED with temporary RATE_LIMITED!
     if current_state ~= 'EXHAUSTED' and current_state ~= 'DISABLED' then
+        local safe_cd = cooldown_ms >= 1000 and cooldown_ms or 1000
         redis.call('HINCRBY', hash, 'consecutive_429s', 1)
         redis.call('HSET', hash, 'state', 'RATE_LIMITED')
-        redis.call('HSET', hash, 'cooldown_until', now + cooldown_ms)
+        redis.call('HSET', hash, 'cooldown_until', now + safe_cd)
         redis.call('HSET', hash, 'last_error_code', 429)
         redis.call('HSET', hash, 'last_error_message', err_msg)
         redis.call('HDEL', hash, 'canary_token')
     end
 
 elseif status == 402 then
-    -- Permanent Account-Wide Financial Exhaustion (shared wallet empty)
-    redis.call('HSET', hash, 'state', 'EXHAUSTED')
-    redis.call('HSET', hash, 'last_error_code', status)
-    redis.call('HSET', hash, 'last_error_message', err_msg)
-    redis.call('HDEL', hash, 'canary_token')
+    -- Permanent Account-Wide Financial Exhaustion (shared wallet empty; preserve DISABLED & 401/403 revocations)
+    if current_state ~= 'DISABLED' then
+        local prev_code = tonumber(redis.call('HGET', hash, 'last_error_code')) or 0
+        if not (current_state == 'EXHAUSTED' and (prev_code == 401 or prev_code == 403)) then
+            redis.call('HSET', hash, 'state', 'EXHAUSTED')
+            redis.call('HSET', hash, 'last_error_code', status)
+            redis.call('HSET', hash, 'last_error_message', err_msg)
+            redis.call('HDEL', hash, 'canary_token')
+        end
+    end
 
     -- Bulk-invalidate all keys sharing the same account in <5ms
     if account_id ~= "" then
@@ -265,10 +273,17 @@ elseif status == 402 then
         if linked_keys then
             for _, linked_id in ipairs(linked_keys) do
                 local lhash = "openrouter:key:" .. linked_id
-                redis.call('HSET', lhash, 'state', 'EXHAUSTED')
-                redis.call('HSET', lhash, 'last_error_code', status)
-                redis.call('HSET', lhash, 'last_error_message', "Account credit balance exhausted")
-                redis.call('HDEL', lhash, 'canary_token')
+                local ldata = redis.call('HMGET', lhash, 'state', 'last_error_code')
+                local lstate = ldata[1] or 'ACTIVE'
+                local lcode = tonumber(ldata[2]) or 0
+                if lstate ~= 'DISABLED' and not (lstate == 'EXHAUSTED' and (lcode == 401 or lcode == 403)) then
+                    redis.call('HSET', lhash, 'state', 'EXHAUSTED')
+                    redis.call('HSET', lhash, 'last_error_code', status)
+                    if linked_id ~= key_id then
+                        redis.call('HSET', lhash, 'last_error_message', "Account credit balance exhausted")
+                    end
+                    redis.call('HDEL', lhash, 'canary_token')
+                end
             end
         end
     end
@@ -276,10 +291,12 @@ elseif status == 402 then
 elseif status == 401 or status == 403 then
     -- Key-Scoped Permanent Failure (revoked key or per-key spending limit):
     -- exhaust ONLY this key without poisoning healthy sibling keys in the same account
-    redis.call('HSET', hash, 'state', 'EXHAUSTED')
-    redis.call('HSET', hash, 'last_error_code', status)
-    redis.call('HSET', hash, 'last_error_message', err_msg)
-    redis.call('HDEL', hash, 'canary_token')
+    if current_state ~= 'DISABLED' then
+        redis.call('HSET', hash, 'state', 'EXHAUSTED')
+        redis.call('HSET', hash, 'last_error_code', status)
+        redis.call('HSET', hash, 'last_error_message', err_msg)
+        redis.call('HDEL', hash, 'canary_token')
+    end
 
 elseif status >= 500 or (status == 0 and cooldown_ms > 0) or status == 408 then
     -- Transient network drop, timeout, or upstream 5xx (never overwrite EXHAUSTED/DISABLED)

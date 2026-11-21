@@ -98,7 +98,11 @@ export function parseKeyConfigsFromEnv(): KeyConfig[] {
   const rawOpenRouterKeys =
     process.env.OPENROUTER_API_KEYS?.trim() || process.env.LLM_API_KEYS?.trim();
   const rawSingleKey = process.env.LLM_API_KEY?.trim();
-  const defaultMaxConcurrency = Number(process.env.DEFAULT_KEY_MAX_CONCURRENCY || 5);
+  const rawDefaultConc = Number(process.env.DEFAULT_KEY_MAX_CONCURRENCY);
+  const defaultMaxConcurrency =
+    Number.isFinite(rawDefaultConc) && rawDefaultConc >= 1
+      ? Math.min(1000, Math.floor(rawDefaultConc))
+      : 5;
 
   const configs: KeyConfig[] = [];
 
@@ -116,16 +120,30 @@ export function parseKeyConfigsFromEnv(): KeyConfig[] {
                 weight: 10,
                 maxConcurrency: defaultMaxConcurrency,
               });
-            } else if (typeof item === "object" && item !== null && item.apiKey) {
+            } else if (
+              typeof item === "object" &&
+              item !== null &&
+              typeof item.apiKey === "string" &&
+              item.apiKey.trim()
+            ) {
+              const rawTier = Number(item.tier);
+              const rawWeight = Number(item.weight);
+              const rawMaxConc = Number(item.maxConcurrency);
               configs.push({
-                id: item.id || `openrouter-key-${idx + 1}`,
-                apiKey: item.apiKey,
-                accountId: item.accountId,
-                tier: typeof item.tier === "number" ? item.tier : (idx === 0 ? 0 : 1),
-                weight: typeof item.weight === "number" ? item.weight : 10,
+                id:
+                  typeof item.id === "string" && item.id.trim()
+                    ? item.id.trim()
+                    : `openrouter-key-${idx + 1}`,
+                apiKey: item.apiKey.trim(),
+                accountId:
+                  typeof item.accountId === "string" && item.accountId.trim()
+                    ? item.accountId.trim()
+                    : undefined,
+                tier: Number.isFinite(rawTier) && rawTier >= 0 ? Math.floor(rawTier) : (idx === 0 ? 0 : 1),
+                weight: Number.isFinite(rawWeight) && rawWeight >= 1 ? Math.floor(rawWeight) : 10,
                 maxConcurrency:
-                  typeof item.maxConcurrency === "number"
-                    ? item.maxConcurrency
+                  Number.isFinite(rawMaxConc) && rawMaxConc >= 1
+                    ? Math.min(1000, Math.floor(rawMaxConc))
                     : defaultMaxConcurrency,
               });
             }

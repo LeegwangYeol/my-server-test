@@ -712946,6 +712946,10 @@ var MemoryKeyStore = class {
       }
       const existing = this.records.get(key.id);
       if (existing) {
+        const prevAccountId = existing.config.accountId;
+        if (prevAccountId && prevAccountId !== key.accountId) {
+          this.accountKeys.get(prevAccountId)?.delete(key.id);
+        }
         existing.config = { ...key };
       } else {
         this.records.set(key.id, {
@@ -712988,9 +712992,9 @@ var MemoryKeyStore = class {
       return null;
     }
     let bestKey = null;
-    let lowestTier = 999;
-    let lowestLoadScore = 999999999;
-    let oldestUsed = 9999999999999;
+    let lowestTier = Infinity;
+    let lowestLoadScore = Infinity;
+    let oldestUsed = Infinity;
     for (const [keyId, record] of this.records.entries()) {
       if (excluded.has(keyId)) continue;
       const accountId = record.config.accountId || "";
@@ -712999,9 +713003,12 @@ var MemoryKeyStore = class {
       if (record.state === "EXHAUSTED" || record.state === "DISABLED") continue;
       const keyLeases2 = this.leases.get(keyId);
       const inFlight = keyLeases2 ? keyLeases2.size : 0;
-      const maxConc = record.config.maxConcurrency || this.defaultMaxConcurrency;
-      const weight = Math.max(1, record.config.weight || 1);
-      const tier = record.config.tier ?? 0;
+      const rawMaxConc = record.config.maxConcurrency;
+      const maxConc = typeof rawMaxConc === "number" && Number.isFinite(rawMaxConc) && rawMaxConc >= 1 ? Math.floor(rawMaxConc) : this.defaultMaxConcurrency;
+      const rawWeight = record.config.weight;
+      const weight = typeof rawWeight === "number" && Number.isFinite(rawWeight) && rawWeight >= 1 ? rawWeight : 1;
+      const rawTier = record.config.tier;
+      const tier = typeof rawTier === "number" && Number.isFinite(rawTier) ? rawTier : 0;
       let eligible = false;
       if (record.state === "ACTIVE") {
         if (inFlight < maxConc) {
@@ -713140,19 +713147,25 @@ var MemoryKeyStore = class {
       }
     } else if (statusCode === 429) {
       if (record.state !== "EXHAUSTED" && record.state !== "DISABLED") {
+        const safeCooldown = typeof cooldown === "number" && Number.isFinite(cooldown) && cooldown >= 1e3 ? cooldown : 1e3;
         record.consecutive429s++;
         record.state = "RATE_LIMITED";
-        record.cooldownUntil = now + cooldown;
+        record.cooldownUntil = now + safeCooldown;
         record.canaryToken = void 0;
         record.lastStatusCode = 429;
         record.lastErrorMessage = errMsg;
       }
     } else if (statusCode === 402) {
-      record.state = "EXHAUSTED";
-      record.cooldownUntil = Infinity;
-      record.canaryToken = void 0;
-      record.lastStatusCode = statusCode;
-      record.lastErrorMessage = errMsg;
+      if (record.state !== "DISABLED") {
+        const alreadyKeyRevoked = record.state === "EXHAUSTED" && (record.lastStatusCode === 401 || record.lastStatusCode === 403);
+        if (!alreadyKeyRevoked) {
+          record.state = "EXHAUSTED";
+          record.cooldownUntil = Infinity;
+          record.canaryToken = void 0;
+          record.lastStatusCode = statusCode;
+          record.lastErrorMessage = errMsg;
+        }
+      }
       const accountId = record.config.accountId;
       if (accountId) {
         this.brokenAccounts.set(accountId, now + 86400 * 1e3);
@@ -713160,22 +713173,28 @@ var MemoryKeyStore = class {
         if (linkedKeys) {
           for (const linkedId of linkedKeys) {
             const linkedRecord = this.records.get(linkedId);
-            if (linkedRecord) {
-              linkedRecord.state = "EXHAUSTED";
-              linkedRecord.cooldownUntil = Infinity;
-              linkedRecord.canaryToken = void 0;
-              linkedRecord.lastStatusCode = statusCode;
+            if (!linkedRecord || linkedRecord.state === "DISABLED") continue;
+            if (linkedRecord.state === "EXHAUSTED" && (linkedRecord.lastStatusCode === 401 || linkedRecord.lastStatusCode === 403)) {
+              continue;
+            }
+            linkedRecord.state = "EXHAUSTED";
+            linkedRecord.cooldownUntil = Infinity;
+            linkedRecord.canaryToken = void 0;
+            linkedRecord.lastStatusCode = statusCode;
+            if (linkedId !== keyId) {
               linkedRecord.lastErrorMessage = "Account credit balance exhausted";
             }
           }
         }
       }
     } else if (statusCode === 401 || statusCode === 403) {
-      record.state = "EXHAUSTED";
-      record.cooldownUntil = Infinity;
-      record.canaryToken = void 0;
-      record.lastStatusCode = statusCode;
-      record.lastErrorMessage = errMsg;
+      if (record.state !== "DISABLED") {
+        record.state = "EXHAUSTED";
+        record.cooldownUntil = Infinity;
+        record.canaryToken = void 0;
+        record.lastStatusCode = statusCode;
+        record.lastErrorMessage = errMsg;
+      }
     } else if (statusCode >= 500 || statusCode === 0 && cooldown > 0 || statusCode === 408) {
       if (record.state !== "EXHAUSTED" && record.state !== "DISABLED") {
         record.consecutiveFailures++;
@@ -713270,7 +713289,7 @@ var MemoryKeyStore = class {
    */
   async resetKeyToActive(keyId) {
     const record = this.records.get(keyId);
-    if (record) {
+    if (record && record.state !== "DISABLED") {
       record.state = "ACTIVE";
       record.cooldownUntil = 0;
       record.consecutiveFailures = 0;
@@ -713448,7 +713467,7 @@ var RotatingLLMProvider = class {
         streamErrorMessage = errMsg;
       } else if (code === 429) {
         streamStatusCode = 429;
-        streamCooldownMs = 3e3;
+        streamCooldownMs = HealthAndCooldownEngine.calculate429Cooldown({}, 1);
         streamErrorMessage = errMsg;
       } else {
         streamStatusCode = code >= 500 || code === 408 ? code : 502;
@@ -713652,9 +713671,9 @@ if not key_ids or #key_ids == 0 then
 end
 
 local best_key = nil
-local lowest_tier = 999
-local lowest_load_score = 999999999
-local oldest_used = 9999999999999
+local lowest_tier = math.huge
+local lowest_load_score = math.huge
+local oldest_used = math.huge
 
 for _, key_id in ipairs(key_ids) do
     if not excluded[key_id] then
@@ -713670,6 +713689,8 @@ for _, key_id in ipairs(key_ids) do
         local tier = tonumber(data[2]) or 0
         local cooldown_until = tonumber(data[3]) or 0
         local max_conc = tonumber(data[4]) or default_max_conc
+        if max_conc < 1 then max_conc = default_max_conc end
+        if max_conc < 1 then max_conc = 5 end
         local weight = tonumber(data[5]) or 1
         if weight <= 0 then weight = 1 end
         local last_used = tonumber(data[6]) or 0
@@ -713826,20 +713847,26 @@ if status == 200 then
 elseif status == 429 then
     -- CRITICAL SAFETY GUARD: NEVER overwrite permanent EXHAUSTED with temporary RATE_LIMITED!
     if current_state ~= 'EXHAUSTED' and current_state ~= 'DISABLED' then
+        local safe_cd = cooldown_ms >= 1000 and cooldown_ms or 1000
         redis.call('HINCRBY', hash, 'consecutive_429s', 1)
         redis.call('HSET', hash, 'state', 'RATE_LIMITED')
-        redis.call('HSET', hash, 'cooldown_until', now + cooldown_ms)
+        redis.call('HSET', hash, 'cooldown_until', now + safe_cd)
         redis.call('HSET', hash, 'last_error_code', 429)
         redis.call('HSET', hash, 'last_error_message', err_msg)
         redis.call('HDEL', hash, 'canary_token')
     end
 
 elseif status == 402 then
-    -- Permanent Account-Wide Financial Exhaustion (shared wallet empty)
-    redis.call('HSET', hash, 'state', 'EXHAUSTED')
-    redis.call('HSET', hash, 'last_error_code', status)
-    redis.call('HSET', hash, 'last_error_message', err_msg)
-    redis.call('HDEL', hash, 'canary_token')
+    -- Permanent Account-Wide Financial Exhaustion (shared wallet empty; preserve DISABLED & 401/403 revocations)
+    if current_state ~= 'DISABLED' then
+        local prev_code = tonumber(redis.call('HGET', hash, 'last_error_code')) or 0
+        if not (current_state == 'EXHAUSTED' and (prev_code == 401 or prev_code == 403)) then
+            redis.call('HSET', hash, 'state', 'EXHAUSTED')
+            redis.call('HSET', hash, 'last_error_code', status)
+            redis.call('HSET', hash, 'last_error_message', err_msg)
+            redis.call('HDEL', hash, 'canary_token')
+        end
+    end
 
     -- Bulk-invalidate all keys sharing the same account in <5ms
     if account_id ~= "" then
@@ -713848,10 +713875,17 @@ elseif status == 402 then
         if linked_keys then
             for _, linked_id in ipairs(linked_keys) do
                 local lhash = "openrouter:key:" .. linked_id
-                redis.call('HSET', lhash, 'state', 'EXHAUSTED')
-                redis.call('HSET', lhash, 'last_error_code', status)
-                redis.call('HSET', lhash, 'last_error_message', "Account credit balance exhausted")
-                redis.call('HDEL', lhash, 'canary_token')
+                local ldata = redis.call('HMGET', lhash, 'state', 'last_error_code')
+                local lstate = ldata[1] or 'ACTIVE'
+                local lcode = tonumber(ldata[2]) or 0
+                if lstate ~= 'DISABLED' and not (lstate == 'EXHAUSTED' and (lcode == 401 or lcode == 403)) then
+                    redis.call('HSET', lhash, 'state', 'EXHAUSTED')
+                    redis.call('HSET', lhash, 'last_error_code', status)
+                    if linked_id ~= key_id then
+                        redis.call('HSET', lhash, 'last_error_message', "Account credit balance exhausted")
+                    end
+                    redis.call('HDEL', lhash, 'canary_token')
+                end
             end
         end
     end
@@ -713859,10 +713893,12 @@ elseif status == 402 then
 elseif status == 401 or status == 403 then
     -- Key-Scoped Permanent Failure (revoked key or per-key spending limit):
     -- exhaust ONLY this key without poisoning healthy sibling keys in the same account
-    redis.call('HSET', hash, 'state', 'EXHAUSTED')
-    redis.call('HSET', hash, 'last_error_code', status)
-    redis.call('HSET', hash, 'last_error_message', err_msg)
-    redis.call('HDEL', hash, 'canary_token')
+    if current_state ~= 'DISABLED' then
+        redis.call('HSET', hash, 'state', 'EXHAUSTED')
+        redis.call('HSET', hash, 'last_error_code', status)
+        redis.call('HSET', hash, 'last_error_message', err_msg)
+        redis.call('HDEL', hash, 'canary_token')
+    end
 
 elseif status >= 500 or (status == 0 and cooldown_ms > 0) or status == 408 then
     -- Transient network drop, timeout, or upstream 5xx (never overwrite EXHAUSTED/DISABLED)
@@ -714116,7 +714152,11 @@ var UpstashRedisKeyStore = class {
    */
   async resetKeyToActive(keyId) {
     const statesBefore = await this.memoryFallback.getAllStates();
-    const accountId = statesBefore.find((s) => s.id === keyId)?.accountId;
+    const targetBefore = statesBefore.find((s) => s.id === keyId);
+    if (targetBefore?.status === "DISABLED") {
+      return;
+    }
+    const accountId = targetBefore?.accountId;
     const sibling402Ids = [];
     this.pendingPermanentExhaustions.delete(keyId);
     if (accountId) {
@@ -714208,6 +714248,9 @@ var UpstashRedisKeyStore = class {
         ]);
         for (const sib of states) {
           if (sib.accountId === st.accountId && sib.id !== keyId) {
+            if (sib.status === "DISABLED" || sib.status === "EXHAUSTED" && (sib.lastStatusCode === 401 || sib.lastStatusCode === 403)) {
+              continue;
+            }
             pipeline.push([
               "HSET",
               `openrouter:key:${sib.id}`,
@@ -714377,7 +714420,8 @@ function getKeyStore() {
 function parseKeyConfigsFromEnv() {
   const rawOpenRouterKeys = process.env.OPENROUTER_API_KEYS?.trim() || process.env.LLM_API_KEYS?.trim();
   const rawSingleKey = process.env.LLM_API_KEY?.trim();
-  const defaultMaxConcurrency = Number(process.env.DEFAULT_KEY_MAX_CONCURRENCY || 5);
+  const rawDefaultConc = Number(process.env.DEFAULT_KEY_MAX_CONCURRENCY);
+  const defaultMaxConcurrency = Number.isFinite(rawDefaultConc) && rawDefaultConc >= 1 ? Math.min(1e3, Math.floor(rawDefaultConc)) : 5;
   const configs = [];
   if (rawOpenRouterKeys) {
     if (rawOpenRouterKeys.startsWith("[") && rawOpenRouterKeys.endsWith("]")) {
@@ -714393,14 +714437,17 @@ function parseKeyConfigsFromEnv() {
                 weight: 10,
                 maxConcurrency: defaultMaxConcurrency
               });
-            } else if (typeof item === "object" && item !== null && item.apiKey) {
+            } else if (typeof item === "object" && item !== null && typeof item.apiKey === "string" && item.apiKey.trim()) {
+              const rawTier = Number(item.tier);
+              const rawWeight = Number(item.weight);
+              const rawMaxConc = Number(item.maxConcurrency);
               configs.push({
-                id: item.id || `openrouter-key-${idx + 1}`,
-                apiKey: item.apiKey,
-                accountId: item.accountId,
-                tier: typeof item.tier === "number" ? item.tier : idx === 0 ? 0 : 1,
-                weight: typeof item.weight === "number" ? item.weight : 10,
-                maxConcurrency: typeof item.maxConcurrency === "number" ? item.maxConcurrency : defaultMaxConcurrency
+                id: typeof item.id === "string" && item.id.trim() ? item.id.trim() : `openrouter-key-${idx + 1}`,
+                apiKey: item.apiKey.trim(),
+                accountId: typeof item.accountId === "string" && item.accountId.trim() ? item.accountId.trim() : void 0,
+                tier: Number.isFinite(rawTier) && rawTier >= 0 ? Math.floor(rawTier) : idx === 0 ? 0 : 1,
+                weight: Number.isFinite(rawWeight) && rawWeight >= 1 ? Math.floor(rawWeight) : 10,
+                maxConcurrency: Number.isFinite(rawMaxConc) && rawMaxConc >= 1 ? Math.min(1e3, Math.floor(rawMaxConc)) : defaultMaxConcurrency
               });
             }
           });
@@ -717972,6 +718019,54 @@ async function readBoundedBodyText(request, maxBytes) {
   if (bytes.byteLength === 0) return "";
   return new TextDecoder("utf-8").decode(bytes);
 }
+function scanDuplicateRootJsonKeys(text) {
+  const seen = /* @__PURE__ */ new Set();
+  const duplicates = /* @__PURE__ */ new Set();
+  let depth = 0;
+  const len = text.length;
+  let i = 0;
+  while (i < len) {
+    const ch = text.charCodeAt(i);
+    if (ch === 34) {
+      const strStart = i;
+      i++;
+      while (i < len) {
+        const c = text.charCodeAt(i);
+        if (c === 92) {
+          i += 2;
+          continue;
+        }
+        if (c === 34) break;
+        i++;
+      }
+      const strEnd = i;
+      i++;
+      if (depth === 1) {
+        let k = i;
+        while (k < len) {
+          const ws = text.charCodeAt(k);
+          if (ws === 32 || ws === 9 || ws === 10 || ws === 13) k++;
+          else break;
+        }
+        if (k < len && text.charCodeAt(k) === 58) {
+          try {
+            const keyName = JSON.parse(text.slice(strStart, strEnd + 1));
+            if (typeof keyName === "string") {
+              if (seen.has(keyName)) duplicates.add(keyName);
+              else seen.add(keyName);
+            }
+          } catch {
+          }
+        }
+      }
+      continue;
+    }
+    if (ch === 123 || ch === 91) depth++;
+    else if (ch === 125 || ch === 93) depth--;
+    i++;
+  }
+  return duplicates;
+}
 var createApp = async (serverless = false) => {
   const app = new Elysia({
     serve: {
@@ -718194,7 +718289,10 @@ var createApp = async (serverless = false) => {
         }).formData();
         const parsed = {};
         fd.forEach((value, key) => {
-          if (key in parsed) {
+          if (key === "__proto__" || key === "constructor" || key === "prototype") {
+            return;
+          }
+          if (Object.prototype.hasOwnProperty.call(parsed, key)) {
             const prev = parsed[key];
             parsed[key] = Array.isArray(prev) ? [...prev, value] : [prev, value];
           } else {
@@ -718203,32 +718301,60 @@ var createApp = async (serverless = false) => {
         });
         return parsed;
       }
-      await readBoundedBodyText(request, MAX_REQUEST_BODY_SIZE);
+      const mpText = await readBoundedBodyText(request, MAX_REQUEST_BODY_SIZE);
+      const normMpPath = normalizePathname(pathname);
+      if (mpText.length > 0 && (normMpPath === "/v2/ask" || normMpPath === "/v2/widget/create-thread" || normMpPath === "/v2/widget/view")) {
+        return mpText;
+      }
       return {};
     }
     if (mediaType === "application/json" || mediaType.endsWith("+json")) {
       const text = await readBoundedBodyText(request, MAX_REQUEST_BODY_SIZE);
       if (!text) return {};
       const parsed = JSON.parse(text);
+      let reqPath = "/";
+      try {
+        reqPath = normalizePathname(
+          new URL(request.url, "http://localhost").pathname
+        );
+      } catch {
+        reqPath = "/";
+      }
+      const isWidgetPublicRoute = reqPath === "/v2/ask" || reqPath === "/v2/widget/create-thread" || reqPath === "/v2/widget/view";
       if (parsed === null) {
+        const nullLimit = reqPath === "/v2/widget/view" ? 2e3 : 4e3;
+        if (isWidgetPublicRoute && text.length > nullLimit) {
+          return text;
+        }
         return {};
       }
       if (typeof parsed !== "object" || Array.isArray(parsed)) {
-        let reqPath = "/";
-        try {
-          reqPath = normalizePathname(
-            new URL(request.url, "http://localhost").pathname
-          );
-        } catch {
-          reqPath = "/";
-        }
-        if (reqPath === "/v2/ask" || reqPath === "/v2/widget/create-thread" || reqPath === "/v2/widget/view") {
+        if (isWidgetPublicRoute) {
           return parsed;
         }
         return {};
       }
       if (Object.prototype.hasOwnProperty.call(parsed, "__proto__")) {
         delete parsed["__proto__"];
+      }
+      if (isWidgetPublicRoute) {
+        const dups = scanDuplicateRootJsonKeys(text);
+        if (dups.size > 0) {
+          const dupCharLimit = reqPath === "/v2/widget/view" ? 2e3 : 4e3;
+          if (text.length > dupCharLimit) {
+            throw new Error("PAYLOAD_TOO_LARGE");
+          }
+          const rec = parsed;
+          if (dups.has("widgetId")) {
+            rec.widgetId = ["__duplicate_widgetId__"];
+          }
+          if (dups.has("message")) {
+            rec.message = ["__duplicate_message__"];
+          }
+          if (dups.has("threadId")) {
+            rec.threadId = ["__duplicate_threadId__"];
+          }
+        }
       }
       return parsed;
     }
@@ -718242,7 +718368,12 @@ var createApp = async (serverless = false) => {
         if (k === "__proto__" || k === "constructor" || k === "prototype") {
           continue;
         }
-        safeObj[k] = v;
+        if (Object.prototype.hasOwnProperty.call(safeObj, k)) {
+          const prev = safeObj[k];
+          safeObj[k] = Array.isArray(prev) ? [...prev, v] : [prev, v];
+        } else {
+          safeObj[k] = v;
+        }
       }
       return safeObj;
     }

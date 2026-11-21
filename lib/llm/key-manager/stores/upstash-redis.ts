@@ -320,7 +320,11 @@ export class UpstashRedisKeyStore implements IKeyStore {
    */
   public async resetKeyToActive(keyId: string): Promise<void> {
     const statesBefore = await this.memoryFallback.getAllStates();
-    const accountId = statesBefore.find((s) => s.id === keyId)?.accountId;
+    const targetBefore = statesBefore.find((s) => s.id === keyId);
+    if (targetBefore?.status === 'DISABLED') {
+      return;
+    }
+    const accountId = targetBefore?.accountId;
     const sibling402Ids: string[] = [];
     this.pendingPermanentExhaustions.delete(keyId);
     if (accountId) {
@@ -428,6 +432,13 @@ export class UpstashRedisKeyStore implements IKeyStore {
         ]);
         for (const sib of states) {
           if (sib.accountId === st.accountId && sib.id !== keyId) {
+            if (
+              sib.status === 'DISABLED' ||
+              (sib.status === 'EXHAUSTED' &&
+                (sib.lastStatusCode === 401 || sib.lastStatusCode === 403))
+            ) {
+              continue;
+            }
             pipeline.push([
               'HSET',
               `openrouter:key:${sib.id}`,

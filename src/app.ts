@@ -120,6 +120,63 @@ async function readBoundedBodyText(
   return new TextDecoder("utf-8").decode(bytes);
 }
 
+/**
+ * Single-pass RFC 8259 scanner detecting duplicate root-level object keys
+ * (including Unicode-escaped variants like `\u006dessage`) after `JSON.parse` succeeds.
+ * Prevents duplicate-key token-bomb overwrites (`{"message":"<50KB>","message":"hi"}`)
+ * and WAF/proxy `widgetId` parameter smuggling (`{"widgetId":"unreg","widgetId":"reg"}`).
+ */
+function scanDuplicateRootJsonKeys(text: string): Set<string> {
+  const seen = new Set<string>();
+  const duplicates = new Set<string>();
+  let depth = 0;
+  const len = text.length;
+  let i = 0;
+
+  while (i < len) {
+    const ch = text.charCodeAt(i);
+    if (ch === 34) {
+      const strStart = i;
+      i++;
+      while (i < len) {
+        const c = text.charCodeAt(i);
+        if (c === 92) {
+          i += 2;
+          continue;
+        }
+        if (c === 34) break;
+        i++;
+      }
+      const strEnd = i;
+      i++;
+      if (depth === 1) {
+        let k = i;
+        while (k < len) {
+          const ws = text.charCodeAt(k);
+          if (ws === 32 || ws === 9 || ws === 10 || ws === 13) k++;
+          else break;
+        }
+        if (k < len && text.charCodeAt(k) === 58) {
+          try {
+            const keyName = JSON.parse(text.slice(strStart, strEnd + 1));
+            if (typeof keyName === "string") {
+              if (seen.has(keyName)) duplicates.add(keyName);
+              else seen.add(keyName);
+            }
+          } catch {
+            /* valid JSON already verified */
+          }
+        }
+      }
+      continue;
+    }
+    if (ch === 123 || ch === 91) depth++;
+    else if (ch === 125 || ch === 93) depth--;
+    i++;
+  }
+  return duplicates;
+}
+
 export const createApp = async (serverless = false) => {
   const app = new Elysia({
     serve: {
@@ -388,7 +445,14 @@ export const createApp = async (serverless = false) => {
           }).formData();
           const parsed: Record<string, unknown> = {};
           fd.forEach((value, key) => {
-            if (key in parsed) {
+            if (
+              key === "__proto__" ||
+              key === "constructor" ||
+              key === "prototype"
+            ) {
+              return;
+            }
+            if (Object.prototype.hasOwnProperty.call(parsed, key)) {
               const prev = parsed[key];
               parsed[key] = Array.isArray(prev) ? [...prev, value] : [prev, value];
             } else {
@@ -398,7 +462,16 @@ export const createApp = async (serverless = false) => {
           return parsed;
         }
         // Non-upload routes must never buffer >1MB multipart streams
-        await readBoundedBodyText(request, MAX_REQUEST_BODY_SIZE);
+        const mpText = await readBoundedBodyText(request, MAX_REQUEST_BODY_SIZE);
+        const normMpPath = normalizePathname(pathname);
+        if (
+          mpText.length > 0 &&
+          (normMpPath === "/v2/ask" ||
+            normMpPath === "/v2/widget/create-thread" ||
+            normMpPath === "/v2/widget/view")
+        ) {
+          return mpText;
+        }
         return {};
       }
 
@@ -406,29 +479,53 @@ export const createApp = async (serverless = false) => {
         const text = await readBoundedBodyText(request, MAX_REQUEST_BODY_SIZE);
         if (!text) return {};
         const parsed = JSON.parse(text);
+        let reqPath = "/";
+        try {
+          reqPath = normalizePathname(
+            new URL(request.url, "http://localhost").pathname,
+          );
+        } catch {
+          reqPath = "/";
+        }
+        const isWidgetPublicRoute =
+          reqPath === "/v2/ask" ||
+          reqPath === "/v2/widget/create-thread" ||
+          reqPath === "/v2/widget/view";
+
         if (parsed === null) {
+          const nullLimit = reqPath === "/v2/widget/view" ? 2000 : 4000;
+          if (isWidgetPublicRoute && text.length > nullLimit) {
+            return text;
+          }
           return {};
         }
         if (typeof parsed !== "object" || Array.isArray(parsed)) {
-          let reqPath = "/";
-          try {
-            reqPath = normalizePathname(
-              new URL(request.url, "http://localhost").pathname,
-            );
-          } catch {
-            reqPath = "/";
-          }
-          if (
-            reqPath === "/v2/ask" ||
-            reqPath === "/v2/widget/create-thread" ||
-            reqPath === "/v2/widget/view"
-          ) {
+          if (isWidgetPublicRoute) {
             return parsed;
           }
           return {};
         }
         if (Object.prototype.hasOwnProperty.call(parsed, "__proto__")) {
           delete (parsed as Record<string, unknown>)["__proto__"];
+        }
+        if (isWidgetPublicRoute) {
+          const dups = scanDuplicateRootJsonKeys(text);
+          if (dups.size > 0) {
+            const dupCharLimit = reqPath === "/v2/widget/view" ? 2000 : 4000;
+            if (text.length > dupCharLimit) {
+              throw new Error("PAYLOAD_TOO_LARGE");
+            }
+            const rec = parsed as Record<string, unknown>;
+            if (dups.has("widgetId")) {
+              rec.widgetId = ["__duplicate_widgetId__"];
+            }
+            if (dups.has("message")) {
+              rec.message = ["__duplicate_message__"];
+            }
+            if (dups.has("threadId")) {
+              rec.threadId = ["__duplicate_threadId__"];
+            }
+          }
         }
         return parsed;
       }
@@ -439,12 +536,17 @@ export const createApp = async (serverless = false) => {
 
       if (mediaType === "application/x-www-form-urlencoded") {
         const text = await readBoundedBodyText(request, MAX_REQUEST_BODY_SIZE);
-        const safeObj: Record<string, string> = {};
+        const safeObj: Record<string, string | string[]> = {};
         for (const [k, v] of new URLSearchParams(text)) {
           if (k === "__proto__" || k === "constructor" || k === "prototype") {
             continue;
           }
-          safeObj[k] = v;
+          if (Object.prototype.hasOwnProperty.call(safeObj, k)) {
+            const prev = safeObj[k];
+            safeObj[k] = Array.isArray(prev) ? [...prev, v] : [prev, v];
+          } else {
+            safeObj[k] = v;
+          }
         }
         return safeObj;
       }

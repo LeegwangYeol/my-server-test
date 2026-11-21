@@ -81,6 +81,10 @@ export class MemoryKeyStore implements IKeyStore {
 
       const existing = this.records.get(key.id);
       if (existing) {
+        const prevAccountId = existing.config.accountId;
+        if (prevAccountId && prevAccountId !== key.accountId) {
+          this.accountKeys.get(prevAccountId)?.delete(key.id);
+        }
         existing.config = { ...key };
       } else {
         this.records.set(key.id, {
@@ -133,9 +137,9 @@ export class MemoryKeyStore implements IKeyStore {
     }
 
     let bestKey: string | null = null;
-    let lowestTier = 999;
-    let lowestLoadScore = 999_999_999;
-    let oldestUsed = 9_999_999_999_999;
+    let lowestTier = Infinity;
+    let lowestLoadScore = Infinity;
+    let oldestUsed = Infinity;
 
     for (const [keyId, record] of this.records.entries()) {
       if (excluded.has(keyId)) continue;
@@ -147,9 +151,18 @@ export class MemoryKeyStore implements IKeyStore {
 
       const keyLeases = this.leases.get(keyId);
       const inFlight = keyLeases ? keyLeases.size : 0;
-      const maxConc = record.config.maxConcurrency || this.defaultMaxConcurrency;
-      const weight = Math.max(1, record.config.weight || 1);
-      const tier = record.config.tier ?? 0;
+      const rawMaxConc = record.config.maxConcurrency;
+      const maxConc =
+        typeof rawMaxConc === 'number' && Number.isFinite(rawMaxConc) && rawMaxConc >= 1
+          ? Math.floor(rawMaxConc)
+          : this.defaultMaxConcurrency;
+      const rawWeight = record.config.weight;
+      const weight =
+        typeof rawWeight === 'number' && Number.isFinite(rawWeight) && rawWeight >= 1
+          ? rawWeight
+          : 1;
+      const rawTier = record.config.tier;
+      const tier = typeof rawTier === 'number' && Number.isFinite(rawTier) ? rawTier : 0;
 
       let eligible = false;
 
@@ -329,22 +342,34 @@ export class MemoryKeyStore implements IKeyStore {
     } else if (statusCode === 429) {
       // CRITICAL SAFETY GUARD: NEVER overwrite permanent EXHAUSTED with temporary RATE_LIMITED!
       if (record.state !== 'EXHAUSTED' && record.state !== 'DISABLED') {
+        const safeCooldown =
+          typeof cooldown === 'number' && Number.isFinite(cooldown) && cooldown >= 1000
+            ? cooldown
+            : 1000;
         record.consecutive429s++;
         record.state = 'RATE_LIMITED';
-        record.cooldownUntil = now + cooldown;
+        record.cooldownUntil = now + safeCooldown;
         record.canaryToken = undefined;
         record.lastStatusCode = 429;
         record.lastErrorMessage = errMsg;
       }
     } else if (statusCode === 402) {
-      // Permanent account-wide financial exhaustion (shared wallet empty)
-      record.state = 'EXHAUSTED';
-      record.cooldownUntil = Infinity;
-      record.canaryToken = undefined;
-      record.lastStatusCode = statusCode;
-      record.lastErrorMessage = errMsg;
+      // Permanent account-wide financial exhaustion (shared wallet empty; never overwrite DISABLED)
+      if (record.state !== 'DISABLED') {
+        const alreadyKeyRevoked =
+          record.state === 'EXHAUSTED' &&
+          (record.lastStatusCode === 401 || record.lastStatusCode === 403);
+        if (!alreadyKeyRevoked) {
+          record.state = 'EXHAUSTED';
+          record.cooldownUntil = Infinity;
+          record.canaryToken = undefined;
+          record.lastStatusCode = statusCode;
+          record.lastErrorMessage = errMsg;
+        }
+      }
 
       // Bulk-invalidate all keys sharing the same account in <5ms
+      // while preserving DISABLED keys and 401/403 key-scoped revocations
       const accountId = record.config.accountId;
       if (accountId) {
         this.brokenAccounts.set(accountId, now + 86400 * 1000);
@@ -352,11 +377,18 @@ export class MemoryKeyStore implements IKeyStore {
         if (linkedKeys) {
           for (const linkedId of linkedKeys) {
             const linkedRecord = this.records.get(linkedId);
-            if (linkedRecord) {
-              linkedRecord.state = 'EXHAUSTED';
-              linkedRecord.cooldownUntil = Infinity;
-              linkedRecord.canaryToken = undefined;
-              linkedRecord.lastStatusCode = statusCode;
+            if (!linkedRecord || linkedRecord.state === 'DISABLED') continue;
+            if (
+              linkedRecord.state === 'EXHAUSTED' &&
+              (linkedRecord.lastStatusCode === 401 || linkedRecord.lastStatusCode === 403)
+            ) {
+              continue;
+            }
+            linkedRecord.state = 'EXHAUSTED';
+            linkedRecord.cooldownUntil = Infinity;
+            linkedRecord.canaryToken = undefined;
+            linkedRecord.lastStatusCode = statusCode;
+            if (linkedId !== keyId) {
               linkedRecord.lastErrorMessage = 'Account credit balance exhausted';
             }
           }
@@ -365,11 +397,13 @@ export class MemoryKeyStore implements IKeyStore {
     } else if (statusCode === 401 || statusCode === 403) {
       // Key-scoped permanent failure (revoked key or per-key spending limit):
       // exhaust ONLY this key without poisoning healthy sibling keys in the same account
-      record.state = 'EXHAUSTED';
-      record.cooldownUntil = Infinity;
-      record.canaryToken = undefined;
-      record.lastStatusCode = statusCode;
-      record.lastErrorMessage = errMsg;
+      if (record.state !== 'DISABLED') {
+        record.state = 'EXHAUSTED';
+        record.cooldownUntil = Infinity;
+        record.canaryToken = undefined;
+        record.lastStatusCode = statusCode;
+        record.lastErrorMessage = errMsg;
+      }
     } else if (statusCode >= 500 || (statusCode === 0 && cooldown > 0) || statusCode === 408) {
       // Transient network drop, timeout, or upstream 5xx (never overwrite EXHAUSTED/DISABLED)
       if (record.state !== 'EXHAUSTED' && record.state !== 'DISABLED') {
@@ -479,7 +513,7 @@ export class MemoryKeyStore implements IKeyStore {
    */
   public async resetKeyToActive(keyId: string): Promise<void> {
     const record = this.records.get(keyId);
-    if (record) {
+    if (record && record.state !== 'DISABLED') {
       record.state = 'ACTIVE';
       record.cooldownUntil = 0;
       record.consecutiveFailures = 0;
