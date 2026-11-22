@@ -102,6 +102,9 @@ export class OpenAICompatibleProvider implements LLMProvider {
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
+    let sawDataFrame = false;
+    let rawNonSseFallback = "";
+    const MAX_RAW_FALLBACK_CHARS = 8_192;
     const MAX_SSE_BUFFER_CHARS = 256_000;
     const effectiveChunkTimeoutMs =
       this.chunkTimeoutMs ?? envInt("LLM_CHUNK_TIMEOUT_MS", 25_000, 50, 55_000);
@@ -152,6 +155,8 @@ export class OpenAICompatibleProvider implements LLMProvider {
           if (buffer.trim()) {
             const tailLine = buffer.trim();
             if (tailLine.startsWith("data:")) {
+              sawDataFrame = true;
+              rawNonSseFallback = "";
               const payload = tailLine.slice(5).trim();
               if (payload === "[DONE]") return;
               let inBandErr: Error | null = null;
@@ -172,7 +177,37 @@ export class OpenAICompatibleProvider implements LLMProvider {
               }
               if (inBandErr) throw inBandErr;
               if (delta) yield delta;
+            } else if (!sawDataFrame && !tailLine.startsWith(":")) {
+              const remain = MAX_RAW_FALLBACK_CHARS - rawNonSseFallback.length;
+              if (remain > 0) {
+                rawNonSseFallback += tailLine.slice(0, remain);
+              }
             }
+          }
+          if (!sawDataFrame && rawNonSseFallback.trim().startsWith("{")) {
+            let rawErr: Error | null = null;
+            let rawContent: string | undefined;
+            try {
+              const rawJson = JSON.parse(rawNonSseFallback.trim());
+              if (rawJson?.error) {
+                const errMsg =
+                  typeof rawJson.error === "string"
+                    ? rawJson.error
+                    : rawJson.error?.message || JSON.stringify(rawJson.error);
+                rawErr = new Error(`[${this.name}] SSE error: ${errMsg}`);
+              } else {
+                const content =
+                  rawJson?.choices?.[0]?.delta?.content ??
+                  rawJson?.choices?.[0]?.message?.content;
+                if (typeof content === "string" && content.length > 0) {
+                  rawContent = content;
+                }
+              }
+            } catch {
+              /* Ignore non-JSON bodies */
+            }
+            if (rawErr) throw rawErr;
+            if (rawContent) yield rawContent;
           }
           break;
         }
@@ -186,7 +221,17 @@ export class OpenAICompatibleProvider implements LLMProvider {
         while ((nl = buffer.indexOf("\n")) !== -1) {
           const line = buffer.slice(0, nl).trim();
           buffer = buffer.slice(nl + 1);
-          if (!line.startsWith("data:")) continue;
+          if (!line.startsWith("data:")) {
+            if (!sawDataFrame && line && !line.startsWith(":")) {
+              const remain = MAX_RAW_FALLBACK_CHARS - rawNonSseFallback.length;
+              if (remain > 0) {
+                rawNonSseFallback += (rawNonSseFallback ? "\n" : "") + line.slice(0, remain);
+              }
+            }
+            continue;
+          }
+          sawDataFrame = true;
+          rawNonSseFallback = "";
           const payload = line.slice(5).trim();
           if (payload === "[DONE]") return;
           let inBandErr: Error | null = null;

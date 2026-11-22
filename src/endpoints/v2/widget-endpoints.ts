@@ -25,7 +25,7 @@ import {
   isValidWidgetBubbleSize,
   isValidWidgetIconUrl,
 } from "../../../lib/url-guard";
-import { dbFallbackQueue } from "../../../lib/queue/fallback-queue";
+import { dbFallbackQueue, is429OrQuotaError } from "../../../lib/queue/fallback-queue";
 
 const MAX_WIDGET_ID_CHARS = 100;
 const VIEW_KNOWN_KEYS = new Set(["widgetId", "threadId"]);
@@ -800,15 +800,24 @@ export const v2WidgetEndpoints = async (app: any) => {
           ? Math.min(4096, Math.max(1, maxTokensRaw))
           : 512;
 
-        // Setup double-wired abort controller
+        // Setup double-wired abort controller with deterministic listener detachment
         const abortController = new AbortController();
+        const onRequestAbort = () => abortController.abort();
+        let requestAbortAttached = false;
+        const detachRequestAbort = () => {
+          if (requestAbortAttached && request?.signal) {
+            request.signal.removeEventListener("abort", onRequestAbort);
+            requestAbortAttached = false;
+          }
+        };
         if (request?.signal) {
           if (request.signal.aborted) {
             abortController.abort();
           } else {
-            request.signal.addEventListener("abort", () => abortController.abort(), {
+            request.signal.addEventListener("abort", onRequestAbort, {
               once: true,
             });
+            requestAbortAttached = true;
           }
         }
 
@@ -834,6 +843,7 @@ export const v2WidgetEndpoints = async (app: any) => {
                   await sleep(40);
                 }
               } finally {
+                detachRequestAbort();
                 if (threadId && fallback.trim()) {
                   try {
                     await appendMessage(threadId, "assistant", fallback);
@@ -854,6 +864,7 @@ export const v2WidgetEndpoints = async (app: any) => {
             cancel(reason) {
               console.log("[v2/ask] Client disconnected (demo mode), cancelling stream:", reason);
               abortController.abort(reason);
+              detachRequestAbort();
             },
           });
           return new Response(stream);
@@ -869,6 +880,7 @@ export const v2WidgetEndpoints = async (app: any) => {
               abortController.signal,
             );
           } catch (err: any) {
+            detachRequestAbort();
             console.warn("[v2/ask] Pre-stream handshake failed:", err?.message);
 
             // 1. Upstream Provider / Model Outage
@@ -1016,6 +1028,7 @@ export const v2WidgetEndpoints = async (app: any) => {
                   sendChunk(controller, `\n[LLM error] ${msg}`);
                 }
               } finally {
+                detachRequestAbort();
                 if (threadId && assistantBuffer.trim()) {
                   try {
                     await appendMessage(threadId, "assistant", assistantBuffer);
@@ -1036,11 +1049,13 @@ export const v2WidgetEndpoints = async (app: any) => {
             cancel(reason) {
               console.log("[v2/ask] Client disconnected, cancelling stream:", reason);
               abortController.abort(reason);
+              detachRequestAbort();
             },
           });
 
           return new Response(stream);
         } catch (setupErr) {
+          detachRequestAbort();
           if (!streamEntered && handshakeResult) {
             handshakeResult.cleanupAttempt?.();
             void handshakeResult.response?.body?.cancel?.().catch(() => {});
@@ -1348,10 +1363,18 @@ export const v2WidgetEndpoints = async (app: any) => {
         if (deny) return deny;
 
         try {
-          // Read history
-          const { data: appliedRows, error: histErr } = await (supabaseClient as any)
-            .from("_migration_history")
-            .select("name");
+          // Read history (with single bounded retry on transient 429)
+          let appliedRows: any = null;
+          let histErr: any = null;
+          for (let attempt = 0; attempt < 2; attempt++) {
+            const res = await (supabaseClient as any)
+              .from("_migration_history")
+              .select("name");
+            appliedRows = res.data;
+            histErr = res.error;
+            if (!histErr || attempt > 0 || !is429OrQuotaError(histErr)) break;
+            await sleep(40 + Math.floor(Math.random() * 80));
+          }
           if (histErr) {
             set.status = 500;
             return {

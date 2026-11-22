@@ -265,30 +265,45 @@ export async function getWidget(id: string): Promise<WidgetRow | null> {
   return fetchPromise;
 }
 
-/** List all live widgets, newest activity first. */
+/** List all live widgets, newest activity first (with single bounded retry on transient 429). */
 export async function listWidgetsRegistered(): Promise<WidgetRow[]> {
-  try {
-    const { data, error } = await supabaseUntyped
-      .from(TABLE)
-      .select("*")
-      .eq("is_deleted", false)
-      .order("updated_at", { ascending: false })
-      .limit(500);
-    if (error) {
-      console.error(
-        "[widget-store] listWidgetsRegistered failed:",
-        error.message,
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const { data, error } = await supabaseUntyped
+        .from(TABLE)
+        .select("*")
+        .eq("is_deleted", false)
+        .order("updated_at", { ascending: false })
+        .limit(500);
+      if (error) {
+        if (attempt === 0 && is429OrQuotaError(error)) {
+          await new Promise((r) =>
+            setTimeout(r, 40 + Math.floor(Math.random() * 80)),
+          );
+          continue;
+        }
+        console.error(
+          "[widget-store] listWidgetsRegistered failed:",
+          error.message,
+        );
+        return [];
+      }
+      return (data ?? []).map(normalizeRow);
+    } catch (err: any) {
+      if (attempt === 0 && is429OrQuotaError(err)) {
+        await new Promise((r) =>
+          setTimeout(r, 40 + Math.floor(Math.random() * 80)),
+        );
+        continue;
+      }
+      console.warn(
+        "[widget-store] listWidgetsRegistered skipped:",
+        err?.message || err,
       );
       return [];
     }
-    return (data ?? []).map(normalizeRow);
-  } catch (err: any) {
-    console.warn(
-      "[widget-store] listWidgetsRegistered skipped:",
-      err?.message || err,
-    );
-    return [];
   }
+  return [];
 }
 
 /**
@@ -453,7 +468,13 @@ export async function upsertWidget(
 /** Soft-delete (sets is_deleted = true). Hard delete is intentionally not exposed. */
 export async function deleteWidget(id: string): Promise<boolean> {
   const trimmed = (id ?? "").trim();
-  if (!trimmed || trimmed.length > MAX_WIDGET_ID_CHARS) return false;
+  if (
+    !trimmed ||
+    trimmed.length > MAX_WIDGET_ID_CHARS ||
+    /[\x00-\x1f\x7f]/.test(trimmed)
+  ) {
+    return false;
+  }
   try {
     const { error } = await supabaseUntyped
       .from(TABLE)

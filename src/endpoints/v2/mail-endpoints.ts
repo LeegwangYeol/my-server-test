@@ -98,7 +98,15 @@ export const v2MailEndpoints = async (app: any) => {
             error: "mail body exceeds maximum length of 500000 characters",
           };
         }
-        if (!body?.text?.trim() && !body?.html?.trim()) {
+        const cleanText =
+          typeof body?.text === "string"
+            ? body.text.replace(/\x00+/g, "")
+            : undefined;
+        const cleanHtml =
+          typeof body?.html === "string"
+            ? body.html.replace(/\x00+/g, "")
+            : undefined;
+        if (!cleanText?.trim() && !cleanHtml?.trim()) {
           set.status = 400;
           return { success: false, error: "text or html required" };
         }
@@ -135,8 +143,8 @@ export const v2MailEndpoints = async (app: any) => {
             {
               to,
               subject,
-              text: body.text,
-              html: body.html,
+              text: cleanText,
+              html: cleanHtml,
               from: body.from,
             },
             { idempotencyKey },

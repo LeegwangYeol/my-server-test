@@ -12,6 +12,7 @@ const channelUploadsCache = new Map<
   string,
   { playlistId: string; expiresAt: number }
 >();
+const inflightUploadsLookups = new Map<string, Promise<string | undefined>>();
 
 function getCachedUploadsPlaylistId(handleKey: string): string | undefined {
   const entry = channelUploadsCache.get(handleKey);
@@ -46,6 +47,7 @@ function setCachedUploadsPlaylistId(handleKey: string, playlistId: string): void
 
 export function clearChannelUploadsCache(): void {
   channelUploadsCache.clear();
+  inflightUploadsLookups.clear();
 }
 
 // 타입 단언을 사용하여 타입 오류 해결
@@ -100,31 +102,44 @@ export const v1VideoList = (app: any) => {
         let uploadsPlaylistId = getCachedUploadsPlaylistId(normalizedHandleKey);
 
         if (!uploadsPlaylistId) {
-          const isHandleFormat = handle.startsWith("@");
-          let channelResponse = await executeYoutubeWithRetry(() =>
-            youtube.channels.list(
-              isHandleFormat
-                ? { part: ["contentDetails"], forHandle: handle }
-                : { part: ["contentDetails"], forUsername: handle },
-            ),
-          );
+          const inflightKey = `${normalizedHandleKey}\0${accessToken}`;
+          let lookupPromise = inflightUploadsLookups.get(inflightKey);
+          if (!lookupPromise) {
+            lookupPromise = (async () => {
+              const isHandleFormat = handle.startsWith("@");
+              let channelResponse = await executeYoutubeWithRetry(() =>
+                youtube.channels.list(
+                  isHandleFormat
+                    ? { part: ["contentDetails"], forHandle: handle }
+                    : { part: ["contentDetails"], forUsername: handle },
+                ),
+              );
 
-          if (!channelResponse.data.items?.length && !isHandleFormat) {
-            channelResponse = await executeYoutubeWithRetry(() =>
-              youtube.channels.list({
-                part: ["contentDetails"],
-                forHandle: `@${handle}`,
-              }),
-            );
+              if (!channelResponse.data.items?.length && !isHandleFormat) {
+                channelResponse = await executeYoutubeWithRetry(() =>
+                  youtube.channels.list({
+                    part: ["contentDetails"],
+                    forHandle: `@${handle}`,
+                  }),
+                );
+              }
+
+              const resolvedId =
+                channelResponse.data.items?.[0]?.contentDetails?.relatedPlaylists
+                  ?.uploads ?? undefined;
+
+              if (resolvedId) {
+                setCachedUploadsPlaylistId(normalizedHandleKey, resolvedId);
+              }
+              return resolvedId;
+            })().finally(() => {
+              if (inflightUploadsLookups.get(inflightKey) === lookupPromise) {
+                inflightUploadsLookups.delete(inflightKey);
+              }
+            });
+            inflightUploadsLookups.set(inflightKey, lookupPromise);
           }
-
-          uploadsPlaylistId =
-            channelResponse.data.items?.[0]?.contentDetails?.relatedPlaylists
-              ?.uploads ?? undefined;
-
-          if (uploadsPlaylistId) {
-            setCachedUploadsPlaylistId(normalizedHandleKey, uploadsPlaylistId);
-          }
+          uploadsPlaylistId = await lookupPromise;
         }
 
         if (!uploadsPlaylistId) {

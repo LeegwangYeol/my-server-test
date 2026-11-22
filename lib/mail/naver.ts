@@ -184,10 +184,18 @@ export async function sendNaverMail(
 
   const transporter = getTransporter();
   const user = resolveCreds().user!;
-  const fromName = process.env.NAVER_MAIL_FROM_NAME?.replace(/[\r\n]+/g, " ").trim();
+  const rawFromName = process.env.NAVER_MAIL_FROM_NAME
+    ?.replace(/[\r\n\x00-\x1f\x7f]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const safeFromName = rawFromName
+    ? /[",;<>@()[\]\\:]/.test(rawFromName)
+      ? `"${rawFromName.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`
+      : rawFromName
+    : "";
   // Naver rejects a From that doesn't match the authenticated account, so we
   // only ever vary the display name — the address stays NAVER_MAIL_USER.
-  const defaultFrom = fromName ? `${fromName} <${user}>` : user;
+  const defaultFrom = safeFromName ? `${safeFromName} <${user}>` : user;
 
   const allowQueue = options?.allowQueue !== false;
   const maxRetries = options?.maxRetries ?? 3;

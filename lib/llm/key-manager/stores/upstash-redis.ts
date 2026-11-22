@@ -45,6 +45,7 @@ export class UpstashRedisKeyStore implements IKeyStore {
   // Storage circuit breaker state
   private redisConsecutiveFailures = 0;
   private storageBreakerOpenUntil = 0;
+  private inflightExhaustionFlush: Promise<void> | null = null;
   /**
    * Permanent 402/401/403 exhaustions observed while Redis was unreachable / breaker-open,
    * flushed back to Redis upon recovery so bankrupt keys are never resurrected.
@@ -94,7 +95,17 @@ export class UpstashRedisKeyStore implements IKeyStore {
    * Idempotent initialization: seeds keys, hashes, and account groups in Redis.
    */
   public async syncKeys(keys: KeyConfig[]): Promise<void> {
+    const prevStates = await this.memoryFallback.getAllStates();
+    const prevAccountByKey = new Map<string, string | undefined>(
+      prevStates.map((s) => [s.id, s.accountId])
+    );
+    const nextIds = new Set(keys.map((k) => k.id));
+
     await this.memoryFallback.syncKeys(keys);
+
+    if (this.isStorageBreakerOpen()) {
+      return;
+    }
 
     try {
       const pipeline: any[] = [['DEL', 'openrouter:keys:list']];
@@ -103,7 +114,17 @@ export class UpstashRedisKeyStore implements IKeyStore {
         pipeline.push(['SADD', 'openrouter:keys:list', ...keyIds]);
       }
 
+      for (const [prevId, prevAcc] of prevAccountByKey.entries()) {
+        if (prevAcc && !nextIds.has(prevId)) {
+          pipeline.push(['SREM', `openrouter:account:${prevAcc}:keys`, prevId]);
+        }
+      }
+
       for (const k of keys) {
+        const prevAcc = prevAccountByKey.get(k.id);
+        if (prevAcc && prevAcc !== k.accountId) {
+          pipeline.push(['SREM', `openrouter:account:${prevAcc}:keys`, k.id]);
+        }
         const hashKey = `openrouter:key:${k.id}`;
         pipeline.push([
           'HSET',
@@ -125,7 +146,9 @@ export class UpstashRedisKeyStore implements IKeyStore {
       }
 
       await this.execPipeline(pipeline);
+      this.recordSuccess();
     } catch (err: any) {
+      this.recordFailure(err);
       console.warn('[KeyStore:Upstash] Redis syncKeys degraded to in-memory:', err?.message || err);
     }
   }
@@ -419,64 +442,89 @@ export class UpstashRedisKeyStore implements IKeyStore {
 
   private async flushPendingExhaustionsToRedis(): Promise<void> {
     if (this.pendingPermanentExhaustions.size === 0) return;
+    if (this.inflightExhaustionFlush) {
+      return this.inflightExhaustionFlush;
+    }
 
-    const states = await this.memoryFallback.getAllStates();
-    const stateMap = new Map(states.map((s) => [s.id, s]));
-    const pipeline: any[][] = [];
+    const runFlush = (async () => {
+      const snapshot = new Map(this.pendingPermanentExhaustions);
+      if (snapshot.size === 0) return;
 
-    for (const [keyId, info] of this.pendingPermanentExhaustions.entries()) {
-      const st = stateMap.get(keyId);
-      if (st && st.status !== 'EXHAUSTED') {
-        continue;
-      }
-      const hashKey = `openrouter:key:${keyId}`;
-      pipeline.push([
-        'HSET',
-        hashKey,
-        'state',
-        'EXHAUSTED',
-        'last_error_code',
-        String(info.statusCode),
-        'last_error_message',
-        info.errMsg,
-      ]);
+      const states = await this.memoryFallback.getAllStates();
+      const stateMap = new Map(states.map((s) => [s.id, s]));
+      const pipeline: any[][] = [];
 
-      if (info.statusCode === 402 && st?.accountId) {
+      for (const [keyId, info] of snapshot.entries()) {
+        const st = stateMap.get(keyId);
+        if (st && st.status !== 'EXHAUSTED') {
+          continue;
+        }
+        const hashKey = `openrouter:key:${keyId}`;
         pipeline.push([
-          'SET',
-          `openrouter:account:${st.accountId}:broken`,
-          '1',
-          'EX',
-          '86400',
+          'HSET',
+          hashKey,
+          'state',
+          'EXHAUSTED',
+          'last_error_code',
+          String(info.statusCode),
+          'last_error_message',
+          info.errMsg,
         ]);
-        for (const sib of states) {
-          if (sib.accountId === st.accountId && sib.id !== keyId) {
-            if (
-              sib.status === 'DISABLED' ||
-              (sib.status === 'EXHAUSTED' &&
-                (sib.lastStatusCode === 401 || sib.lastStatusCode === 403))
-            ) {
-              continue;
+        pipeline.push(['HDEL', hashKey, 'canary_token']);
+
+        if (info.statusCode === 402 && st?.accountId) {
+          pipeline.push([
+            'SET',
+            `openrouter:account:${st.accountId}:broken`,
+            '1',
+            'EX',
+            '86400',
+          ]);
+          for (const sib of states) {
+            if (sib.accountId === st.accountId && sib.id !== keyId) {
+              if (
+                sib.status === 'DISABLED' ||
+                (sib.status === 'EXHAUSTED' &&
+                  (sib.lastStatusCode === 401 || sib.lastStatusCode === 403))
+              ) {
+                continue;
+              }
+              const sibHash = `openrouter:key:${sib.id}`;
+              pipeline.push([
+                'HSET',
+                sibHash,
+                'state',
+                'EXHAUSTED',
+                'last_error_code',
+                '402',
+                'last_error_message',
+                'Account credit balance exhausted',
+              ]);
+              pipeline.push(['HDEL', sibHash, 'canary_token']);
             }
-            pipeline.push([
-              'HSET',
-              `openrouter:key:${sib.id}`,
-              'state',
-              'EXHAUSTED',
-              'last_error_code',
-              '402',
-              'last_error_message',
-              'Account credit balance exhausted',
-            ]);
           }
         }
       }
-    }
 
-    if (pipeline.length > 0) {
-      await this.execPipeline(pipeline);
-    }
-    this.pendingPermanentExhaustions.clear();
+      if (pipeline.length > 0) {
+        await this.execPipeline(pipeline);
+      }
+
+      // Only delete entries whose exact reference was included in this snapshot,
+      // preserving any new permanent revocations/402s queued concurrently mid-flight.
+      for (const [keyId, flushedInfo] of snapshot.entries()) {
+        if (this.pendingPermanentExhaustions.get(keyId) === flushedInfo) {
+          this.pendingPermanentExhaustions.delete(keyId);
+        }
+      }
+    })().finally(() => {
+      if (this.inflightExhaustionFlush === runFlush) {
+        this.inflightExhaustionFlush = null;
+      }
+    });
+
+    this.inflightExhaustionFlush = runFlush;
+    return runFlush;
   }
 
   private isStorageBreakerOpen(): boolean {
@@ -548,6 +596,7 @@ export class UpstashRedisKeyStore implements IKeyStore {
   }
 
   private async execPipeline(commands: any[][]): Promise<any[]> {
+    const pipelineTimeoutMs = Math.min(1000, Math.max(25, this.timeoutMs * 2));
     const res = await fetch(`${this.restUrl}/pipeline`, {
       method: 'POST',
       headers: {
@@ -555,7 +604,7 @@ export class UpstashRedisKeyStore implements IKeyStore {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(commands),
-      signal: AbortSignal.timeout(1000),
+      signal: AbortSignal.timeout(pipelineTimeoutMs),
     });
 
     if (!res.ok) {

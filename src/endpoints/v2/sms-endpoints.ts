@@ -53,7 +53,7 @@ export const v2SmsEndpoints = async (app: any) => {
         // 전화번호는 공백/하이픈을 제거해 전달 (예: "010-1234-5678" → "01012345678").
         const rawTo = (body?.to ?? "").trim();
         const to = rawTo.replace(/[\s-]/g, "");
-        const text = (body?.text ?? "").trim();
+        const text = String(body?.text ?? "").replace(/\x00+/g, "").trim();
 
         if (!rawTo || !to) {
           set.status = 400;

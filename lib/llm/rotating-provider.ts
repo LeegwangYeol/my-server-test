@@ -166,6 +166,9 @@ export class RotatingLLMProvider implements LLMProvider {
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
+    let sawDataFrame = false;
+    let rawNonSseFallback = "";
+    const MAX_RAW_FALLBACK_CHARS = 8_192;
     let streamStatusCode = 200;
     let streamCooldownMs = 0;
     let streamErrorMessage = "";
@@ -269,6 +272,8 @@ export class RotatingLLMProvider implements LLMProvider {
           if (buffer.trim()) {
             const tailLine = buffer.trim();
             if (tailLine.startsWith("data:")) {
+              sawDataFrame = true;
+              rawNonSseFallback = "";
               const payload = tailLine.slice(5).trim();
               if (payload === "[DONE]") return;
               let parsedErr: Error | null = null;
@@ -285,7 +290,33 @@ export class RotatingLLMProvider implements LLMProvider {
               }
               if (parsedErr) throw parsedErr;
               if (token) yield token;
+            } else if (!sawDataFrame && !tailLine.startsWith(":")) {
+              const remain = MAX_RAW_FALLBACK_CHARS - rawNonSseFallback.length;
+              if (remain > 0) {
+                rawNonSseFallback += tailLine.slice(0, remain);
+              }
             }
+          }
+          if (!sawDataFrame && rawNonSseFallback.trim().startsWith("{")) {
+            let rawErr: Error | null = null;
+            let rawToken: string | undefined;
+            try {
+              const rawJson = JSON.parse(rawNonSseFallback.trim());
+              if (rawJson?.error) {
+                rawErr = classifyInBandError(rawJson);
+              } else {
+                const content =
+                  rawJson?.choices?.[0]?.delta?.content ??
+                  rawJson?.choices?.[0]?.message?.content;
+                if (typeof content === "string" && content.length > 0) {
+                  rawToken = content;
+                }
+              }
+            } catch {
+              // Ignore non-JSON bodies
+            }
+            if (rawErr) throw rawErr;
+            if (rawToken) yield rawToken;
           }
           break;
         }
@@ -305,6 +336,8 @@ export class RotatingLLMProvider implements LLMProvider {
           if (!line || line.startsWith(":")) continue;
 
           if (line.startsWith("data:")) {
+            sawDataFrame = true;
+            rawNonSseFallback = "";
             const payload = line.slice(5).trim();
             if (payload === "[DONE]") return;
             let parsedErr: Error | null = null;
@@ -321,6 +354,11 @@ export class RotatingLLMProvider implements LLMProvider {
             }
             if (parsedErr) throw parsedErr;
             if (token) yield token;
+          } else if (!sawDataFrame) {
+            const remain = MAX_RAW_FALLBACK_CHARS - rawNonSseFallback.length;
+            if (remain > 0) {
+              rawNonSseFallback += (rawNonSseFallback ? "\n" : "") + line.slice(0, remain);
+            }
           }
         }
       }

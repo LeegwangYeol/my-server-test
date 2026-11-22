@@ -3378,4 +3378,620 @@ describe("Adversarial Reviewer Verification Suite", () => {
       else process.env.ADMIN_TOKEN = prevAdmin;
     }
   });
+
+  it("VULN-64: OpenAICompatibleProvider classifies HTTP 200 raw non-SSE JSON error & completion bodies instead of emitting empty streams, and /v2/ask detaches request.signal listeners", async () => {
+    const { OpenAICompatibleProvider } = await import(
+      "../lib/llm/openai-compatible"
+    );
+    const origFetch = globalThis.fetch;
+
+    try {
+      let mode: "raw-error" | "raw-completion" = "raw-error";
+      globalThis.fetch = (async (input: any, init?: RequestInit) => {
+        const urlStr = typeof input === "string" ? input : input.url;
+        if (urlStr.includes("mock-llm-64.local")) {
+          if (mode === "raw-error") {
+            return new Response(
+              JSON.stringify({
+                error: { message: "Provider overloaded after headers", code: 503 },
+              }),
+              { status: 200, headers: { "content-type": "application/json" } },
+            );
+          }
+          return new Response(
+            JSON.stringify({
+              choices: [{ message: { content: "Non-SSE completion OK" } }],
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
+        return origFetch(input, init);
+      }) as any;
+
+      const provider = new OpenAICompatibleProvider({
+        name: "test-v64",
+        baseUrl: "https://mock-llm-64.local/v1",
+        apiKey: "sk-v64",
+        defaultModel: "gpt-test",
+      });
+
+      // 1. HTTP 200 raw JSON {"error": ...} throws instead of silently yielding 0 tokens
+      let caughtRawErr: Error | null = null;
+      try {
+        for await (const _ of provider.stream({
+          messages: [{ role: "user", content: "hi" }],
+        })) {
+          /* consume */
+        }
+      } catch (e: any) {
+        caughtRawErr = e;
+      }
+      expect(caughtRawErr).not.toBeNull();
+      expect(caughtRawErr?.message).toContain("Provider overloaded after headers");
+
+      // 2. HTTP 200 raw JSON {"choices":[{"message":{"content":"..."}}]} yields full content
+      mode = "raw-completion";
+      const chunks: string[] = [];
+      for await (const tk of provider.stream({
+        messages: [{ role: "user", content: "hi" }],
+      })) {
+        chunks.push(tk);
+      }
+      expect(chunks).toEqual(["Non-SSE completion OK"]);
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  it("VULN-65: listThreads, listWidgets, listWidgetsRegistered, and /v2/admin/db/migrate recover from transient PostgREST 429s, and deleteWidget rejects control-char IDs with 0 DB calls", async () => {
+    const prevUrl = process.env.SUPABASE_URL;
+    const prevKey = process.env.SUPABASE_SERVICE_KEY;
+    const prevAdmin = process.env.ADMIN_TOKEN;
+    const origFetch = globalThis.fetch;
+    const realChatStore: any = await import("../lib/chat-store?real-v65" as any);
+    const realWidgetStore: any = await import("../lib/widget-store?real-v65" as any);
+    const { dbFallbackQueue } = await import("../lib/queue/fallback-queue");
+
+    try {
+      process.env.SUPABASE_URL = "https://mock-supa-65.local";
+      process.env.SUPABASE_SERVICE_KEY = "mock-key-65";
+      process.env.ADMIN_TOKEN = "test-admin-v65";
+      dbFallbackQueue.clear();
+      realWidgetStore.invalidateWidgetCache();
+
+      let listThreadsCalls = 0;
+      let listThreadMsgsCalls = 0;
+      let listWidgetsCalls = 0;
+      let listRegWidgetsCalls = 0;
+      let migHistCalls = 0;
+      let deleteDbCalls = 0;
+      const fixedIso = "2026-11-23T00:00:00.000Z";
+
+      globalThis.fetch = (async (input: any, init?: RequestInit) => {
+        const u = new URL(typeof input === "string" ? input : input.url);
+        if (u.hostname === "mock-supa-65.local") {
+          if (u.pathname.endsWith("/widget") && init?.method === "PATCH") {
+            deleteDbCalls++;
+            return new Response("[]", { status: 200 });
+          }
+          if (u.pathname.endsWith("/widget") && (!init?.method || init.method === "GET")) {
+            listRegWidgetsCalls++;
+            if (listRegWidgetsCalls === 1) {
+              return new Response(JSON.stringify({ message: "429 rate limit" }), {
+                status: 429,
+                headers: { "content-type": "application/json" },
+              });
+            }
+            return new Response(
+              JSON.stringify([
+                {
+                  id: "wid-65",
+                  name: "Widget 65",
+                  theme: "noir",
+                  description: "ok",
+                  welcome_message: "hi",
+                  system_prompt: null,
+                  suggested_questions: [],
+                  icon_url: null,
+                  chat_bubble_size: null,
+                  is_deleted: false,
+                  created_at: fixedIso,
+                  updated_at: fixedIso,
+                },
+              ]),
+              { status: 200, headers: { "content-type": "application/json" } },
+            );
+          }
+          if (u.pathname.endsWith("/chat_thread")) {
+            if (u.search.includes("select=widget_id")) {
+              listWidgetsCalls++;
+              if (listWidgetsCalls === 1) {
+                return new Response(JSON.stringify({ message: "429 rate limit" }), {
+                  status: 429,
+                  headers: { "content-type": "application/json" },
+                });
+              }
+              return new Response(
+                JSON.stringify([
+                  { widget_id: "   ", updated_at: fixedIso },
+                  { widget_id: "wid-65", updated_at: fixedIso },
+                ]),
+                { status: 200, headers: { "content-type": "application/json" } },
+              );
+            }
+            listThreadsCalls++;
+            if (listThreadsCalls === 1) {
+              return new Response(JSON.stringify({ message: "429 rate limit" }), {
+                status: 429,
+                headers: { "content-type": "application/json" },
+              });
+            }
+            return new Response(
+              JSON.stringify([
+                {
+                  id: "tid-65",
+                  widget_id: "wid-65",
+                  is_deleted: false,
+                  created_at: fixedIso,
+                  updated_at: fixedIso,
+                  title: "Session 65",
+                  system_prompt: null,
+                  context_text: null,
+                },
+              ]),
+              { status: 200, headers: { "content-type": "application/json" } },
+            );
+          }
+          if (u.pathname.endsWith("/chat_message")) {
+            listThreadMsgsCalls++;
+            if (listThreadMsgsCalls === 1) {
+              return new Response(JSON.stringify({ message: "429 rate limit" }), {
+                status: 429,
+                headers: { "content-type": "application/json" },
+              });
+            }
+            return new Response(
+              JSON.stringify([
+                {
+                  thread_id: "tid-65",
+                  role: "user",
+                  content: "Preserved preview after 429",
+                  created_at: fixedIso,
+                },
+              ]),
+              { status: 200, headers: { "content-type": "application/json" } },
+            );
+          }
+          if (u.pathname.endsWith("/_migration_history")) {
+            migHistCalls++;
+            if (migHistCalls === 1) {
+              return new Response(JSON.stringify({ message: "429 rate limit" }), {
+                status: 429,
+                headers: { "content-type": "application/json" },
+              });
+            }
+            return new Response(JSON.stringify([]), {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            });
+          }
+        }
+        return origFetch(input, init);
+      }) as any;
+
+      // 1. deleteWidget rejects control-char IDs locally with 0 DB round trips
+      expect(await realWidgetStore.deleteWidget("bad\u0000id")).toBe(false);
+      expect(await realWidgetStore.deleteWidget("bad\nid")).toBe(false);
+      expect(deleteDbCalls).toBe(0);
+
+      // 2. listWidgetsRegistered & listWidgets recover from transient 429 and skip blank widget_ids
+      const regRows = await realWidgetStore.listWidgetsRegistered();
+      expect(listRegWidgetsCalls).toBe(2);
+      expect(regRows.map((r: any) => r.id)).toEqual(["wid-65"]);
+
+      const actRows = await realChatStore.listWidgets();
+      expect(listWidgetsCalls).toBe(2);
+      expect(actRows.map((r: any) => r.widget_id)).toEqual(["wid-65"]);
+
+      // 3. listThreads recovers from transient 429 on BOTH chat_thread and chat_message queries
+      const threads = await realChatStore.listThreads("wid-65");
+      expect(listThreadsCalls).toBe(2);
+      expect(listThreadMsgsCalls).toBe(2);
+      expect(threads).toHaveLength(1);
+      expect(threads[0].message_count).toBe(1);
+      expect(threads[0].last_user_message).toBe("Preserved preview after 429");
+
+      // 4. /v2/admin/db/migrate dryRun recovers from transient 429 on _migration_history read
+      const app = await createApp(true);
+      const migRes = await app.handle(
+        new Request("http://localhost/v2/admin/db/migrate", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-admin-token": "test-admin-v65",
+          },
+          body: JSON.stringify({ dryRun: true }),
+        }),
+      );
+      expect(migRes.status).toBe(200);
+      expect(migHistCalls).toBe(2);
+    } finally {
+      dbFallbackQueue.clear();
+      realWidgetStore.invalidateWidgetCache();
+      globalThis.fetch = origFetch;
+      if (prevUrl === undefined) delete process.env.SUPABASE_URL;
+      else process.env.SUPABASE_URL = prevUrl;
+      if (prevKey === undefined) delete process.env.SUPABASE_SERVICE_KEY;
+      else process.env.SUPABASE_SERVICE_KEY = prevKey;
+      if (prevAdmin === undefined) delete process.env.ADMIN_TOKEN;
+      else process.env.ADMIN_TOKEN = prevAdmin;
+    }
+  });
+
+  it("VULN-66: /v1/youtube/video/list coalesces concurrent cold-start channels.list lookups per handle+accessToken without cross-caller token contamination", async () => {
+    const { clearChannelUploadsCache } = await import(
+      "../src/endpoints/v1/youtube/video-list"
+    );
+    const { google } = await import("googleapis");
+    const origYoutube = google.youtube;
+
+    try {
+      clearChannelUploadsCache();
+      let channelsListCalls = 0;
+      let playlistItemsCalls = 0;
+
+      (google as any).youtube = ({ auth }: any) => ({
+        channels: {
+          list: async () => {
+            channelsListCalls++;
+            await new Promise((r) => setTimeout(r, 25));
+            const tok = auth?.credentials?.access_token;
+            if (tok === "bad-token") {
+              const err: any = new Error("Invalid Credentials");
+              err.code = 401;
+              throw err;
+            }
+            return {
+              data: {
+                items: [
+                  {
+                    contentDetails: {
+                      relatedPlaylists: { uploads: "UU1no5Q01M2LmT-QLgLlUN0Q" },
+                    },
+                  },
+                ],
+              },
+            };
+          },
+        },
+        playlistItems: {
+          list: async () => {
+            playlistItemsCalls++;
+            return {
+              data: {
+                items: [{ id: "vid-1" }],
+                pageInfo: { totalResults: 1, resultsPerPage: 10 },
+              },
+            };
+          },
+        },
+      });
+
+      const app = await createApp(true);
+
+      // Fire 1 bad-token call and 4 concurrent valid-token calls simultaneously on cold cache
+      const [badRes, ok1, ok2, ok3, ok4] = await Promise.all([
+        app.handle(
+          new Request("http://localhost/v1/youtube/video/list", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ handle: "@lolollol2379", accessToken: "bad-token" }),
+          }),
+        ),
+        ...[1, 2, 3, 4].map(() =>
+          app.handle(
+            new Request("http://localhost/v1/youtube/video/list", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ handle: "@lolollol2379", accessToken: "good-token" }),
+            }),
+          ),
+        ),
+      ]);
+
+      expect(badRes.status).toBe(400);
+      expect([ok1.status, ok2.status, ok3.status, ok4.status]).toEqual([200, 200, 200, 200]);
+      // 4 concurrent good-token calls coalesced into 1 channels.list call (+ 1 for bad-token = 2 total)
+      expect(channelsListCalls).toBe(2);
+      expect(playlistItemsCalls).toBe(4);
+    } finally {
+      google.youtube = origYoutube;
+      clearChannelUploadsCache();
+    }
+  });
+
+  it("VULN-67: /v2/admin/sms/send and /v2/admin/mail/send strip NUL bytes and reject pure-NUL bodies with HTTP 400 (0 outbound calls), and sendNaverMail RFC-5322 quotes special NAVER_MAIL_FROM_NAME", async () => {
+    const nodemailer = (await import("nodemailer")).default;
+    const { sendNaverMail, resetTransporterCache } = await import("../lib/mail/naver");
+    const origCreateTransport = nodemailer.createTransport;
+    const origFetch = globalThis.fetch;
+    const prevAdmin = process.env.ADMIN_TOKEN;
+    const prevMailUser = process.env.NAVER_MAIL_USER;
+    const prevMailPass = process.env.NAVER_MAIL_PASSWORD;
+    const prevFromName = process.env.NAVER_MAIL_FROM_NAME;
+    const prevPbTok = process.env.PUSHBULLET_ACCESS_TOKEN;
+    const prevPbIden = process.env.PUSHBULLET_DEVICE_IDEN;
+    const prevPbUrl = process.env.PUSHBULLET_API_URL;
+    const prevSmsProvider = process.env.SMS_PROVIDER;
+
+    try {
+      process.env.ADMIN_TOKEN = "test-admin-v67";
+      process.env.NAVER_MAIL_USER = "sender@naver.com";
+      process.env.NAVER_MAIL_PASSWORD = "app-password";
+      process.env.NAVER_MAIL_FROM_NAME = 'Tokki, "Admin"\u0000\u0007 <ops>';
+      process.env.SMS_PROVIDER = "pushbullet";
+      process.env.PUSHBULLET_ACCESS_TOKEN = "pb-tok-67";
+      process.env.PUSHBULLET_DEVICE_IDEN = "dev-67";
+      process.env.PUSHBULLET_API_URL = "https://mock-pb-67.local";
+      resetTransporterCache();
+
+      let pbOutboundCalls = 0;
+      let lastPbBody: any = null;
+      globalThis.fetch = (async (input: any, init?: RequestInit) => {
+        const urlStr = typeof input === "string" ? input : input.url;
+        if (urlStr.includes("mock-pb-67.local")) {
+          pbOutboundCalls++;
+          lastPbBody = JSON.parse(String(init?.body ?? "{}"));
+          return new Response(JSON.stringify({ iden: "sms-67" }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return origFetch(input, init);
+      }) as any;
+
+      let smtpCalls = 0;
+      let lastMailOpts: any = null;
+      (nodemailer as any).createTransport = () => ({
+        on: () => {},
+        close: () => {},
+        sendMail: async (opts: any) => {
+          smtpCalls++;
+          lastMailOpts = opts;
+          return { messageId: "m-67", accepted: [opts.to], rejected: [] };
+        },
+      });
+
+      const app = await createApp(true);
+
+      // 1. Pure NUL-byte SMS & Mail bodies fail locally with HTTP 400 and 0 outbound calls
+      const nulSmsRes = await app.handle(
+        new Request("http://localhost/v2/admin/sms/send", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-admin-token": "test-admin-v67",
+          },
+          body: JSON.stringify({ to: "01012345678", text: "\u0000\u0000" }),
+        }),
+      );
+      expect(nulSmsRes.status).toBe(400);
+      expect(pbOutboundCalls).toBe(0);
+
+      const nulMailRes = await app.handle(
+        new Request("http://localhost/v2/admin/mail/send", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-admin-token": "test-admin-v67",
+          },
+          body: JSON.stringify({
+            to: "dest@example.com",
+            subject: "Alert",
+            text: "\u0000  \u0000",
+            html: "\u0000",
+          }),
+        }),
+      );
+      expect(nulMailRes.status).toBe(400);
+      expect(smtpCalls).toBe(0);
+
+      // 2. Mixed NUL bytes are stripped before Pushbullet/SMTP dispatch, and NAVER_MAIL_FROM_NAME is RFC-5322 quoted
+      const cleanSmsRes = await app.handle(
+        new Request("http://localhost/v2/admin/sms/send", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-admin-token": "test-admin-v67",
+          },
+          body: JSON.stringify({ to: "010-1234-5678", text: "안녕\u0000하세요" }),
+        }),
+      );
+      expect(cleanSmsRes.status).toBe(200);
+      expect(lastPbBody?.data?.message).toBe("안녕하세요");
+
+      await sendNaverMail({
+        to: "dest@example.com",
+        subject: "Test",
+        text: "Hello",
+      });
+      expect(smtpCalls).toBe(1);
+      expect(lastMailOpts?.from).toBe('"Tokki, \\"Admin\\" <ops>" <sender@naver.com>');
+    } finally {
+      nodemailer.createTransport = origCreateTransport;
+      resetTransporterCache();
+      globalThis.fetch = origFetch;
+      if (prevAdmin === undefined) delete process.env.ADMIN_TOKEN;
+      else process.env.ADMIN_TOKEN = prevAdmin;
+      if (prevMailUser === undefined) delete process.env.NAVER_MAIL_USER;
+      else process.env.NAVER_MAIL_USER = prevMailUser;
+      if (prevMailPass === undefined) delete process.env.NAVER_MAIL_PASSWORD;
+      else process.env.NAVER_MAIL_PASSWORD = prevMailPass;
+      if (prevFromName === undefined) delete process.env.NAVER_MAIL_FROM_NAME;
+      else process.env.NAVER_MAIL_FROM_NAME = prevFromName;
+      if (prevPbTok === undefined) delete process.env.PUSHBULLET_ACCESS_TOKEN;
+      else process.env.PUSHBULLET_ACCESS_TOKEN = prevPbTok;
+      if (prevPbIden === undefined) delete process.env.PUSHBULLET_DEVICE_IDEN;
+      else process.env.PUSHBULLET_DEVICE_IDEN = prevPbIden;
+      if (prevPbUrl === undefined) delete process.env.PUSHBULLET_API_URL;
+      else process.env.PUSHBULLET_API_URL = prevPbUrl;
+      if (prevSmsProvider === undefined) delete process.env.SMS_PROVIDER;
+      else process.env.SMS_PROVIDER = prevSmsProvider;
+    }
+  });
+
+  it("VULN-68: UpstashRedisKeyStore coalesces concurrent exhaustion flushes without wiping mid-flight 401 revocations, cleans reassigned account sets via SREM, and RotatingLLMProvider penalizes HTTP 200 raw non-SSE JSON 402 errors", async () => {
+    const { UpstashRedisKeyStore } = await import(
+      "../lib/llm/key-manager/stores/upstash-redis"
+    );
+    const { MemoryKeyStore } = await import(
+      "../lib/llm/key-manager/stores/memory"
+    );
+    const { RotatingLLMProvider } = await import("../lib/llm/rotating-provider");
+    const origFetch = globalThis.fetch;
+
+    try {
+      // Part 1: Upstash single-flight flush + mid-flight 401 preservation + syncKeys SREM
+      const fallback = new MemoryKeyStore();
+      const redisStore = new UpstashRedisKeyStore(
+        "https://mock-upstash-68.local",
+        "tok-68",
+        { timeoutMs: 200, breakerDurationMs: 50, memoryFallback: fallback },
+      );
+
+      let redisOnline = true;
+      let pipelinePayloads: any[][][] = [];
+      let flushStage = 0;
+
+      globalThis.fetch = (async (input: any, init?: RequestInit) => {
+        const urlStr = typeof input === "string" ? input : input.url;
+        if (urlStr.includes("mock-upstash-68.local")) {
+          if (!redisOnline) {
+            return new Response("Redis Down", { status: 503 });
+          }
+          if (urlStr.endsWith("/pipeline")) {
+            const cmds = JSON.parse(String(init?.body ?? "[]"));
+            pipelinePayloads.push(cmds);
+            // Simulate concurrent 401 revocation arriving mid-flight during first recovery flush
+            if (flushStage === 1) {
+              flushStage = 2;
+              await new Promise((r) => setTimeout(r, 20));
+            }
+            return new Response(
+              JSON.stringify(cmds.map(() => ({ result: "OK" }))),
+              { status: 200, headers: { "content-type": "application/json" } },
+            );
+          }
+          if (urlStr.endsWith("/eval")) {
+            return new Response(
+              JSON.stringify({ result: ["k-active", "k-active:1:999"] }),
+              { status: 200, headers: { "content-type": "application/json" } },
+            );
+          }
+        }
+        if (urlStr.includes("openrouter.ai/api/v1/chat/completions")) {
+          // HTTP 200 OK headers followed by raw non-SSE JSON 402 error (no `data:` prefix)
+          return new Response(
+            JSON.stringify({
+              error: { message: "Insufficient credits mid-handshake", code: 402 },
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
+        return origFetch(input, init);
+      }) as any;
+
+      await redisStore.syncKeys([
+        { id: "k-402", apiKey: "sk-1", accountId: "acc-old", tier: 0, weight: 10, maxConcurrency: 5 },
+        { id: "k-401-mid", apiKey: "sk-2", accountId: "acc-2", tier: 0, weight: 10, maxConcurrency: 5 },
+        { id: "k-active", apiKey: "sk-3", accountId: "acc-3", tier: 0, weight: 10, maxConcurrency: 5 },
+      ]);
+
+      // Reassign k-402 from acc-old -> acc-new and verify SREM on acc-old
+      pipelinePayloads = [];
+      await redisStore.syncKeys([
+        { id: "k-402", apiKey: "sk-1", accountId: "acc-new", tier: 0, weight: 10, maxConcurrency: 5 },
+        { id: "k-401-mid", apiKey: "sk-2", accountId: "acc-2", tier: 0, weight: 10, maxConcurrency: 5 },
+        { id: "k-active", apiKey: "sk-3", accountId: "acc-3", tier: 0, weight: 10, maxConcurrency: 5 },
+      ]);
+      expect(pipelinePayloads).toHaveLength(1);
+      expect(
+        pipelinePayloads[0].some(
+          (cmd) =>
+            cmd[0] === "SREM" &&
+            cmd[1] === "openrouter:account:acc-old:keys" &&
+            cmd[2] === "k-402",
+        ),
+      ).toBe(true);
+
+      // Simulate Redis outage: k-402 hits 402 while Redis is unreachable
+      redisOnline = false;
+      await redisStore.releaseKey("k-402", "lease-a", 402, Infinity, "Wallet empty");
+
+      // Bring Redis back online; fire 5 concurrent reserveKey() calls AND inject a mid-flight 401 exhaustion
+      redisOnline = true;
+      pipelinePayloads = [];
+      flushStage = 1;
+
+      const reserveBatch = Promise.all([
+        redisStore.reserveKey(),
+        redisStore.reserveKey(),
+        redisStore.reserveKey(),
+        redisStore.reserveKey(),
+        redisStore.reserveKey(),
+      ]);
+      // Queue a new permanent 401 revocation while flush #1 is awaiting /pipeline
+      await new Promise((r) => setTimeout(r, 5));
+      redisOnline = false;
+      await redisStore.releaseKey("k-401-mid", "lease-b", 401, Infinity, "Revoked mid-flush");
+      redisOnline = true;
+      await reserveBatch;
+
+      // All 5 concurrent reserveKey() calls coalesced into a SINGLE flush /pipeline request
+      expect(pipelinePayloads).toHaveLength(1);
+
+      // Next reserveKey() must flush the preserved mid-flight k-401-mid revocation (NOT lost to .clear()!)
+      pipelinePayloads = [];
+      await redisStore.reserveKey();
+      expect(pipelinePayloads).toHaveLength(1);
+      expect(
+        pipelinePayloads[0].some(
+          (cmd) =>
+            cmd[0] === "HSET" &&
+            cmd[1] === "openrouter:key:k-401-mid" &&
+            cmd.includes("401"),
+        ),
+      ).toBe(true);
+
+      // Part 2: RotatingLLMProvider penalizes HTTP 200 raw non-SSE JSON 402 error across shared account
+      const memStore = new MemoryKeyStore();
+      const cfgs = [
+        { id: "rot-a", apiKey: "sk-ra", accountId: "shared-wallet", tier: 0, weight: 10, maxConcurrency: 5 },
+        { id: "rot-b", apiKey: "sk-rb", accountId: "shared-wallet", tier: 0, weight: 10, maxConcurrency: 5 },
+      ];
+      const rotProvider = new RotatingLLMProvider(
+        memStore,
+        new Map(cfgs.map((c) => [c.id, c])),
+      );
+
+      let caughtRotErr: Error | null = null;
+      try {
+        for await (const _ of rotProvider.stream({
+          messages: [{ role: "user", content: "hi" }],
+        })) {
+          /* consume */
+        }
+      } catch (e: any) {
+        caughtRotErr = e;
+      }
+      expect(caughtRotErr).not.toBeNull();
+      expect(caughtRotErr?.message).toContain("UPSTREAM_SSE_ERROR (402)");
+
+      const states = await memStore.getAllStates();
+      expect(states.find((s) => s.id === "rot-a")?.status).toBe("EXHAUSTED");
+      expect(states.find((s) => s.id === "rot-b")?.status).toBe("EXHAUSTED");
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
 });

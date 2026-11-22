@@ -459,42 +459,54 @@ export async function listWidgets(limit = 1000): Promise<WidgetSummary[]> {
     Number.isFinite(limit) && limit > 0
       ? Math.min(Math.floor(limit), 2000)
       : 1000;
-  try {
-    const { data, error } = await supabaseUntyped
-      .from("chat_thread")
-      .select("widget_id, updated_at")
-      .eq("is_deleted", false)
-      .order("updated_at", { ascending: false })
-      .limit(safeLimit);
-    if (error) {
-      console.error("[chat-store] listWidgets failed:", error.message);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const { data, error } = await supabaseUntyped
+        .from("chat_thread")
+        .select("widget_id, updated_at")
+        .eq("is_deleted", false)
+        .order("updated_at", { ascending: false })
+        .limit(safeLimit);
+      if (error) {
+        if (attempt === 0 && is429OrQuotaError(error)) {
+          await jitterSleep429();
+          continue;
+        }
+        console.error("[chat-store] listWidgets failed:", error.message);
+        return [];
+      }
+      const rows = (data as { widget_id: string; updated_at: string }[]) ?? [];
+
+      const byWidget = new Map<string, WidgetSummary>();
+      for (const r of rows) {
+        const key = (r.widget_id ?? "").trim();
+        if (!key) continue;
+        const entry =
+          byWidget.get(key) ??
+          ({
+            widget_id: key,
+            thread_count: 0,
+            latest_updated_at: r.updated_at,
+          } as WidgetSummary);
+        entry.thread_count += 1;
+        if (r.updated_at > entry.latest_updated_at) {
+          entry.latest_updated_at = r.updated_at;
+        }
+        byWidget.set(key, entry);
+      }
+      return Array.from(byWidget.values()).sort((a, b) =>
+        b.latest_updated_at.localeCompare(a.latest_updated_at),
+      );
+    } catch (err: any) {
+      if (attempt === 0 && is429OrQuotaError(err)) {
+        await jitterSleep429();
+        continue;
+      }
+      console.warn("[chat-store] listWidgets skipped:", err?.message || err);
       return [];
     }
-    const rows = (data as { widget_id: string; updated_at: string }[]) ?? [];
-
-    const byWidget = new Map<string, WidgetSummary>();
-    for (const r of rows) {
-      const key = r.widget_id ?? "";
-      const entry =
-        byWidget.get(key) ??
-        ({
-          widget_id: key,
-          thread_count: 0,
-          latest_updated_at: r.updated_at,
-        } as WidgetSummary);
-      entry.thread_count += 1;
-      if (r.updated_at > entry.latest_updated_at) {
-        entry.latest_updated_at = r.updated_at;
-      }
-      byWidget.set(key, entry);
-    }
-    return Array.from(byWidget.values()).sort((a, b) =>
-      b.latest_updated_at.localeCompare(a.latest_updated_at),
-    );
-  } catch (err: any) {
-    console.warn("[chat-store] listWidgets skipped:", err?.message || err);
-    return [];
   }
+  return [];
 }
 
 export interface ThreadSummary {
@@ -531,13 +543,21 @@ export async function listThreads(
   // `title` column migration lands. Once title is everywhere we can
   // tighten this back to an explicit column list.
   try {
-    const { data: threads, error } = await supabaseUntyped
-      .from("chat_thread")
-      .select("*")
-      .eq("widget_id", wid)
-      .eq("is_deleted", false)
-      .order("updated_at", { ascending: false })
-      .limit(safeLimit);
+    let threads: any = null;
+    let error: any = null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const res = await supabaseUntyped
+        .from("chat_thread")
+        .select("*")
+        .eq("widget_id", wid)
+        .eq("is_deleted", false)
+        .order("updated_at", { ascending: false })
+        .limit(safeLimit);
+      threads = res.data;
+      error = res.error;
+      if (!error || attempt > 0 || !is429OrQuotaError(error)) break;
+      await jitterSleep429();
+    }
     if (error) {
       console.error("[chat-store] listThreads failed:", error.message);
       return [];
@@ -545,14 +565,22 @@ export async function listThreads(
     const rows = (threads as ChatThreadRow[]) ?? [];
     if (rows.length === 0) return [];
 
-    // Fetch counts + last user message per thread in a single round trip.
+    // Fetch counts + last user message per thread in a single round trip (with single 429 retry).
     const ids = rows.map((r) => r.id);
-    const { data: msgs, error: msgErr } = await supabaseUntyped
-      .from("chat_message")
-      .select("thread_id, role, content, created_at")
-      .in("thread_id", ids)
-      .order("created_at", { ascending: false })
-      .limit(5000);
+    let msgs: any = null;
+    let msgErr: any = null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const res = await supabaseUntyped
+        .from("chat_message")
+        .select("thread_id, role, content, created_at")
+        .in("thread_id", ids)
+        .order("created_at", { ascending: false })
+        .limit(5000);
+      msgs = res.data;
+      msgErr = res.error;
+      if (!msgErr || attempt > 0 || !is429OrQuotaError(msgErr)) break;
+      await jitterSleep429();
+    }
     if (msgErr) {
       console.error(
         "[chat-store] listThreads messages query failed:",

@@ -713581,6 +713581,9 @@ var RotatingLLMProvider = class {
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
+    let sawDataFrame = false;
+    let rawNonSseFallback = "";
+    const MAX_RAW_FALLBACK_CHARS = 8192;
     let streamStatusCode = 200;
     let streamCooldownMs = 0;
     let streamErrorMessage = "";
@@ -713673,6 +713676,8 @@ var RotatingLLMProvider = class {
           if (buffer.trim()) {
             const tailLine = buffer.trim();
             if (tailLine.startsWith("data:")) {
+              sawDataFrame = true;
+              rawNonSseFallback = "";
               const payload = tailLine.slice(5).trim();
               if (payload === "[DONE]") return;
               let parsedErr = null;
@@ -713688,7 +713693,30 @@ var RotatingLLMProvider = class {
               }
               if (parsedErr) throw parsedErr;
               if (token) yield token;
+            } else if (!sawDataFrame && !tailLine.startsWith(":")) {
+              const remain = MAX_RAW_FALLBACK_CHARS - rawNonSseFallback.length;
+              if (remain > 0) {
+                rawNonSseFallback += tailLine.slice(0, remain);
+              }
             }
+          }
+          if (!sawDataFrame && rawNonSseFallback.trim().startsWith("{")) {
+            let rawErr = null;
+            let rawToken;
+            try {
+              const rawJson = JSON.parse(rawNonSseFallback.trim());
+              if (rawJson?.error) {
+                rawErr = classifyInBandError(rawJson);
+              } else {
+                const content = rawJson?.choices?.[0]?.delta?.content ?? rawJson?.choices?.[0]?.message?.content;
+                if (typeof content === "string" && content.length > 0) {
+                  rawToken = content;
+                }
+              }
+            } catch {
+            }
+            if (rawErr) throw rawErr;
+            if (rawToken) yield rawToken;
           }
           break;
         }
@@ -713705,6 +713733,8 @@ var RotatingLLMProvider = class {
           buffer = buffer.slice(nl + 1);
           if (!line || line.startsWith(":")) continue;
           if (line.startsWith("data:")) {
+            sawDataFrame = true;
+            rawNonSseFallback = "";
             const payload = line.slice(5).trim();
             if (payload === "[DONE]") return;
             let parsedErr = null;
@@ -713720,6 +713750,11 @@ var RotatingLLMProvider = class {
             }
             if (parsedErr) throw parsedErr;
             if (token) yield token;
+          } else if (!sawDataFrame) {
+            const remain = MAX_RAW_FALLBACK_CHARS - rawNonSseFallback.length;
+            if (remain > 0) {
+              rawNonSseFallback += (rawNonSseFallback ? "\n" : "") + line.slice(0, remain);
+            }
           }
         }
       }
@@ -714095,6 +714130,7 @@ var UpstashRedisKeyStore = class {
     // Storage circuit breaker state
     this.redisConsecutiveFailures = 0;
     this.storageBreakerOpenUntil = 0;
+    this.inflightExhaustionFlush = null;
     /**
      * Permanent 402/401/403 exhaustions observed while Redis was unreachable / breaker-open,
      * flushed back to Redis upon recovery so bankrupt keys are never resurrected.
@@ -714122,14 +714158,31 @@ var UpstashRedisKeyStore = class {
    * Idempotent initialization: seeds keys, hashes, and account groups in Redis.
    */
   async syncKeys(keys) {
+    const prevStates = await this.memoryFallback.getAllStates();
+    const prevAccountByKey = new Map(
+      prevStates.map((s) => [s.id, s.accountId])
+    );
+    const nextIds = new Set(keys.map((k) => k.id));
     await this.memoryFallback.syncKeys(keys);
+    if (this.isStorageBreakerOpen()) {
+      return;
+    }
     try {
       const pipeline = [["DEL", "openrouter:keys:list"]];
       const keyIds = keys.map((k) => k.id);
       if (keyIds.length > 0) {
         pipeline.push(["SADD", "openrouter:keys:list", ...keyIds]);
       }
+      for (const [prevId, prevAcc] of prevAccountByKey.entries()) {
+        if (prevAcc && !nextIds.has(prevId)) {
+          pipeline.push(["SREM", `openrouter:account:${prevAcc}:keys`, prevId]);
+        }
+      }
       for (const k of keys) {
+        const prevAcc = prevAccountByKey.get(k.id);
+        if (prevAcc && prevAcc !== k.accountId) {
+          pipeline.push(["SREM", `openrouter:account:${prevAcc}:keys`, k.id]);
+        }
         const hashKey = `openrouter:key:${k.id}`;
         pipeline.push([
           "HSET",
@@ -714150,7 +714203,9 @@ var UpstashRedisKeyStore = class {
         }
       }
       await this.execPipeline(pipeline);
+      this.recordSuccess();
     } catch (err) {
+      this.recordFailure(err);
       console.warn("[KeyStore:Upstash] Redis syncKeys degraded to in-memory:", err?.message || err);
     }
   }
@@ -714384,56 +714439,76 @@ var UpstashRedisKeyStore = class {
   }
   async flushPendingExhaustionsToRedis() {
     if (this.pendingPermanentExhaustions.size === 0) return;
-    const states = await this.memoryFallback.getAllStates();
-    const stateMap = new Map(states.map((s) => [s.id, s]));
-    const pipeline = [];
-    for (const [keyId, info] of this.pendingPermanentExhaustions.entries()) {
-      const st = stateMap.get(keyId);
-      if (st && st.status !== "EXHAUSTED") {
-        continue;
-      }
-      const hashKey = `openrouter:key:${keyId}`;
-      pipeline.push([
-        "HSET",
-        hashKey,
-        "state",
-        "EXHAUSTED",
-        "last_error_code",
-        String(info.statusCode),
-        "last_error_message",
-        info.errMsg
-      ]);
-      if (info.statusCode === 402 && st?.accountId) {
+    if (this.inflightExhaustionFlush) {
+      return this.inflightExhaustionFlush;
+    }
+    const runFlush = (async () => {
+      const snapshot = new Map(this.pendingPermanentExhaustions);
+      if (snapshot.size === 0) return;
+      const states = await this.memoryFallback.getAllStates();
+      const stateMap = new Map(states.map((s) => [s.id, s]));
+      const pipeline = [];
+      for (const [keyId, info] of snapshot.entries()) {
+        const st = stateMap.get(keyId);
+        if (st && st.status !== "EXHAUSTED") {
+          continue;
+        }
+        const hashKey = `openrouter:key:${keyId}`;
         pipeline.push([
-          "SET",
-          `openrouter:account:${st.accountId}:broken`,
-          "1",
-          "EX",
-          "86400"
+          "HSET",
+          hashKey,
+          "state",
+          "EXHAUSTED",
+          "last_error_code",
+          String(info.statusCode),
+          "last_error_message",
+          info.errMsg
         ]);
-        for (const sib of states) {
-          if (sib.accountId === st.accountId && sib.id !== keyId) {
-            if (sib.status === "DISABLED" || sib.status === "EXHAUSTED" && (sib.lastStatusCode === 401 || sib.lastStatusCode === 403)) {
-              continue;
+        pipeline.push(["HDEL", hashKey, "canary_token"]);
+        if (info.statusCode === 402 && st?.accountId) {
+          pipeline.push([
+            "SET",
+            `openrouter:account:${st.accountId}:broken`,
+            "1",
+            "EX",
+            "86400"
+          ]);
+          for (const sib of states) {
+            if (sib.accountId === st.accountId && sib.id !== keyId) {
+              if (sib.status === "DISABLED" || sib.status === "EXHAUSTED" && (sib.lastStatusCode === 401 || sib.lastStatusCode === 403)) {
+                continue;
+              }
+              const sibHash = `openrouter:key:${sib.id}`;
+              pipeline.push([
+                "HSET",
+                sibHash,
+                "state",
+                "EXHAUSTED",
+                "last_error_code",
+                "402",
+                "last_error_message",
+                "Account credit balance exhausted"
+              ]);
+              pipeline.push(["HDEL", sibHash, "canary_token"]);
             }
-            pipeline.push([
-              "HSET",
-              `openrouter:key:${sib.id}`,
-              "state",
-              "EXHAUSTED",
-              "last_error_code",
-              "402",
-              "last_error_message",
-              "Account credit balance exhausted"
-            ]);
           }
         }
       }
-    }
-    if (pipeline.length > 0) {
-      await this.execPipeline(pipeline);
-    }
-    this.pendingPermanentExhaustions.clear();
+      if (pipeline.length > 0) {
+        await this.execPipeline(pipeline);
+      }
+      for (const [keyId, flushedInfo] of snapshot.entries()) {
+        if (this.pendingPermanentExhaustions.get(keyId) === flushedInfo) {
+          this.pendingPermanentExhaustions.delete(keyId);
+        }
+      }
+    })().finally(() => {
+      if (this.inflightExhaustionFlush === runFlush) {
+        this.inflightExhaustionFlush = null;
+      }
+    });
+    this.inflightExhaustionFlush = runFlush;
+    return runFlush;
   }
   isStorageBreakerOpen() {
     return Date.now() < this.storageBreakerOpenUntil;
@@ -714495,6 +714570,7 @@ var UpstashRedisKeyStore = class {
     return data.result;
   }
   async execPipeline(commands) {
+    const pipelineTimeoutMs = Math.min(1e3, Math.max(25, this.timeoutMs * 2));
     const res = await fetch(`${this.restUrl}/pipeline`, {
       method: "POST",
       headers: {
@@ -714502,7 +714578,7 @@ var UpstashRedisKeyStore = class {
         "Content-Type": "application/json"
       },
       body: JSON.stringify(commands),
-      signal: AbortSignal.timeout(1e3)
+      signal: AbortSignal.timeout(pipelineTimeoutMs)
     });
     if (!res.ok) {
       throw new Error(`Upstash HTTP ${res.status}: ${res.statusText}`);
@@ -717276,7 +717352,7 @@ async function sendNaverMail(input, options) {
   }
   const transporter = getTransporter();
   const user = resolveCreds().user;
-  const rawFromName = process.env.NAVER_MAIL_FROM_NAME?.replace(/[\r\n\x00-\x1f\x7f]+/g, " ").trim();
+  const rawFromName = process.env.NAVER_MAIL_FROM_NAME?.replace(/[\r\n\x00-\x1f\x7f]+/g, " ").replace(/\s+/g, " ").trim();
   const safeFromName = rawFromName ? /[",;<>@()[\]\\:]/.test(rawFromName) ? `"${rawFromName.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"` : rawFromName : "";
   const defaultFrom = safeFromName ? `${safeFromName} <${user}>` : user;
   const allowQueue = options?.allowQueue !== false;
