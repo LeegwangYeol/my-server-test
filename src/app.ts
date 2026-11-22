@@ -121,60 +121,128 @@ async function readBoundedBodyText(
 }
 
 /**
- * Single-pass RFC 8259 scanner detecting duplicate root-level object keys
+ * Single-pass RFC 8259 scanner inspecting root-level JSON object properties
  * (including Unicode-escaped variants like `\u006dessage`) after `JSON.parse` succeeds.
- * Prevents duplicate-key token-bomb overwrites (`{"message":"<50KB>","message":"hi"}`)
- * and WAF/proxy `widgetId` parameter smuggling (`{"widgetId":"unreg","widgetId":"reg"}`).
+ * Tracks total root property count and preserves all values for duplicated root keys
+ * so duplicate-key overwrites (`{"browserInfo":"<2500>","browserInfo":"ok"}`,
+ * `{"junk":"<2500>","junk":"1"}`, `{"message":"<50KB>","message":"hi"}`,
+ * `{"widgetId":"unreg","widgetId":"reg"}`) cannot bypass 413/403 guards.
  */
-function scanDuplicateRootJsonKeys(text: string): Set<string> {
-  const seen = new Set<string>();
-  const duplicates = new Set<string>();
-  let depth = 0;
+function inspectRootJsonObject(text: string): {
+  rootPropCount: number;
+  duplicateValues: Map<string, unknown[]>;
+} {
+  const firstSlice = new Map<string, [number, number]>();
+  const duplicateValues = new Map<string, unknown[]>();
+  let rootPropCount = 0;
   const len = text.length;
   let i = 0;
 
-  while (i < len) {
-    const ch = text.charCodeAt(i);
-    if (ch === 34) {
-      const strStart = i;
-      i++;
-      while (i < len) {
-        const c = text.charCodeAt(i);
-        if (c === 92) {
-          i += 2;
-          continue;
-        }
-        if (c === 34) break;
+  const skipWs = () => {
+    while (i < len) {
+      const ws = text.charCodeAt(i);
+      if (ws === 32 || ws === 9 || ws === 10 || ws === 13) i++;
+      else break;
+    }
+  };
+
+  const skipJsonString = () => {
+    i++; // skip opening '"'
+    while (i < len) {
+      const c = text.charCodeAt(i);
+      if (c === 92) {
+        i += 2;
+        continue;
+      }
+      if (c === 34) {
         i++;
+        return;
       }
-      const strEnd = i;
       i++;
-      if (depth === 1) {
-        let k = i;
-        while (k < len) {
-          const ws = text.charCodeAt(k);
-          if (ws === 32 || ws === 9 || ws === 10 || ws === 13) k++;
-          else break;
-        }
-        if (k < len && text.charCodeAt(k) === 58) {
-          try {
-            const keyName = JSON.parse(text.slice(strStart, strEnd + 1));
-            if (typeof keyName === "string") {
-              if (seen.has(keyName)) duplicates.add(keyName);
-              else seen.add(keyName);
-            }
-          } catch {
-            /* valid JSON already verified */
-          }
-        }
-      }
+    }
+  };
+
+  skipWs();
+  if (i >= len || text.charCodeAt(i) !== 123) {
+    return { rootPropCount: 0, duplicateValues };
+  }
+  i++; // enter root '{'
+
+  while (i < len) {
+    skipWs();
+    if (i >= len) break;
+    const ch = text.charCodeAt(i);
+    if (ch === 125) break; // closing root '}'
+    if (ch === 44) {
+      i++;
       continue;
     }
-    if (ch === 123 || ch === 91) depth++;
-    else if (ch === 125 || ch === 93) depth--;
-    i++;
+    if (ch !== 34) break;
+
+    const keyStart = i;
+    skipJsonString();
+    const keyEnd = i;
+    rootPropCount++;
+
+    skipWs();
+    if (i >= len || text.charCodeAt(i) !== 58) break;
+    i++; // skip ':'
+    skipWs();
+
+    const valStart = i;
+    let nested = 0;
+    while (i < len) {
+      const vc = text.charCodeAt(i);
+      if (vc === 34) {
+        skipJsonString();
+        continue;
+      }
+      if (vc === 123 || vc === 91) {
+        nested++;
+        i++;
+        continue;
+      }
+      if (vc === 125 || vc === 93) {
+        if (nested === 0 && vc === 125) break;
+        nested--;
+        i++;
+        continue;
+      }
+      if (nested === 0 && vc === 44) break;
+      i++;
+    }
+    const valEnd = i;
+
+    let keyName: unknown;
+    try {
+      keyName = JSON.parse(text.slice(keyStart, keyEnd));
+    } catch {
+      continue;
+    }
+    if (typeof keyName !== "string") continue;
+
+    const prevSlice = firstSlice.get(keyName);
+    if (!prevSlice) {
+      firstSlice.set(keyName, [valStart, valEnd]);
+    } else {
+      let arr = duplicateValues.get(keyName);
+      if (!arr) {
+        try {
+          arr = [JSON.parse(text.slice(prevSlice[0], prevSlice[1]))];
+        } catch {
+          arr = [null];
+        }
+        duplicateValues.set(keyName, arr);
+      }
+      try {
+        arr.push(JSON.parse(text.slice(valStart, valEnd)));
+      } catch {
+        arr.push(null);
+      }
+    }
   }
-  return duplicates;
+
+  return { rootPropCount, duplicateValues };
 }
 
 export const createApp = async (serverless = false) => {
@@ -509,21 +577,26 @@ export const createApp = async (serverless = false) => {
           delete (parsed as Record<string, unknown>)["__proto__"];
         }
         if (isWidgetPublicRoute) {
-          const dups = scanDuplicateRootJsonKeys(text);
-          if (dups.size > 0) {
+          const { rootPropCount, duplicateValues } = inspectRootJsonObject(text);
+          const maxRootProps = reqPath === "/v2/ask" ? 32 : 12;
+          if (rootPropCount > maxRootProps) {
+            throw new Error("PAYLOAD_TOO_LARGE");
+          }
+          if (duplicateValues.size > 0) {
             const dupCharLimit = reqPath === "/v2/widget/view" ? 2000 : 4000;
             if (text.length > dupCharLimit) {
               throw new Error("PAYLOAD_TOO_LARGE");
             }
             const rec = parsed as Record<string, unknown>;
-            if (dups.has("widgetId")) {
-              rec.widgetId = ["__duplicate_widgetId__"];
-            }
-            if (dups.has("message")) {
-              rec.message = ["__duplicate_message__"];
-            }
-            if (dups.has("threadId")) {
-              rec.threadId = ["__duplicate_threadId__"];
+            for (const [dupKey, vals] of duplicateValues.entries()) {
+              if (
+                dupKey === "__proto__" ||
+                dupKey === "constructor" ||
+                dupKey === "prototype"
+              ) {
+                continue;
+              }
+              rec[dupKey] = vals;
             }
           }
         }
@@ -531,13 +604,33 @@ export const createApp = async (serverless = false) => {
       }
 
       if (mediaType === "text/plain") {
-        return await readBoundedBodyText(request, MAX_REQUEST_BODY_SIZE);
+        const text = await readBoundedBodyText(request, MAX_REQUEST_BODY_SIZE);
+        if (!text) return undefined;
+        return text;
       }
 
       if (mediaType === "application/x-www-form-urlencoded") {
         const text = await readBoundedBodyText(request, MAX_REQUEST_BODY_SIZE);
+        let reqFormPath = "/";
+        try {
+          reqFormPath = normalizePathname(
+            new URL(request.url, "http://localhost").pathname,
+          );
+        } catch {
+          reqFormPath = "/";
+        }
+        const isPublicWidgetForm =
+          reqFormPath === "/v2/ask" ||
+          reqFormPath === "/v2/widget/create-thread" ||
+          reqFormPath === "/v2/widget/view";
+        const maxFormPairs = reqFormPath === "/v2/ask" ? 32 : 12;
+        let pairCount = 0;
         const safeObj: Record<string, string | string[]> = {};
         for (const [k, v] of new URLSearchParams(text)) {
+          pairCount++;
+          if (isPublicWidgetForm && pairCount > maxFormPairs) {
+            throw new Error("PAYLOAD_TOO_LARGE");
+          }
           if (k === "__proto__" || k === "constructor" || k === "prototype") {
             continue;
           }

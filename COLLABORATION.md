@@ -3079,3 +3079,21 @@ This document serves as the shared communication channel between the AI Team (Ge
   6. **Adversarial Regression Coverage (`test/reviewer-adversarial.test.ts`)**: Added `VULN-59`..`VULN-63` verifying all 5 remediations end-to-end.
 - **Status**: **338 / 338 PASS (`bun test`, 2,228 `expect()` assertions across 13 files), Local 34/34 & Remote 34/34 PASS (`morning-audit-runner.ts`), 0 TypeScript errors, `api/index.js` synchronized & committed locally with `[skip ci]`.**
 
+
+---
+
+## 94. Daily Quota-Safe Controlled Load & Adversarial Perimeter Audit (`[세션명: 토키 위젯 일일 부하 테스트]`, 2026-11-23)
+
+- **Session**: `[세션명: 토키 위젯 일일 부하 테스트]` (Single-Agent Focused Mode — Zero External Cloud Quota Burn).
+- **R1 Controlled Concurrency & 429/402 Failover Verification**:
+  - Executed Wave 1 (18 concurrent `/v2/ask` requests via `/usr/bin/curl`: 16 full SSE streams + 2 mid-stream client aborts) + Wave 2 (12 warm steady-state concurrent requests) across a 5-key / 4-account ZSET pool (`acc-bankrupt` 2 sibling keys returning Mock 402, `acc-ratelim-1` & `acc-ratelim-2` returning Mock 429 with delta-seconds & RFC 9110 HTTP-date, `acc-healthy` returning 200 SSE).
+  - Wave 1 completed in **85.91ms** (`p50: 77.21ms`, `p95/max: 83.65ms` vs 60,000ms Vercel limit) with **100% failover** and **0 upstream calls** to sibling bankrupt key `k2-dead-b`; Wave 2 completed in **73.55ms** (`p50: 71.66ms`, `p95/max: 73.19ms`) with **0 upstream calls** to all 4 broken/cooling-down keys and post-wave $\text{ZCARD} \equiv 0$.
+- **R2 Adversarial Perimeter, Key-Store State Machine, Mobile Hook Crash & SSRF Hardening (4 Patches Applied Across Frontend & Backend, 36/36 Live `curl` Vectors PASS)**:
+  1. `my-server-test/lib/llm/key-manager/stores/{memory,upstash-redis}.ts`, `lib/llm/key-manager/lua/scripts.ts`, `lib/llm/{factory,rotating-provider}.ts`: Protected `EXHAUSTED` (`401`/`403`/`402`) and `DISABLED` `lastStatusCode`/`last_error_code` from being clobbered when concurrent already-in-flight leases finish with `499` (client abort) or `0` (provider outage / client 4xx bypass) — preventing both resurrection of revoked `401` keys and permanent lockout of `402` sibling keys upon `resetKeyToActive()`; propagated `DEFAULT_KEY_MAX_CONCURRENCY` into `getKeyStore()` / `UpstashRedisKeyStore` (`RESERVE_KEY_LUA`) and wired live `consecutive429s` into mid-stream SSE `429` backoff.
+  2. `my-server-test/src/app.ts`: Upgraded root JSON duplicate-key scanner to `inspectRootJsonObject()`, enforcing root property count ceilings (`<= 32` on `/v2/ask`, `<= 12` on `/v2/widget/create-thread` & `/v2/widget/view`) and preserving all duplicate root key value arrays so `<4,000`-char duplicate `browserInfo`, Unicode-escaped `\u0073earch`, and extra-field (`junk`) overwrites cannot bypass `>2,000`-char `HTTP 413` guards; added raw form-pair count ceilings (`<= 32` / `<= 12`) in `x-www-form-urlencoded` and empty `text/plain` normalization.
+  3. `tokki-widget/lib/components/ChatWindow.tsx`, `lib/state/chat.tsx`, & `lib/export.tsx`: Eliminated fatal mobile React `"Invalid hook call"` crash caused by `safariTouch` invoking `useEffect()` inside `onTouchStart`, bounded cumulative streaming buffers (`shiftedResponseText + streamResponseText`) at `100,000` chars, and sanitized `setThreadId` / `setWidgetId` / `mount` / `configFromDataset` (`<= 100` chars, control-char free) to prevent `data-thread-id` `HTTP 413` Self-DoS.
+  4. `tokki-widget/lib/utils/get-browser-info.ts` & `lib/components/{FunctionCall,ChatWidget}.tsx`: Expanded `getBrowserInfo()` and `FunctionCall` SSRF/privacy guards to strip private RFC1918 LAN, CGNAT, link-local, ULA, NAT64 (`64:ff9b::/96`), and `.internal`/`.corp`/`.lan` intranet hosts, redacted composite secret query parameters (`openrouter_api_key`, `csrf_token`, `oobCode`, etc.), and guarded SSR/headless `window`/`screen`/`navigator` references in `ChatWidget.tsx`.
+- **R3 Verification**:
+  - `bun test`: **339 / 339 PASS** (`my-server-test`, 2,242 assertions) + **44 / 44 PASS** (`tokki-widget`, 270 assertions) = **383 / 383 PASS (2,512 assertions)**.
+  - Pre-flight builds: `bundle:api` (`api/index.js` 27.0MB, `116ms`), `type-check` (0 errors), `build` (2.65s), `build:embed` (2.03s), `export-playground` (2.41s).
+  - Korean report generated at `stress_test_audit.md` (`v7.1.0-DAILY-KO`). Committed locally with `[skip ci]`.

@@ -421,13 +421,23 @@ export class MemoryKeyStore implements IKeyStore {
         record.lastErrorMessage = errMsg;
       }
     } else if (statusCode === 0 && cooldown === 0) {
-      // Provider outage or zero-cooldown bypass: zero failure penalty
-      record.lastStatusCode = 0;
-      record.lastErrorMessage = errMsg;
+      // Provider outage or zero-cooldown bypass: zero failure penalty (preserve EXHAUSTED/DISABLED)
+      if (record.state === 'WARMUP' && record.canaryToken === leaseToken) {
+        record.canaryToken = undefined;
+      }
+      if (record.state !== 'EXHAUSTED' && record.state !== 'DISABLED') {
+        record.lastStatusCode = 0;
+        record.lastErrorMessage = errMsg;
+      }
     } else if (statusCode === 499) {
-      // Client stream abort: slot already reclaimed, no penalty
-      record.lastStatusCode = 499;
-      record.lastErrorMessage = 'Client stream aborted';
+      // Client stream abort: slot already reclaimed, no penalty (preserve EXHAUSTED/DISABLED)
+      if (record.state === 'WARMUP' && record.canaryToken === leaseToken) {
+        record.canaryToken = undefined;
+      }
+      if (record.state !== 'EXHAUSTED' && record.state !== 'DISABLED') {
+        record.lastStatusCode = 499;
+        record.lastErrorMessage = 'Client stream aborted';
+      }
     }
   }
 

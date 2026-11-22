@@ -21,6 +21,7 @@ import {
 export interface UpstashRedisOptions {
   timeoutMs?: number;
   breakerDurationMs?: number;
+  defaultMaxConcurrency?: number;
   memoryFallback?: MemoryKeyStore;
 }
 
@@ -29,6 +30,7 @@ export interface UpstashRedisConfig {
   restToken: string;
   timeoutMs?: number;
   breakerDurationMs?: number;
+  defaultMaxConcurrency?: number;
   memoryFallback?: MemoryKeyStore;
 }
 
@@ -38,6 +40,7 @@ export class UpstashRedisKeyStore implements IKeyStore {
   private readonly memoryFallback: MemoryKeyStore;
   private readonly timeoutMs: number;
   private readonly breakerDurationMs: number;
+  private readonly defaultMaxConcurrency: number;
 
   // Storage circuit breaker state
   private redisConsecutiveFailures = 0;
@@ -57,15 +60,31 @@ export class UpstashRedisKeyStore implements IKeyStore {
     options?: UpstashRedisOptions
   ) {
     if (typeof urlOrConfig === 'object') {
+      const defConc =
+        typeof urlOrConfig.defaultMaxConcurrency === 'number' &&
+        Number.isFinite(urlOrConfig.defaultMaxConcurrency) &&
+        urlOrConfig.defaultMaxConcurrency >= 1
+          ? Math.floor(urlOrConfig.defaultMaxConcurrency)
+          : 5;
       this.restUrl = urlOrConfig.restUrl.replace(/\/$/, '');
       this.restToken = urlOrConfig.restToken;
-      this.memoryFallback = urlOrConfig.memoryFallback ?? new MemoryKeyStore();
+      this.defaultMaxConcurrency = defConc;
+      this.memoryFallback =
+        urlOrConfig.memoryFallback ?? new MemoryKeyStore({ defaultMaxConcurrency: defConc });
       this.timeoutMs = urlOrConfig.timeoutMs ?? 500;
       this.breakerDurationMs = urlOrConfig.breakerDurationMs ?? 30_000;
     } else {
+      const defConc =
+        typeof options?.defaultMaxConcurrency === 'number' &&
+        Number.isFinite(options.defaultMaxConcurrency) &&
+        options.defaultMaxConcurrency >= 1
+          ? Math.floor(options.defaultMaxConcurrency)
+          : 5;
       this.restUrl = urlOrConfig.replace(/\/$/, '');
       this.restToken = token ?? '';
-      this.memoryFallback = options?.memoryFallback ?? new MemoryKeyStore();
+      this.defaultMaxConcurrency = defConc;
+      this.memoryFallback =
+        options?.memoryFallback ?? new MemoryKeyStore({ defaultMaxConcurrency: defConc });
       this.timeoutMs = options?.timeoutMs ?? 500;
       this.breakerDurationMs = options?.breakerDurationMs ?? 30_000;
     }
@@ -138,7 +157,7 @@ export class UpstashRedisKeyStore implements IKeyStore {
       const result = await this.evalLua(
         RESERVE_KEY_LUA,
         ['openrouter:keys:list'],
-        [5, 45_000, excludeKeyIds.join(','), clientNonce]
+        [this.defaultMaxConcurrency, 45_000, excludeKeyIds.join(','), clientNonce]
       );
 
       this.recordSuccess();

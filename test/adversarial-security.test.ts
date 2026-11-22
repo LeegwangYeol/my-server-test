@@ -1650,6 +1650,99 @@ describe("Adversarial Security Test Suite (Requirement R2)", () => {
         );
         expect(resNullPaddedBomb.status).toBe(413);
       });
+
+      test("2026-11-23 Hardening: protects 401/403/402 EXHAUSTED states from concurrent 499/0 lease clobbering, syncs defaultMaxConcurrency, and blocks <4000-char duplicate-key aux/extra & form-pair 413 bypasses", async () => {
+        const { MemoryKeyStore } = await import("../lib/llm/key-manager/stores/memory");
+        const { UpstashRedisKeyStore } = await import(
+          "../lib/llm/key-manager/stores/upstash-redis"
+        );
+        const { RELEASE_KEY_LUA } = await import(
+          "../lib/llm/key-manager/lua/scripts"
+        );
+
+        // 1. Concurrent in-flight 499 (abort) or 0 (outage/client bypass) MUST NOT clobber EXHAUSTED 401/402 lastStatusCode
+        const now = 1_760_000_000_000;
+        const store = new MemoryKeyStore({ clock: () => now, defaultMaxConcurrency: 8 });
+        await store.syncKeys([
+          { id: "k1-rev", apiKey: "sk-1", accountId: "acc-shared", tier: 0, weight: 10, maxConcurrency: 5 },
+          { id: "k2-wal", apiKey: "sk-2", accountId: "acc-shared", tier: 0, weight: 10, maxConcurrency: 5 },
+          { id: "k3-sib", apiKey: "sk-3", accountId: "acc-shared", tier: 0, weight: 10, maxConcurrency: 5 },
+        ]);
+        const leaseA = await store.reserveKey(["k2-wal", "k3-sib"]);
+        const leaseB = await store.reserveKey(["k2-wal", "k3-sib"]);
+        const leaseC = await store.reserveKey(["k2-wal", "k3-sib"]);
+        // leaseA hits 401 (key permanently revoked)
+        await store.releaseKey("k1-rev", leaseA!.leaseToken, 401, Infinity, "Key revoked");
+        // Concurrent in-flight leaseB aborts (499) and leaseC hits client/outage bypass (0, 0)
+        await store.releaseKey("k1-rev", leaseB!.leaseToken, 499, 0, "Client aborted");
+        await store.releaseKey("k1-rev", leaseC!.leaseToken, 0, 0, "Provider outage");
+        // Now k2-wal hits 402 (shared account wallet empty) while k3-sib also has an in-flight abort
+        const leaseWal = await store.reserveKey(["k3-sib"]);
+        const leaseSibAbort = await store.reserveKey(["k2-wal"]);
+        await store.releaseKey("k2-wal", leaseWal!.leaseToken, 402, Infinity, "Credits depleted");
+        await store.releaseKey("k3-sib", leaseSibAbort!.leaseToken, 499, 0, "Client aborted");
+
+        const duringExhaustion = await store.getAllStates();
+        expect(duringExhaustion.find((s) => s.id === "k1-rev")?.lastStatusCode).toBe(401);
+        expect(duringExhaustion.find((s) => s.id === "k2-wal")?.lastStatusCode).toBe(402);
+        expect(duringExhaustion.find((s) => s.id === "k3-sib")?.lastStatusCode).toBe(402);
+
+        // Operator tops up wallet via resetKeyToActive("k2-wal"):
+        // k2-wal AND k3-sib (402) recover to ACTIVE, while k1-rev (401) MUST stay EXHAUSTED!
+        await store.resetKeyToActive("k2-wal");
+        const afterReset = await store.getAllStates();
+        expect(afterReset.find((s) => s.id === "k2-wal")?.status).toBe("ACTIVE");
+        expect(afterReset.find((s) => s.id === "k3-sib")?.status).toBe("ACTIVE");
+        expect(afterReset.find((s) => s.id === "k1-rev")?.status).toBe("EXHAUSTED");
+        expect(afterReset.find((s) => s.id === "k1-rev")?.lastStatusCode).toBe(401);
+
+        // Verify Redis Lua script parity and Upstash defaultMaxConcurrency propagation
+        expect(RELEASE_KEY_LUA).toContain(
+          "elseif status == 499 then\n    -- Client stream abort: slot already reclaimed by ZREM, no error penalty applied (preserve EXHAUSTED/DISABLED)",
+        );
+        const upstashStore = new UpstashRedisKeyStore("http://127.0.0.1:1", "tok", {
+          timeoutMs: 10,
+          defaultMaxConcurrency: 7,
+        });
+        expect((upstashStore as any).defaultMaxConcurrency).toBe(7);
+
+        // 2. Duplicate JSON auxiliary keys (<4,000 total chars) on /v2/ask (`browserInfo` / `search`) -> HTTP 413 (NOT overwritten by trailing short value)
+        const dupBrowserInfoJson = `{"widgetId":"${VALID_WIDGET_ID}","message":"hi","browserInfo":"${"B".repeat(2500)}","browserInfo":"ok"}`;
+        const resDupBrowser = await postJson(app, "/v2/ask", dupBrowserInfoJson);
+        expect(resDupBrowser.status).toBe(413);
+
+        const dupSearchJson = `{"widgetId":"${VALID_WIDGET_ID}","message":"hi","\\u0073earch":"${"S".repeat(2500)}","search":"ok"}`;
+        const resDupSearch = await postJson(app, "/v2/ask", dupSearchJson);
+        expect(resDupSearch.status).toBe(413);
+
+        // 3. Duplicate JSON unknown extra field (<4,000 total chars) on /v2/widget/create-thread & /v2/widget/view -> HTTP 413
+        const dupCreateJunk = `{"widgetId":"${VALID_WIDGET_ID}","junk":"${"J".repeat(2500)}","junk":"1"}`;
+        const resDupCreateJunk = await postJson(
+          app,
+          "/v2/widget/create-thread",
+          dupCreateJunk,
+        );
+        expect(resDupCreateJunk.status).toBe(413);
+
+        // 4. Duplicate root JSON property flooding (>32 repeated identical keys on /v2/ask) & form pair flooding (>32 pairs) -> HTTP 413
+        const repeatedJsonProps = Array.from({ length: 35 }, () => `"dup":1`).join(",");
+        const resJsonPropFlood = await postJson(
+          app,
+          "/v2/ask",
+          `{"widgetId":"${VALID_WIDGET_ID}","message":"hi",${repeatedJsonProps}}`,
+        );
+        expect(resJsonPropFlood.status).toBe(413);
+
+        const repeatedFormPairs = Array.from({ length: 35 }, () => "dup=1").join("&");
+        const resFormPairFlood = await app.handle(
+          new Request("http://localhost/v2/ask", {
+            method: "POST",
+            headers: { "content-type": "application/x-www-form-urlencoded" },
+            body: `widgetId=${VALID_WIDGET_ID}&message=hi&${repeatedFormPairs}`,
+          }),
+        );
+        expect(resFormPairFlood.status).toBe(413);
+      });
     });
   });
 });

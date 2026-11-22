@@ -314,14 +314,24 @@ elseif status >= 500 or (status == 0 and cooldown_ms > 0) or status == 408 then
     end
 
 elseif status == 0 and cooldown_ms == 0 then
-    -- Provider outage or zero-cooldown bypass: zero failure penalty
-    redis.call('HSET', hash, 'last_error_code', 0)
-    redis.call('HSET', hash, 'last_error_message', err_msg)
+    -- Provider outage or zero-cooldown bypass: zero failure penalty (preserve EXHAUSTED/DISABLED)
+    if current_state == 'WARMUP' and lease_token == canary_token then
+        redis.call('HDEL', hash, 'canary_token')
+    end
+    if current_state ~= 'EXHAUSTED' and current_state ~= 'DISABLED' then
+        redis.call('HSET', hash, 'last_error_code', 0)
+        redis.call('HSET', hash, 'last_error_message', err_msg)
+    end
 
 elseif status == 499 then
-    -- Client stream abort: slot already reclaimed by ZREM, no error penalty applied
-    redis.call('HSET', hash, 'last_error_code', 499)
-    redis.call('HSET', hash, 'last_error_message', "Client stream aborted")
+    -- Client stream abort: slot already reclaimed by ZREM, no error penalty applied (preserve EXHAUSTED/DISABLED)
+    if current_state == 'WARMUP' and lease_token == canary_token then
+        redis.call('HDEL', hash, 'canary_token')
+    end
+    if current_state ~= 'EXHAUSTED' and current_state ~= 'DISABLED' then
+        redis.call('HSET', hash, 'last_error_code', 499)
+        redis.call('HSET', hash, 'last_error_message', "Client stream aborted")
+    end
 end
 
 return "OK"

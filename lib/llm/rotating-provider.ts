@@ -352,13 +352,24 @@ export class RotatingLLMProvider implements LLMProvider {
       void response.body.cancel().catch(() => {});
 
       // Phase 2: Guaranteed slot reclamation
+      let effectiveCooldownMs =
+        streamStatusCode === 200 || streamStatusCode === 499 || streamStatusCode === 0
+          ? 0
+          : streamCooldownMs || 2000;
+      if (streamStatusCode === 429 && streamCooldownMs !== Infinity) {
+        const allStates = await this.keyStore.getAllStates().catch(() => []);
+        const cur = allStates.find((s) => s.id === keyId);
+        const next429Count = (cur?.consecutive429s || 0) + 1;
+        effectiveCooldownMs = HealthAndCooldownEngine.calculate429Cooldown(
+          {},
+          next429Count,
+        );
+      }
       await this.safeRelease(
         keyId,
         leaseToken,
         streamStatusCode,
-        streamStatusCode === 200 || streamStatusCode === 499 || streamStatusCode === 0
-          ? 0
-          : streamCooldownMs || 2000,
+        effectiveCooldownMs,
         streamErrorMessage
       );
     }

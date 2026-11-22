@@ -703219,6 +703219,7 @@ var import_googleapis8 = __toESM(require_src8());
 var UPLOADS_CACHE_MAX = 500;
 var UPLOADS_CACHE_TTL_MS = 10 * 60 * 1e3;
 var channelUploadsCache = /* @__PURE__ */ new Map();
+var inflightUploadsLookups = /* @__PURE__ */ new Map();
 function getCachedUploadsPlaylistId(handleKey) {
   const entry = channelUploadsCache.get(handleKey);
   if (!entry) return void 0;
@@ -703288,24 +703289,37 @@ var v1VideoList = (app) => {
         const normalizedHandleKey = (handle.startsWith("@") ? handle : `@${handle}`).toLowerCase();
         let uploadsPlaylistId = getCachedUploadsPlaylistId(normalizedHandleKey);
         if (!uploadsPlaylistId) {
-          const isHandleFormat = handle.startsWith("@");
-          let channelResponse = await executeYoutubeWithRetry(
-            () => youtube.channels.list(
-              isHandleFormat ? { part: ["contentDetails"], forHandle: handle } : { part: ["contentDetails"], forUsername: handle }
-            )
-          );
-          if (!channelResponse.data.items?.length && !isHandleFormat) {
-            channelResponse = await executeYoutubeWithRetry(
-              () => youtube.channels.list({
-                part: ["contentDetails"],
-                forHandle: `@${handle}`
-              })
-            );
+          const inflightKey = `${normalizedHandleKey}\0${accessToken}`;
+          let lookupPromise = inflightUploadsLookups.get(inflightKey);
+          if (!lookupPromise) {
+            lookupPromise = (async () => {
+              const isHandleFormat = handle.startsWith("@");
+              let channelResponse = await executeYoutubeWithRetry(
+                () => youtube.channels.list(
+                  isHandleFormat ? { part: ["contentDetails"], forHandle: handle } : { part: ["contentDetails"], forUsername: handle }
+                )
+              );
+              if (!channelResponse.data.items?.length && !isHandleFormat) {
+                channelResponse = await executeYoutubeWithRetry(
+                  () => youtube.channels.list({
+                    part: ["contentDetails"],
+                    forHandle: `@${handle}`
+                  })
+                );
+              }
+              const resolvedId = channelResponse.data.items?.[0]?.contentDetails?.relatedPlaylists?.uploads ?? void 0;
+              if (resolvedId) {
+                setCachedUploadsPlaylistId(normalizedHandleKey, resolvedId);
+              }
+              return resolvedId;
+            })().finally(() => {
+              if (inflightUploadsLookups.get(inflightKey) === lookupPromise) {
+                inflightUploadsLookups.delete(inflightKey);
+              }
+            });
+            inflightUploadsLookups.set(inflightKey, lookupPromise);
           }
-          uploadsPlaylistId = channelResponse.data.items?.[0]?.contentDetails?.relatedPlaylists?.uploads ?? void 0;
-          if (uploadsPlaylistId) {
-            setCachedUploadsPlaylistId(normalizedHandleKey, uploadsPlaylistId);
-          }
+          uploadsPlaylistId = await lookupPromise;
         }
         if (!uploadsPlaylistId) {
           set.status = 400;
@@ -712133,6 +712147,9 @@ var OpenAICompatibleProvider = class {
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
+    let sawDataFrame = false;
+    let rawNonSseFallback = "";
+    const MAX_RAW_FALLBACK_CHARS = 8192;
     const MAX_SSE_BUFFER_CHARS2 = 256e3;
     const effectiveChunkTimeoutMs = this.chunkTimeoutMs ?? envInt("LLM_CHUNK_TIMEOUT_MS", 25e3, 50, 55e3);
     const onClientAbort = () => {
@@ -712181,6 +712198,8 @@ var OpenAICompatibleProvider = class {
           if (buffer.trim()) {
             const tailLine = buffer.trim();
             if (tailLine.startsWith("data:")) {
+              sawDataFrame = true;
+              rawNonSseFallback = "";
               const payload = tailLine.slice(5).trim();
               if (payload === "[DONE]") return;
               let inBandErr = null;
@@ -712197,7 +712216,31 @@ var OpenAICompatibleProvider = class {
               }
               if (inBandErr) throw inBandErr;
               if (delta) yield delta;
+            } else if (!sawDataFrame && !tailLine.startsWith(":")) {
+              const remain = MAX_RAW_FALLBACK_CHARS - rawNonSseFallback.length;
+              if (remain > 0) {
+                rawNonSseFallback += tailLine.slice(0, remain);
+              }
             }
+          }
+          if (!sawDataFrame && rawNonSseFallback.trim().startsWith("{")) {
+            let rawErr = null;
+            let rawContent;
+            try {
+              const rawJson = JSON.parse(rawNonSseFallback.trim());
+              if (rawJson?.error) {
+                const errMsg = typeof rawJson.error === "string" ? rawJson.error : rawJson.error?.message || JSON.stringify(rawJson.error);
+                rawErr = new Error(`[${this.name}] SSE error: ${errMsg}`);
+              } else {
+                const content = rawJson?.choices?.[0]?.delta?.content ?? rawJson?.choices?.[0]?.message?.content;
+                if (typeof content === "string" && content.length > 0) {
+                  rawContent = content;
+                }
+              }
+            } catch {
+            }
+            if (rawErr) throw rawErr;
+            if (rawContent) yield rawContent;
           }
           break;
         }
@@ -712209,7 +712252,17 @@ var OpenAICompatibleProvider = class {
         while ((nl = buffer.indexOf("\n")) !== -1) {
           const line = buffer.slice(0, nl).trim();
           buffer = buffer.slice(nl + 1);
-          if (!line.startsWith("data:")) continue;
+          if (!line.startsWith("data:")) {
+            if (!sawDataFrame && line && !line.startsWith(":")) {
+              const remain = MAX_RAW_FALLBACK_CHARS - rawNonSseFallback.length;
+              if (remain > 0) {
+                rawNonSseFallback += (rawNonSseFallback ? "\n" : "") + line.slice(0, remain);
+              }
+            }
+            continue;
+          }
+          sawDataFrame = true;
+          rawNonSseFallback = "";
           const payload = line.slice(5).trim();
           if (payload === "[DONE]") return;
           let inBandErr = null;
@@ -713275,11 +713328,21 @@ var MemoryKeyStore = class {
         record.lastErrorMessage = errMsg;
       }
     } else if (statusCode === 0 && cooldown === 0) {
-      record.lastStatusCode = 0;
-      record.lastErrorMessage = errMsg;
+      if (record.state === "WARMUP" && record.canaryToken === leaseToken) {
+        record.canaryToken = void 0;
+      }
+      if (record.state !== "EXHAUSTED" && record.state !== "DISABLED") {
+        record.lastStatusCode = 0;
+        record.lastErrorMessage = errMsg;
+      }
     } else if (statusCode === 499) {
-      record.lastStatusCode = 499;
-      record.lastErrorMessage = "Client stream aborted";
+      if (record.state === "WARMUP" && record.canaryToken === leaseToken) {
+        record.canaryToken = void 0;
+      }
+      if (record.state !== "EXHAUSTED" && record.state !== "DISABLED") {
+        record.lastStatusCode = 499;
+        record.lastErrorMessage = "Client stream aborted";
+      }
     }
   }
   /**
@@ -713685,11 +713748,21 @@ var RotatingLLMProvider = class {
       }
       void response.body.cancel().catch(() => {
       });
+      let effectiveCooldownMs = streamStatusCode === 200 || streamStatusCode === 499 || streamStatusCode === 0 ? 0 : streamCooldownMs || 2e3;
+      if (streamStatusCode === 429 && streamCooldownMs !== Infinity) {
+        const allStates = await this.keyStore.getAllStates().catch(() => []);
+        const cur = allStates.find((s) => s.id === keyId);
+        const next429Count = (cur?.consecutive429s || 0) + 1;
+        effectiveCooldownMs = HealthAndCooldownEngine.calculate429Cooldown(
+          {},
+          next429Count
+        );
+      }
       await this.safeRelease(
         keyId,
         leaseToken,
         streamStatusCode,
-        streamStatusCode === 200 || streamStatusCode === 499 || streamStatusCode === 0 ? 0 : streamCooldownMs || 2e3,
+        effectiveCooldownMs,
         streamErrorMessage
       );
     }
@@ -713993,14 +714066,24 @@ elseif status >= 500 or (status == 0 and cooldown_ms > 0) or status == 408 then
     end
 
 elseif status == 0 and cooldown_ms == 0 then
-    -- Provider outage or zero-cooldown bypass: zero failure penalty
-    redis.call('HSET', hash, 'last_error_code', 0)
-    redis.call('HSET', hash, 'last_error_message', err_msg)
+    -- Provider outage or zero-cooldown bypass: zero failure penalty (preserve EXHAUSTED/DISABLED)
+    if current_state == 'WARMUP' and lease_token == canary_token then
+        redis.call('HDEL', hash, 'canary_token')
+    end
+    if current_state ~= 'EXHAUSTED' and current_state ~= 'DISABLED' then
+        redis.call('HSET', hash, 'last_error_code', 0)
+        redis.call('HSET', hash, 'last_error_message', err_msg)
+    end
 
 elseif status == 499 then
-    -- Client stream abort: slot already reclaimed by ZREM, no error penalty applied
-    redis.call('HSET', hash, 'last_error_code', 499)
-    redis.call('HSET', hash, 'last_error_message', "Client stream aborted")
+    -- Client stream abort: slot already reclaimed by ZREM, no error penalty applied (preserve EXHAUSTED/DISABLED)
+    if current_state == 'WARMUP' and lease_token == canary_token then
+        redis.call('HDEL', hash, 'canary_token')
+    end
+    if current_state ~= 'EXHAUSTED' and current_state ~= 'DISABLED' then
+        redis.call('HSET', hash, 'last_error_code', 499)
+        redis.call('HSET', hash, 'last_error_message', "Client stream aborted")
+    end
 end
 
 return "OK"
@@ -714018,15 +714101,19 @@ var UpstashRedisKeyStore = class {
      */
     this.pendingPermanentExhaustions = /* @__PURE__ */ new Map();
     if (typeof urlOrConfig === "object") {
+      const defConc = typeof urlOrConfig.defaultMaxConcurrency === "number" && Number.isFinite(urlOrConfig.defaultMaxConcurrency) && urlOrConfig.defaultMaxConcurrency >= 1 ? Math.floor(urlOrConfig.defaultMaxConcurrency) : 5;
       this.restUrl = urlOrConfig.restUrl.replace(/\/$/, "");
       this.restToken = urlOrConfig.restToken;
-      this.memoryFallback = urlOrConfig.memoryFallback ?? new MemoryKeyStore();
+      this.defaultMaxConcurrency = defConc;
+      this.memoryFallback = urlOrConfig.memoryFallback ?? new MemoryKeyStore({ defaultMaxConcurrency: defConc });
       this.timeoutMs = urlOrConfig.timeoutMs ?? 500;
       this.breakerDurationMs = urlOrConfig.breakerDurationMs ?? 3e4;
     } else {
+      const defConc = typeof options?.defaultMaxConcurrency === "number" && Number.isFinite(options.defaultMaxConcurrency) && options.defaultMaxConcurrency >= 1 ? Math.floor(options.defaultMaxConcurrency) : 5;
       this.restUrl = urlOrConfig.replace(/\/$/, "");
       this.restToken = token ?? "";
-      this.memoryFallback = options?.memoryFallback ?? new MemoryKeyStore();
+      this.defaultMaxConcurrency = defConc;
+      this.memoryFallback = options?.memoryFallback ?? new MemoryKeyStore({ defaultMaxConcurrency: defConc });
       this.timeoutMs = options?.timeoutMs ?? 500;
       this.breakerDurationMs = options?.breakerDurationMs ?? 3e4;
     }
@@ -714087,7 +714174,7 @@ var UpstashRedisKeyStore = class {
       const result = await this.evalLua(
         RESERVE_KEY_LUA,
         ["openrouter:keys:list"],
-        [5, 45e3, excludeKeyIds.join(","), clientNonce]
+        [this.defaultMaxConcurrency, 45e3, excludeKeyIds.join(","), clientNonce]
       );
       this.recordSuccess();
       if (!result || !result[0]) {
@@ -714494,16 +714581,19 @@ var cachedKeyStoreSig = null;
 function getKeyStore() {
   const redisUrl = process.env.UPSTASH_REDIS_REST_URL?.trim() ?? "";
   const redisToken = process.env.UPSTASH_REDIS_REST_TOKEN?.trim() ?? "";
-  const storeSig = redisUrl && redisToken ? `redis:${redisUrl}\0${redisToken}` : "memory";
+  const rawDefaultConc = Number(process.env.DEFAULT_KEY_MAX_CONCURRENCY);
+  const defaultMaxConcurrency = Number.isFinite(rawDefaultConc) && rawDefaultConc >= 1 ? Math.min(1e3, Math.floor(rawDefaultConc)) : 5;
+  const storeSig = redisUrl && redisToken ? `redis:${redisUrl}\0${redisToken}\0${defaultMaxConcurrency}` : `memory:${defaultMaxConcurrency}`;
   if (cachedKeyStore && cachedKeyStoreSig === storeSig) {
     return cachedKeyStore;
   }
   if (redisUrl && redisToken) {
     cachedKeyStore = new UpstashRedisKeyStore(redisUrl, redisToken, {
-      timeoutMs: 500
+      timeoutMs: 500,
+      defaultMaxConcurrency
     });
   } else {
-    cachedKeyStore = new MemoryKeyStore();
+    cachedKeyStore = new MemoryKeyStore({ defaultMaxConcurrency });
   }
   cachedKeyStoreSig = storeSig;
   return cachedKeyStore;
@@ -715083,41 +715173,61 @@ async function processDbQueue(insertFn, maxBatchSize) {
 }
 async function listWidgets(limit = 1e3) {
   const safeLimit = Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 2e3) : 1e3;
-  try {
-    const { data, error } = await supabaseUntyped.from("chat_thread").select("widget_id, updated_at").eq("is_deleted", false).order("updated_at", { ascending: false }).limit(safeLimit);
-    if (error) {
-      console.error("[chat-store] listWidgets failed:", error.message);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const { data, error } = await supabaseUntyped.from("chat_thread").select("widget_id, updated_at").eq("is_deleted", false).order("updated_at", { ascending: false }).limit(safeLimit);
+      if (error) {
+        if (attempt === 0 && is429OrQuotaError(error)) {
+          await jitterSleep429();
+          continue;
+        }
+        console.error("[chat-store] listWidgets failed:", error.message);
+        return [];
+      }
+      const rows = data ?? [];
+      const byWidget = /* @__PURE__ */ new Map();
+      for (const r of rows) {
+        const key = (r.widget_id ?? "").trim();
+        if (!key) continue;
+        const entry = byWidget.get(key) ?? {
+          widget_id: key,
+          thread_count: 0,
+          latest_updated_at: r.updated_at
+        };
+        entry.thread_count += 1;
+        if (r.updated_at > entry.latest_updated_at) {
+          entry.latest_updated_at = r.updated_at;
+        }
+        byWidget.set(key, entry);
+      }
+      return Array.from(byWidget.values()).sort(
+        (a, b) => b.latest_updated_at.localeCompare(a.latest_updated_at)
+      );
+    } catch (err) {
+      if (attempt === 0 && is429OrQuotaError(err)) {
+        await jitterSleep429();
+        continue;
+      }
+      console.warn("[chat-store] listWidgets skipped:", err?.message || err);
       return [];
     }
-    const rows = data ?? [];
-    const byWidget = /* @__PURE__ */ new Map();
-    for (const r of rows) {
-      const key = r.widget_id ?? "";
-      const entry = byWidget.get(key) ?? {
-        widget_id: key,
-        thread_count: 0,
-        latest_updated_at: r.updated_at
-      };
-      entry.thread_count += 1;
-      if (r.updated_at > entry.latest_updated_at) {
-        entry.latest_updated_at = r.updated_at;
-      }
-      byWidget.set(key, entry);
-    }
-    return Array.from(byWidget.values()).sort(
-      (a, b) => b.latest_updated_at.localeCompare(a.latest_updated_at)
-    );
-  } catch (err) {
-    console.warn("[chat-store] listWidgets skipped:", err?.message || err);
-    return [];
   }
+  return [];
 }
 async function listThreads(widgetId, limit = 100) {
   const wid = normalizeStoreId(widgetId);
   if (!wid) return [];
   const safeLimit = Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 500) : 100;
   try {
-    const { data: threads, error } = await supabaseUntyped.from("chat_thread").select("*").eq("widget_id", wid).eq("is_deleted", false).order("updated_at", { ascending: false }).limit(safeLimit);
+    let threads = null;
+    let error = null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const res = await supabaseUntyped.from("chat_thread").select("*").eq("widget_id", wid).eq("is_deleted", false).order("updated_at", { ascending: false }).limit(safeLimit);
+      threads = res.data;
+      error = res.error;
+      if (!error || attempt > 0 || !is429OrQuotaError(error)) break;
+      await jitterSleep429();
+    }
     if (error) {
       console.error("[chat-store] listThreads failed:", error.message);
       return [];
@@ -715125,7 +715235,15 @@ async function listThreads(widgetId, limit = 100) {
     const rows = threads ?? [];
     if (rows.length === 0) return [];
     const ids = rows.map((r) => r.id);
-    const { data: msgs, error: msgErr } = await supabaseUntyped.from("chat_message").select("thread_id, role, content, created_at").in("thread_id", ids).order("created_at", { ascending: false }).limit(5e3);
+    let msgs = null;
+    let msgErr = null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const res = await supabaseUntyped.from("chat_message").select("thread_id, role, content, created_at").in("thread_id", ids).order("created_at", { ascending: false }).limit(5e3);
+      msgs = res.data;
+      msgErr = res.error;
+      if (!msgErr || attempt > 0 || !is429OrQuotaError(msgErr)) break;
+      await jitterSleep429();
+    }
     if (msgErr) {
       console.error(
         "[chat-store] listThreads messages query failed:",
@@ -715430,23 +715548,38 @@ async function getWidget(id) {
   return fetchPromise;
 }
 async function listWidgetsRegistered() {
-  try {
-    const { data, error } = await supabaseUntyped.from(TABLE).select("*").eq("is_deleted", false).order("updated_at", { ascending: false }).limit(500);
-    if (error) {
-      console.error(
-        "[widget-store] listWidgetsRegistered failed:",
-        error.message
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const { data, error } = await supabaseUntyped.from(TABLE).select("*").eq("is_deleted", false).order("updated_at", { ascending: false }).limit(500);
+      if (error) {
+        if (attempt === 0 && is429OrQuotaError(error)) {
+          await new Promise(
+            (r) => setTimeout(r, 40 + Math.floor(Math.random() * 80))
+          );
+          continue;
+        }
+        console.error(
+          "[widget-store] listWidgetsRegistered failed:",
+          error.message
+        );
+        return [];
+      }
+      return (data ?? []).map(normalizeRow);
+    } catch (err) {
+      if (attempt === 0 && is429OrQuotaError(err)) {
+        await new Promise(
+          (r) => setTimeout(r, 40 + Math.floor(Math.random() * 80))
+        );
+        continue;
+      }
+      console.warn(
+        "[widget-store] listWidgetsRegistered skipped:",
+        err?.message || err
       );
       return [];
     }
-    return (data ?? []).map(normalizeRow);
-  } catch (err) {
-    console.warn(
-      "[widget-store] listWidgetsRegistered skipped:",
-      err?.message || err
-    );
-    return [];
   }
+  return [];
 }
 async function upsertWidget(input) {
   const id = (input.id ?? "").trim();
@@ -715564,7 +715697,9 @@ async function upsertWidget(input) {
 }
 async function deleteWidget(id) {
   const trimmed = (id ?? "").trim();
-  if (!trimmed || trimmed.length > MAX_WIDGET_ID_CHARS) return false;
+  if (!trimmed || trimmed.length > MAX_WIDGET_ID_CHARS || /[\x00-\x1f\x7f]/.test(trimmed)) {
+    return false;
+  }
   try {
     const { error } = await supabaseUntyped.from(TABLE).update({ is_deleted: true }).eq("id", trimmed);
     if (error) {
@@ -716184,13 +716319,22 @@ var v2WidgetEndpoints = async (app) => {
         );
         const maxTokens = Number.isFinite(maxTokensRaw) ? Math.min(4096, Math.max(1, maxTokensRaw)) : 512;
         const abortController = new AbortController();
+        const onRequestAbort = () => abortController.abort();
+        let requestAbortAttached = false;
+        const detachRequestAbort = () => {
+          if (requestAbortAttached && request?.signal) {
+            request.signal.removeEventListener("abort", onRequestAbort);
+            requestAbortAttached = false;
+          }
+        };
         if (request?.signal) {
           if (request.signal.aborted) {
             abortController.abort();
           } else {
-            request.signal.addEventListener("abort", () => abortController.abort(), {
+            request.signal.addEventListener("abort", onRequestAbort, {
               once: true
             });
+            requestAbortAttached = true;
           }
         }
         if (!provider) {
@@ -716211,6 +716355,7 @@ var v2WidgetEndpoints = async (app) => {
                   await sleep5(40);
                 }
               } finally {
+                detachRequestAbort();
                 if (threadId && fallback.trim()) {
                   try {
                     await appendMessage(threadId, "assistant", fallback);
@@ -716232,6 +716377,7 @@ var v2WidgetEndpoints = async (app) => {
             cancel(reason) {
               console.log("[v2/ask] Client disconnected (demo mode), cancelling stream:", reason);
               abortController.abort(reason);
+              detachRequestAbort();
             }
           });
           return new Response(stream);
@@ -716244,6 +716390,7 @@ var v2WidgetEndpoints = async (app) => {
               abortController.signal
             );
           } catch (err) {
+            detachRequestAbort();
             console.warn("[v2/ask] Pre-stream handshake failed:", err?.message);
             if (err?.code === "UPSTREAM_MODEL_OUTAGE" || err?.name === "UpstreamProviderOutageError") {
               set.status = 503;
@@ -716340,6 +716487,7 @@ var v2WidgetEndpoints = async (app) => {
 [LLM error] ${msg}`);
                 }
               } finally {
+                detachRequestAbort();
                 if (threadId && assistantBuffer.trim()) {
                   try {
                     await appendMessage(threadId, "assistant", assistantBuffer);
@@ -716361,10 +716509,12 @@ var v2WidgetEndpoints = async (app) => {
             cancel(reason) {
               console.log("[v2/ask] Client disconnected, cancelling stream:", reason);
               abortController.abort(reason);
+              detachRequestAbort();
             }
           });
           return new Response(stream);
         } catch (setupErr) {
+          detachRequestAbort();
           if (!streamEntered && handshakeResult) {
             handshakeResult.cleanupAttempt?.();
             void handshakeResult.response?.body?.cancel?.().catch(() => {
@@ -716576,7 +716726,15 @@ var v2WidgetEndpoints = async (app) => {
         const deny = requireAdmin(headers, set);
         if (deny) return deny;
         try {
-          const { data: appliedRows, error: histErr } = await supabaseClient.from("_migration_history").select("name");
+          let appliedRows = null;
+          let histErr = null;
+          for (let attempt = 0; attempt < 2; attempt++) {
+            const res = await supabaseClient.from("_migration_history").select("name");
+            appliedRows = res.data;
+            histErr = res.error;
+            if (!histErr || attempt > 0 || !is429OrQuotaError(histErr)) break;
+            await sleep5(40 + Math.floor(Math.random() * 80));
+          }
           if (histErr) {
             set.status = 500;
             return {
@@ -717118,8 +717276,9 @@ async function sendNaverMail(input, options) {
   }
   const transporter = getTransporter();
   const user = resolveCreds().user;
-  const fromName = process.env.NAVER_MAIL_FROM_NAME?.replace(/[\r\n]+/g, " ").trim();
-  const defaultFrom = fromName ? `${fromName} <${user}>` : user;
+  const rawFromName = process.env.NAVER_MAIL_FROM_NAME?.replace(/[\r\n\x00-\x1f\x7f]+/g, " ").trim();
+  const safeFromName = rawFromName ? /[",;<>@()[\]\\:]/.test(rawFromName) ? `"${rawFromName.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"` : rawFromName : "";
+  const defaultFrom = safeFromName ? `${safeFromName} <${user}>` : user;
   const allowQueue = options?.allowQueue !== false;
   const maxRetries = options?.maxRetries ?? 3;
   try {
@@ -717262,7 +717421,9 @@ var v2MailEndpoints = async (app) => {
             error: "mail body exceeds maximum length of 500000 characters"
           };
         }
-        if (!body?.text?.trim() && !body?.html?.trim()) {
+        const cleanText = typeof body?.text === "string" ? body.text.replace(/\x00+/g, "") : void 0;
+        const cleanHtml = typeof body?.html === "string" ? body.html.replace(/\x00+/g, "") : void 0;
+        if (!cleanText?.trim() && !cleanHtml?.trim()) {
           set.status = 400;
           return { success: false, error: "text or html required" };
         }
@@ -717287,8 +717448,8 @@ var v2MailEndpoints = async (app) => {
             {
               to,
               subject,
-              text: body.text,
-              html: body.html,
+              text: cleanText,
+              html: cleanHtml,
               from: body.from
             },
             { idempotencyKey }
@@ -717709,7 +717870,7 @@ var v2SmsEndpoints = async (app) => {
         }
         const rawTo = (body?.to ?? "").trim();
         const to = rawTo.replace(/[\s-]/g, "");
-        const text = (body?.text ?? "").trim();
+        const text = String(body?.text ?? "").replace(/\x00+/g, "").trim();
         if (!rawTo || !to) {
           set.status = 400;
           return { success: false, error: "to required" };
@@ -718192,53 +718353,108 @@ async function readBoundedBodyText(request, maxBytes) {
   if (bytes.byteLength === 0) return "";
   return new TextDecoder("utf-8").decode(bytes);
 }
-function scanDuplicateRootJsonKeys(text) {
-  const seen = /* @__PURE__ */ new Set();
-  const duplicates = /* @__PURE__ */ new Set();
-  let depth = 0;
+function inspectRootJsonObject(text) {
+  const firstSlice = /* @__PURE__ */ new Map();
+  const duplicateValues = /* @__PURE__ */ new Map();
+  let rootPropCount = 0;
   const len = text.length;
   let i = 0;
-  while (i < len) {
-    const ch = text.charCodeAt(i);
-    if (ch === 34) {
-      const strStart = i;
-      i++;
-      while (i < len) {
-        const c = text.charCodeAt(i);
-        if (c === 92) {
-          i += 2;
-          continue;
-        }
-        if (c === 34) break;
+  const skipWs = () => {
+    while (i < len) {
+      const ws = text.charCodeAt(i);
+      if (ws === 32 || ws === 9 || ws === 10 || ws === 13) i++;
+      else break;
+    }
+  };
+  const skipJsonString = () => {
+    i++;
+    while (i < len) {
+      const c = text.charCodeAt(i);
+      if (c === 92) {
+        i += 2;
+        continue;
+      }
+      if (c === 34) {
         i++;
+        return;
       }
-      const strEnd = i;
       i++;
-      if (depth === 1) {
-        let k = i;
-        while (k < len) {
-          const ws = text.charCodeAt(k);
-          if (ws === 32 || ws === 9 || ws === 10 || ws === 13) k++;
-          else break;
-        }
-        if (k < len && text.charCodeAt(k) === 58) {
-          try {
-            const keyName = JSON.parse(text.slice(strStart, strEnd + 1));
-            if (typeof keyName === "string") {
-              if (seen.has(keyName)) duplicates.add(keyName);
-              else seen.add(keyName);
-            }
-          } catch {
-          }
-        }
-      }
+    }
+  };
+  skipWs();
+  if (i >= len || text.charCodeAt(i) !== 123) {
+    return { rootPropCount: 0, duplicateValues };
+  }
+  i++;
+  while (i < len) {
+    skipWs();
+    if (i >= len) break;
+    const ch = text.charCodeAt(i);
+    if (ch === 125) break;
+    if (ch === 44) {
+      i++;
       continue;
     }
-    if (ch === 123 || ch === 91) depth++;
-    else if (ch === 125 || ch === 93) depth--;
+    if (ch !== 34) break;
+    const keyStart = i;
+    skipJsonString();
+    const keyEnd = i;
+    rootPropCount++;
+    skipWs();
+    if (i >= len || text.charCodeAt(i) !== 58) break;
     i++;
+    skipWs();
+    const valStart = i;
+    let nested = 0;
+    while (i < len) {
+      const vc = text.charCodeAt(i);
+      if (vc === 34) {
+        skipJsonString();
+        continue;
+      }
+      if (vc === 123 || vc === 91) {
+        nested++;
+        i++;
+        continue;
+      }
+      if (vc === 125 || vc === 93) {
+        if (nested === 0 && vc === 125) break;
+        nested--;
+        i++;
+        continue;
+      }
+      if (nested === 0 && vc === 44) break;
+      i++;
+    }
+    const valEnd = i;
+    let keyName;
+    try {
+      keyName = JSON.parse(text.slice(keyStart, keyEnd));
+    } catch {
+      continue;
+    }
+    if (typeof keyName !== "string") continue;
+    const prevSlice = firstSlice.get(keyName);
+    if (!prevSlice) {
+      firstSlice.set(keyName, [valStart, valEnd]);
+    } else {
+      let arr = duplicateValues.get(keyName);
+      if (!arr) {
+        try {
+          arr = [JSON.parse(text.slice(prevSlice[0], prevSlice[1]))];
+        } catch {
+          arr = [null];
+        }
+        duplicateValues.set(keyName, arr);
+      }
+      try {
+        arr.push(JSON.parse(text.slice(valStart, valEnd)));
+      } catch {
+        arr.push(null);
+      }
+    }
   }
-  return duplicates;
+  return { rootPropCount, duplicateValues };
 }
 var createApp = async (serverless = false) => {
   const app = new Elysia({
@@ -718511,33 +718727,51 @@ var createApp = async (serverless = false) => {
         delete parsed["__proto__"];
       }
       if (isWidgetPublicRoute) {
-        const dups = scanDuplicateRootJsonKeys(text);
-        if (dups.size > 0) {
+        const { rootPropCount, duplicateValues } = inspectRootJsonObject(text);
+        const maxRootProps = reqPath === "/v2/ask" ? 32 : 12;
+        if (rootPropCount > maxRootProps) {
+          throw new Error("PAYLOAD_TOO_LARGE");
+        }
+        if (duplicateValues.size > 0) {
           const dupCharLimit = reqPath === "/v2/widget/view" ? 2e3 : 4e3;
           if (text.length > dupCharLimit) {
             throw new Error("PAYLOAD_TOO_LARGE");
           }
           const rec = parsed;
-          if (dups.has("widgetId")) {
-            rec.widgetId = ["__duplicate_widgetId__"];
-          }
-          if (dups.has("message")) {
-            rec.message = ["__duplicate_message__"];
-          }
-          if (dups.has("threadId")) {
-            rec.threadId = ["__duplicate_threadId__"];
+          for (const [dupKey, vals] of duplicateValues.entries()) {
+            if (dupKey === "__proto__" || dupKey === "constructor" || dupKey === "prototype") {
+              continue;
+            }
+            rec[dupKey] = vals;
           }
         }
       }
       return parsed;
     }
     if (mediaType === "text/plain") {
-      return await readBoundedBodyText(request, MAX_REQUEST_BODY_SIZE);
+      const text = await readBoundedBodyText(request, MAX_REQUEST_BODY_SIZE);
+      if (!text) return void 0;
+      return text;
     }
     if (mediaType === "application/x-www-form-urlencoded") {
       const text = await readBoundedBodyText(request, MAX_REQUEST_BODY_SIZE);
+      let reqFormPath = "/";
+      try {
+        reqFormPath = normalizePathname(
+          new URL(request.url, "http://localhost").pathname
+        );
+      } catch {
+        reqFormPath = "/";
+      }
+      const isPublicWidgetForm = reqFormPath === "/v2/ask" || reqFormPath === "/v2/widget/create-thread" || reqFormPath === "/v2/widget/view";
+      const maxFormPairs = reqFormPath === "/v2/ask" ? 32 : 12;
+      let pairCount = 0;
       const safeObj = {};
       for (const [k, v] of new URLSearchParams(text)) {
+        pairCount++;
+        if (isPublicWidgetForm && pairCount > maxFormPairs) {
+          throw new Error("PAYLOAD_TOO_LARGE");
+        }
         if (k === "__proto__" || k === "constructor" || k === "prototype") {
           continue;
         }

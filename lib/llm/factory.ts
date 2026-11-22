@@ -89,7 +89,15 @@ let cachedKeyStoreSig: string | null = null;
 export function getKeyStore(): IKeyStore {
   const redisUrl = process.env.UPSTASH_REDIS_REST_URL?.trim() ?? "";
   const redisToken = process.env.UPSTASH_REDIS_REST_TOKEN?.trim() ?? "";
-  const storeSig = redisUrl && redisToken ? `redis:${redisUrl}\0${redisToken}` : "memory";
+  const rawDefaultConc = Number(process.env.DEFAULT_KEY_MAX_CONCURRENCY);
+  const defaultMaxConcurrency =
+    Number.isFinite(rawDefaultConc) && rawDefaultConc >= 1
+      ? Math.min(1000, Math.floor(rawDefaultConc))
+      : 5;
+  const storeSig =
+    redisUrl && redisToken
+      ? `redis:${redisUrl}\0${redisToken}\0${defaultMaxConcurrency}`
+      : `memory:${defaultMaxConcurrency}`;
 
   if (cachedKeyStore && cachedKeyStoreSig === storeSig) {
     return cachedKeyStore;
@@ -98,9 +106,10 @@ export function getKeyStore(): IKeyStore {
   if (redisUrl && redisToken) {
     cachedKeyStore = new UpstashRedisKeyStore(redisUrl, redisToken, {
       timeoutMs: 500,
+      defaultMaxConcurrency,
     });
   } else {
-    cachedKeyStore = new MemoryKeyStore();
+    cachedKeyStore = new MemoryKeyStore({ defaultMaxConcurrency });
   }
   cachedKeyStoreSig = storeSig;
 
