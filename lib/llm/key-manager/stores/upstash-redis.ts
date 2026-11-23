@@ -391,6 +391,7 @@ export class UpstashRedisKeyStore implements IKeyStore {
     if (this.isStorageBreakerOpen()) return;
 
     try {
+      await this.flushPendingExhaustionsToRedis();
       const pipeline: any[][] = [];
       for (const targetId of [keyId, ...sibling402Ids]) {
         const hashKey = `openrouter:key:${targetId}`;
@@ -433,6 +434,23 @@ export class UpstashRedisKeyStore implements IKeyStore {
   ): Promise<void> {
     if (statusCode !== 402 && statusCode !== 401 && statusCode !== 403) {
       return;
+    }
+    if (statusCode === 402) {
+      const existingPending = this.pendingPermanentExhaustions.get(keyId);
+      if (
+        existingPending &&
+        (existingPending.statusCode === 401 || existingPending.statusCode === 403)
+      ) {
+        return;
+      }
+      const states = await this.memoryFallback.getAllStates();
+      const memState = states.find((s) => s.id === keyId);
+      if (
+        memState?.status === 'EXHAUSTED' &&
+        (memState.lastStatusCode === 401 || memState.lastStatusCode === 403)
+      ) {
+        return;
+      }
     }
     this.pendingPermanentExhaustions.set(keyId, {
       statusCode,

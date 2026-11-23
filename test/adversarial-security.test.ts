@@ -1743,6 +1743,103 @@ describe("Adversarial Security Test Suite (Requirement R2)", () => {
         );
         expect(resFormPairFlood.status).toBe(413);
       });
+
+      test("2026-11-24 Hardening: preserves pending 401/403 revocations during Upstash breaker-open 402s, preserves maxAttempts across local fast-breaks, and blocks __proto__/constructor JSON & form 413 bombs", async () => {
+        const { MemoryKeyStore } = await import("../lib/llm/key-manager/stores/memory");
+        const { UpstashRedisKeyStore } = await import(
+          "../lib/llm/key-manager/stores/upstash-redis"
+        );
+        const { executeWithResilientFailover } = await import(
+          "../lib/llm/key-manager/executor"
+        );
+
+        // 1. UpstashRedisKeyStore breaker-open pending 401/403 revocations must NEVER be clobbered by 402 or wiped by resetKeyToActive
+        const mem = new MemoryKeyStore();
+        const upstash = new UpstashRedisKeyStore("http://127.0.0.1:1", "tok", {
+          timeoutMs: 10,
+          breakerDurationMs: 60_000,
+          memoryFallback: mem,
+        });
+        await upstash.syncKeys([
+          { id: "u-rev-401", apiKey: "sk-1", accountId: "acc-mix-u", tier: 0, weight: 10, maxConcurrency: 5 },
+          { id: "u-wal-402", apiKey: "sk-2", accountId: "acc-mix-u", tier: 0, weight: 10, maxConcurrency: 5 },
+        ]);
+        await upstash.releaseKey("u-rev-401", "lt-1", 401, Infinity, "Revoked key");
+        await upstash.releaseKey("u-rev-401", "lt-2", 402, Infinity, "Shared wallet empty");
+        await upstash.releaseKey("u-wal-402", "lt-3", 402, Infinity, "Shared wallet empty");
+        await upstash.resetKeyToActive("u-wal-402");
+        const pendingMap = (upstash as any).pendingPermanentExhaustions as Map<string, any>;
+        expect(pendingMap.get("u-rev-401")?.statusCode).toBe(401);
+        expect(pendingMap.has("u-wal-402")).toBe(false);
+
+        // 2. executeWithResilientFailover local brokenAccountIds fast-break must NOT starve maxAttempts for healthy backup accounts
+        const poolCfg = [
+          { id: "b1", apiKey: "sk-b1", accountId: "acc-dead", tier: 0, weight: 10, maxConcurrency: 5 },
+          { id: "b2", apiKey: "sk-b2", accountId: "acc-dead", tier: 0, weight: 10, maxConcurrency: 5 },
+          { id: "b3", apiKey: "sk-b3", accountId: "acc-dead", tier: 0, weight: 10, maxConcurrency: 5 },
+          { id: "ok4", apiKey: "sk-ok4", accountId: "acc-live", tier: 1, weight: 10, maxConcurrency: 5 },
+        ];
+        const naiveStore = {
+          syncKeys: async () => {},
+          getAllStates: async () => [],
+          acknowledgeHandshake: async () => {},
+          releaseKey: async () => {},
+          resetKeyToActive: async () => {},
+          reserveKey: async (exclude: string[] = []) => {
+            const found = poolCfg.find((c) => !exclude.includes(c.id));
+            return found ? { keyId: found.id, leaseToken: `t-${found.id}` } : null;
+          },
+        };
+        let outboundCalls = 0;
+        const hs = await executeWithResilientFailover(
+          naiveStore as any,
+          new Map(poolCfg.map((c) => [c.id, c])),
+          async (apiKey) => {
+            outboundCalls++;
+            if (apiKey !== "sk-ok4") {
+              return new Response('{"error":{"message":"Out of credits"}}', { status: 402 });
+            }
+            return new Response("OK", { status: 200 });
+          },
+          3,
+        );
+        expect(hs.keyId).toBe("ok4");
+        expect(outboundCalls).toBe(2);
+
+        // 3. JSON __proto__ / Unicode-escaped __proto__ / duplicate constructor payload bombs -> HTTP 413
+        const resViewProtoBomb = await postJson(
+          app,
+          "/v2/widget/view",
+          `{"widgetId":"${VALID_WIDGET_ID}","__proto__":"${"P".repeat(2500)}"}`,
+        );
+        expect(resViewProtoBomb.status).toBe(413);
+
+        const resCreateProtoSplitBomb = await postJson(
+          app,
+          "/v2/widget/create-thread",
+          `{"widgetId":"${VALID_WIDGET_ID}","\\u005f\\u005fproto\\u005f\\u005f":"${"P".repeat(1200)}","constructor":"${"C".repeat(1200)}","constructor":"1"}`,
+        );
+        expect(resCreateProtoSplitBomb.status).toBe(413);
+
+        // 4. x-www-form-urlencoded __proto__ / constructor payload bombs -> HTTP 413 across /v2/widget/view, /v2/widget/create-thread, and /v2/ask
+        const resFormViewProtoBomb = await app.handle(
+          new Request("http://localhost/v2/widget/view", {
+            method: "POST",
+            headers: { "content-type": "application/x-www-form-urlencoded" },
+            body: `widgetId=${VALID_WIDGET_ID}&__proto__=${"P".repeat(2500)}`,
+          }),
+        );
+        expect(resFormViewProtoBomb.status).toBe(413);
+
+        const resFormAskProtoBomb = await app.handle(
+          new Request("http://localhost/v2/ask", {
+            method: "POST",
+            headers: { "content-type": "application/x-www-form-urlencoded" },
+            body: `widgetId=${VALID_WIDGET_ID}&message=hi&__proto__=${"P".repeat(4500)}`,
+          }),
+        );
+        expect(resFormAskProtoBomb.status).toBe(413);
+      });
     });
   });
 });

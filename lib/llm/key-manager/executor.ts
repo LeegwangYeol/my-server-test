@@ -220,9 +220,12 @@ export async function executeWithResilientFailover(
   const attemptedKeyIds: string[] = [];
   const brokenAccountIds = new Set<string>();
   let attempt = 0;
+  let loopGuard = 0;
+  const maxLoopIterations = Math.max(maxAttempts * 3, keyConfigMap.size + 4);
   let lastStatusCode: number | null = null;
 
-  while (attempt < maxAttempts) {
+  while (attempt < maxAttempts && loopGuard < maxLoopIterations) {
+    loopGuard++;
     if (clientSignal?.aborted) {
       throw new KeyManagerError(
         'CLIENT_ABORTED: Client disconnected before handshake completed.',
@@ -231,8 +234,6 @@ export async function executeWithResilientFailover(
         'CLIENT_ABORTED'
       );
     }
-
-    attempt++;
 
     // Step 1: Reserve next eligible key, strictly excluding previously attempted keys
     const reservation = await keyStore.reserveKey(attemptedKeyIds);
@@ -255,6 +256,7 @@ export async function executeWithResilientFailover(
     }
 
     // Step 2: Fast-break: If key belongs to an account confirmed exhausted, release and bypass
+    // without consuming a network retry attempt so healthy backup accounts are never starved
     if (config.accountId && brokenAccountIds.has(config.accountId)) {
       lastStatusCode = 402;
       await keyStore.releaseKey(
@@ -266,6 +268,8 @@ export async function executeWithResilientFailover(
       );
       continue;
     }
+
+    attempt++;
 
     // Step 3: Enforce strict execution budget per attempt (default 6000ms)
     const { signal: attemptSignal, cleanup: cleanupSignal } = createAttemptSignal(
