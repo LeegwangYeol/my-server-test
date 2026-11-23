@@ -174,12 +174,40 @@ export class RotatingLLMProvider implements LLMProvider {
     let streamErrorMessage = "";
 
     const classifyInBandError = (json: OpenRouterErrorPayload & { error?: any }): Error => {
-      const rawCode = Number(json?.error?.code);
-      const code = Number.isFinite(rawCode) && rawCode > 0 ? rawCode : 502;
+      const errObj = json?.error;
+      const rawCode = Number(errObj?.code ?? errObj?.status);
+      const rawStrCode =
+        typeof errObj?.code === "string" ? errObj.code.trim().toLowerCase() : "";
+      const rawStrType =
+        typeof errObj?.type === "string" ? errObj.type.trim().toLowerCase() : "";
+      let code = Number.isFinite(rawCode) && rawCode > 0 ? rawCode : 0;
+      if (!code) {
+        if (
+          rawStrCode.includes("rate_limit") ||
+          rawStrType.includes("rate_limit")
+        ) {
+          code = 429;
+        } else if (
+          rawStrCode === "insufficient_quota" ||
+          rawStrType === "insufficient_quota" ||
+          rawStrCode.includes("billing")
+        ) {
+          code = 402;
+        } else if (
+          rawStrCode === "invalid_api_key" ||
+          rawStrType === "authentication_error"
+        ) {
+          code = 401;
+        } else {
+          code = 502;
+        }
+      }
       const errMsg =
-        typeof json?.error?.message === "string" && json.error.message.trim()
-          ? json.error.message.trim()
-          : `Upstream SSE error (${code})`;
+        typeof errObj === "string" && errObj.trim()
+          ? errObj.trim()
+          : typeof errObj?.message === "string" && errObj.message.trim()
+            ? errObj.message.trim()
+            : `Upstream SSE error (${code})`;
 
       const outage = HealthAndCooldownEngine.isUpstreamProviderOutage(json);
       if (outage.isOutage && (code === 429 || code === 503)) {

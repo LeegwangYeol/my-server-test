@@ -446,23 +446,38 @@ export async function upsertWidget(
     }
   }
 
-  try {
-    const { data, error } = await supabaseUntyped
-      .from(TABLE)
-      .upsert(patch, { onConflict: "id" })
-      .select("*")
-      .single();
-    if (error) {
-      console.error("[widget-store] upsertWidget failed:", error.message);
-      return { row: null, error: error.message };
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const { data, error } = await supabaseUntyped
+        .from(TABLE)
+        .upsert(patch, { onConflict: "id" })
+        .select("*")
+        .single();
+      if (error) {
+        if (attempt === 0 && is429OrQuotaError(error)) {
+          await new Promise((r) =>
+            setTimeout(r, 40 + Math.floor(Math.random() * 80)),
+          );
+          continue;
+        }
+        console.error("[widget-store] upsertWidget failed:", error.message);
+        return { row: null, error: error.message };
+      }
+      invalidateWidgetCache(id);
+      return { row: normalizeRow(data) };
+    } catch (err: any) {
+      if (attempt === 0 && is429OrQuotaError(err)) {
+        await new Promise((r) =>
+          setTimeout(r, 40 + Math.floor(Math.random() * 80)),
+        );
+        continue;
+      }
+      const msg = err?.message || String(err);
+      console.warn("[widget-store] upsertWidget skipped:", msg);
+      return { row: null, error: msg };
     }
-    invalidateWidgetCache(id);
-    return { row: normalizeRow(data) };
-  } catch (err: any) {
-    const msg = err?.message || String(err);
-    console.warn("[widget-store] upsertWidget skipped:", msg);
-    return { row: null, error: msg };
   }
+  return { row: null, error: "upsertWidget retries exhausted" };
 }
 
 /** Soft-delete (sets is_deleted = true). Hard delete is intentionally not exposed. */
@@ -475,19 +490,34 @@ export async function deleteWidget(id: string): Promise<boolean> {
   ) {
     return false;
   }
-  try {
-    const { error } = await supabaseUntyped
-      .from(TABLE)
-      .update({ is_deleted: true })
-      .eq("id", trimmed);
-    if (error) {
-      console.error("[widget-store] deleteWidget failed:", error.message);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const { error } = await supabaseUntyped
+        .from(TABLE)
+        .update({ is_deleted: true })
+        .eq("id", trimmed);
+      if (error) {
+        if (attempt === 0 && is429OrQuotaError(error)) {
+          await new Promise((r) =>
+            setTimeout(r, 40 + Math.floor(Math.random() * 80)),
+          );
+          continue;
+        }
+        console.error("[widget-store] deleteWidget failed:", error.message);
+        return false;
+      }
+      invalidateWidgetCache(trimmed);
+      return true;
+    } catch (err: any) {
+      if (attempt === 0 && is429OrQuotaError(err)) {
+        await new Promise((r) =>
+          setTimeout(r, 40 + Math.floor(Math.random() * 80)),
+        );
+        continue;
+      }
+      console.warn("[widget-store] deleteWidget skipped:", err?.message || err);
       return false;
     }
-    invalidateWidgetCache(trimmed);
-    return true;
-  } catch (err: any) {
-    console.warn("[widget-store] deleteWidget skipped:", err?.message || err);
-    return false;
   }
+  return false;
 }

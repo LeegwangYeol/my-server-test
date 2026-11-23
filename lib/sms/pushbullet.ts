@@ -116,10 +116,12 @@ export function isPushbulletConfigured(): boolean {
 /** 별명 → iden 해석 결과 캐시 (환경/토큰/별명별 격리하여 교차 오염 및 메모리 누수 방지). */
 const MAX_IDEN_CACHE_ENTRIES = 100;
 const idenCache = new Map<string, string>();
+const inflightIdenLookups = new Map<string, Promise<string>>();
 
 /** 캐시 초기화 (테스트 또는 환경 변수 동적 전환 시 사용). */
 export function clearDeviceIdenCache(): void {
   idenCache.clear();
+  inflightIdenLookups.clear();
 }
 export const clearPushbulletIdenCache = clearDeviceIdenCache;
 
@@ -151,73 +153,89 @@ async function resolveDeviceIden(
     );
   }
 
-  let res: Response;
-  try {
-    res = await fetchPushbulletWithRetry(
-      `${base}/v2/devices`,
-      {
-        headers: { "access-token": token },
-      },
-      maxRetriesOverride,
-    );
-  } catch (err: unknown) {
-    const errorObj = err as { name?: string; message?: string } | undefined;
-    const isTimeout =
-      errorObj?.name === "TimeoutError" ||
-      errorObj?.name === "AbortError" ||
-      errorObj?.message?.toLowerCase().includes("timeout") ||
-      errorObj?.message?.toLowerCase().includes("aborted") ||
-      errorObj?.message?.includes("시간 초과");
-    const wrappedError = new Error(
-      `[${conf.mode}] Pushbullet 기기 목록 조회 실패 (${
-        isTimeout ? `요청 시간 초과 (${DEFAULT_TIMEOUT_MS}ms)` : err instanceof Error ? err.message : String(err)
-      })`
-    );
-    if (isTimeout) {
-      wrappedError.name = "TimeoutError";
-    }
-    throw wrappedError;
+  const existingInflight = inflightIdenLookups.get(cacheKey);
+  if (existingInflight) {
+    return existingInflight;
   }
 
-  if (!res.ok) {
-    const errorData = (await res.json().catch(() => ({}))) as { error?: { message?: string } };
-    const msg = errorData?.error?.message || `HTTP ${res.status}`;
-    const httpErr: Error & { status?: number; retryAfterSeconds?: number } = new Error(
-      `[${conf.mode}] Pushbullet 기기 목록 조회 실패 (${msg})`
-    );
-    httpErr.status = res.status;
-    if (res.status === 429) {
-      const retryMs = parsePushbulletRetryMs(res.headers);
-      httpErr.retryAfterSeconds = retryMs ? Math.max(1, Math.ceil(retryMs / 1000)) : 5;
+  const lookupPromise = (async (): Promise<string> => {
+    let res: Response;
+    try {
+      res = await fetchPushbulletWithRetry(
+        `${base}/v2/devices`,
+        {
+          headers: { "access-token": token },
+        },
+        maxRetriesOverride,
+      );
+    } catch (err: unknown) {
+      const errorObj = err as { name?: string; message?: string } | undefined;
+      const isTimeout =
+        errorObj?.name === "TimeoutError" ||
+        errorObj?.name === "AbortError" ||
+        errorObj?.message?.toLowerCase().includes("timeout") ||
+        errorObj?.message?.toLowerCase().includes("aborted") ||
+        errorObj?.message?.includes("시간 초과");
+      const wrappedError = new Error(
+        `[${conf.mode}] Pushbullet 기기 목록 조회 실패 (${
+          isTimeout ? `요청 시간 초과 (${DEFAULT_TIMEOUT_MS}ms)` : err instanceof Error ? err.message : String(err)
+        })`
+      );
+      if (isTimeout) {
+        wrappedError.name = "TimeoutError";
+      }
+      throw wrappedError;
     }
-    throw httpErr;
-  }
 
-  const data = (await res.json().catch(() => ({}))) as {
-    devices?: { iden?: string; nickname?: string; active?: boolean }[];
-  };
-  const match = (data.devices ?? []).find(
-    (d) =>
-      d.active &&
-      d.nickname?.toLowerCase() === conf.nickname!.toLowerCase()
-  );
-  if (!match?.iden) {
-    const available = (data.devices ?? [])
-      .filter((d) => d.active)
-      .map((d) => d.nickname)
-      .join(", ");
-    throw new Error(
-      `[${conf.mode}] Pushbullet 기기 "${conf.nickname}" 를 찾지 못했습니다. 활성 기기: ${
-        available || "(없음)"
-      } ` + "(목록 확인: npm run sms:devices)"
+    if (!res.ok) {
+      const errorData = (await res.json().catch(() => ({}))) as { error?: { message?: string } };
+      const msg = errorData?.error?.message || `HTTP ${res.status}`;
+      const httpErr: Error & { status?: number; retryAfterSeconds?: number } = new Error(
+        `[${conf.mode}] Pushbullet 기기 목록 조회 실패 (${msg})`
+      );
+      httpErr.status = res.status;
+      if (res.status === 429) {
+        const retryMs = parsePushbulletRetryMs(res.headers);
+        httpErr.retryAfterSeconds = retryMs ? Math.max(1, Math.ceil(retryMs / 1000)) : 5;
+      }
+      throw httpErr;
+    }
+
+    const data = (await res.json().catch(() => ({}))) as {
+      devices?: { iden?: string; nickname?: string; active?: boolean }[];
+    };
+    const match = (data.devices ?? []).find(
+      (d) =>
+        d.active &&
+        d.nickname?.toLowerCase() === conf.nickname!.toLowerCase()
     );
+    if (!match?.iden) {
+      const available = (data.devices ?? [])
+        .filter((d) => d.active)
+        .map((d) => d.nickname)
+        .join(", ");
+      throw new Error(
+        `[${conf.mode}] Pushbullet 기기 "${conf.nickname}" 를 찾지 못했습니다. 활성 기기: ${
+          available || "(없음)"
+        } ` + "(목록 확인: npm run sms:devices)"
+      );
+    }
+    if (idenCache.size >= MAX_IDEN_CACHE_ENTRIES) {
+      const oldestKey = idenCache.keys().next().value;
+      if (oldestKey !== undefined) idenCache.delete(oldestKey);
+    }
+    idenCache.set(cacheKey, match.iden);
+    return match.iden;
+  })().finally(() => {
+    if (inflightIdenLookups.get(cacheKey) === lookupPromise) {
+      inflightIdenLookups.delete(cacheKey);
+    }
+  });
+
+  if (inflightIdenLookups.size < MAX_IDEN_CACHE_ENTRIES) {
+    inflightIdenLookups.set(cacheKey, lookupPromise);
   }
-  if (idenCache.size >= MAX_IDEN_CACHE_ENTRIES) {
-    const oldestKey = idenCache.keys().next().value;
-    if (oldestKey !== undefined) idenCache.delete(oldestKey);
-  }
-  idenCache.set(cacheKey, match.iden);
-  return match.iden;
+  return lookupPromise;
 }
 
 export interface PushbulletResult {

@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import { Elysia, t } from "elysia";
 import { google } from "googleapis";
 import {
@@ -102,24 +103,29 @@ export const v1VideoList = (app: any) => {
         let uploadsPlaylistId = getCachedUploadsPlaylistId(normalizedHandleKey);
 
         if (!uploadsPlaylistId) {
-          const inflightKey = `${normalizedHandleKey}\0${accessToken}`;
+          const tokenDigest = crypto
+            .createHash("sha256")
+            .update(accessToken)
+            .digest("hex")
+            .slice(0, 24);
+          const inflightKey = `${normalizedHandleKey}\0${tokenDigest}`;
           let lookupPromise = inflightUploadsLookups.get(inflightKey);
           if (!lookupPromise) {
             lookupPromise = (async () => {
               const isHandleFormat = handle.startsWith("@");
+              const handleArg = isHandleFormat ? handle : `@${handle}`;
               let channelResponse = await executeYoutubeWithRetry(() =>
-                youtube.channels.list(
-                  isHandleFormat
-                    ? { part: ["contentDetails"], forHandle: handle }
-                    : { part: ["contentDetails"], forUsername: handle },
-                ),
+                youtube.channels.list({
+                  part: ["contentDetails"],
+                  forHandle: handleArg,
+                }),
               );
 
               if (!channelResponse.data.items?.length && !isHandleFormat) {
                 channelResponse = await executeYoutubeWithRetry(() =>
                   youtube.channels.list({
                     part: ["contentDetails"],
-                    forHandle: `@${handle}`,
+                    forUsername: handle,
                   }),
                 );
               }
@@ -137,7 +143,9 @@ export const v1VideoList = (app: any) => {
                 inflightUploadsLookups.delete(inflightKey);
               }
             });
-            inflightUploadsLookups.set(inflightKey, lookupPromise);
+            if (inflightUploadsLookups.size < UPLOADS_CACHE_MAX) {
+              inflightUploadsLookups.set(inflightKey, lookupPromise);
+            }
           }
           uploadsPlaylistId = await lookupPromise;
         }

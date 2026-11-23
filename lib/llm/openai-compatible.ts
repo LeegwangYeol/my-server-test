@@ -53,8 +53,34 @@ export class OpenAICompatibleProvider implements LLMProvider {
     chunkTimeoutMs?: number;
   }) {
     this.name = opts.name;
-    this.baseUrl = opts.baseUrl.replace(/\/+$/, "");
-    this.apiKey = opts.apiKey.trim();
+    const trimmedBase = String(opts.baseUrl ?? "").trim().replace(/\/+$/, "");
+    let parsedBase: URL;
+    try {
+      parsedBase = new URL(trimmedBase);
+    } catch {
+      throw new Error(`[${opts.name}] invalid baseUrl: "${trimmedBase.slice(0, 100)}"`);
+    }
+    if (
+      (parsedBase.protocol !== "http:" && parsedBase.protocol !== "https:") ||
+      !parsedBase.hostname
+    ) {
+      throw new Error(`[${opts.name}] baseUrl must use http:// or https://`);
+    }
+    this.baseUrl = trimmedBase;
+    const normalizedKey = String(opts.apiKey ?? "")
+      .trim()
+      .replace(/^bearer\s+/i, "")
+      .trim();
+    if (
+      !normalizedKey ||
+      /[\s\x00-\x1f\x7f]/.test(normalizedKey) ||
+      Array.from(normalizedKey).some((ch) => (ch.codePointAt(0) ?? 0) > 0xff)
+    ) {
+      throw new Error(
+        `[${opts.name}] invalid API key format (must be non-empty ASCII ByteString without whitespace or control characters)`,
+      );
+    }
+    this.apiKey = normalizedKey;
     this.defaultModel = opts.defaultModel;
     const sanitizedExtra: Record<string, string> = {};
     if (opts.extraHeaders) {

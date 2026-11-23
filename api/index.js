@@ -13668,22 +13668,22 @@ var require_crypto2 = __commonJS({
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.NodeCrypto = void 0;
-    var crypto11 = require("crypto");
+    var crypto12 = require("crypto");
     var NodeCrypto = class {
       async sha256DigestBase64(str) {
-        return crypto11.createHash("sha256").update(str).digest("base64");
+        return crypto12.createHash("sha256").update(str).digest("base64");
       }
       randomBytesBase64(count) {
-        return crypto11.randomBytes(count).toString("base64");
+        return crypto12.randomBytes(count).toString("base64");
       }
       async verify(pubkey, data, signature) {
-        const verifier = crypto11.createVerify("RSA-SHA256");
+        const verifier = crypto12.createVerify("RSA-SHA256");
         verifier.update(data);
         verifier.end();
         return verifier.verify(pubkey, signature, "base64");
       }
       async sign(privateKey, data) {
-        const signer = crypto11.createSign("RSA-SHA256");
+        const signer = crypto12.createSign("RSA-SHA256");
         signer.update(data);
         signer.end();
         return signer.sign(privateKey, "base64");
@@ -13701,7 +13701,7 @@ var require_crypto2 = __commonJS({
        *   string in hexadecimal encoding.
        */
       async sha256DigestHex(str) {
-        return crypto11.createHash("sha256").update(str).digest("hex");
+        return crypto12.createHash("sha256").update(str).digest("hex");
       }
       /**
        * Computes the HMAC hash of a message using the provided crypto key and the
@@ -13713,7 +13713,7 @@ var require_crypto2 = __commonJS({
        */
       async signWithHmacSha256(key, msg) {
         const cryptoKey = typeof key === "string" ? key : toBuffer(key);
-        return toArrayBuffer(crypto11.createHmac("sha256", cryptoKey).update(msg).digest());
+        return toArrayBuffer(crypto12.createHmac("sha256", cryptoKey).update(msg).digest());
       }
     };
     exports2.NodeCrypto = NodeCrypto;
@@ -14491,10 +14491,10 @@ var require_oauth2client = __commonJS({
        * https://github.com/googleapis/google-auth-library-nodejs/blob/main/samples/oauth2-codeVerifier.js
        */
       async generateCodeVerifierAsync() {
-        const crypto11 = (0, crypto_1.createCrypto)();
-        const randomString = crypto11.randomBytesBase64(96);
+        const crypto12 = (0, crypto_1.createCrypto)();
+        const randomString = crypto12.randomBytesBase64(96);
         const codeVerifier = randomString.replace(/\+/g, "~").replace(/=/g, "_").replace(/\//g, "-");
-        const unencodedCodeChallenge = await crypto11.sha256DigestBase64(codeVerifier);
+        const unencodedCodeChallenge = await crypto12.sha256DigestBase64(codeVerifier);
         const codeChallenge = unencodedCodeChallenge.split("=")[0].replace(/\+/g, "-").replace(/\//g, "_");
         return { codeVerifier, codeChallenge };
       }
@@ -14938,7 +14938,7 @@ var require_oauth2client = __commonJS({
        * @return Returns a promise resolving to LoginTicket on verification.
        */
       async verifySignedJwtWithCertsAsync(jwt, certs, requiredAudience, issuers, maxExpiry) {
-        const crypto11 = (0, crypto_1.createCrypto)();
+        const crypto12 = (0, crypto_1.createCrypto)();
         if (!maxExpiry) {
           maxExpiry = _OAuth2Client.DEFAULT_MAX_TOKEN_LIFETIME_SECS_;
         }
@@ -14951,7 +14951,7 @@ var require_oauth2client = __commonJS({
         let envelope;
         let payload;
         try {
-          envelope = JSON.parse(crypto11.decodeBase64StringUtf8(segments[0]));
+          envelope = JSON.parse(crypto12.decodeBase64StringUtf8(segments[0]));
         } catch (err) {
           if (err instanceof Error) {
             err.message = `Can't parse token envelope: ${segments[0]}': ${err.message}`;
@@ -14962,7 +14962,7 @@ var require_oauth2client = __commonJS({
           throw new Error("Can't parse token envelope: " + segments[0]);
         }
         try {
-          payload = JSON.parse(crypto11.decodeBase64StringUtf8(segments[1]));
+          payload = JSON.parse(crypto12.decodeBase64StringUtf8(segments[1]));
         } catch (err) {
           if (err instanceof Error) {
             err.message = `Can't parse token payload '${segments[0]}`;
@@ -14979,7 +14979,7 @@ var require_oauth2client = __commonJS({
         if (envelope.alg === "ES256") {
           signature = formatEcdsa.joseToDer(signature, "ES256").toString("base64");
         }
-        const verified = await crypto11.verify(cert, signed, signature);
+        const verified = await crypto12.verify(cert, signed, signature);
         if (!verified) {
           throw new Error("Invalid token signature: " + jwt);
         }
@@ -15347,14 +15347,14 @@ var require_buffer_equal_constant_time = __commonJS({
 var require_jwa = __commonJS({
   "node_modules/jwa/index.js"(exports2, module2) {
     var Buffer2 = require_safe_buffer().Buffer;
-    var crypto11 = require("crypto");
+    var crypto12 = require("crypto");
     var formatEcdsa = require_ecdsa_sig_formatter();
     var util = require("util");
     var MSG_INVALID_ALGORITHM = '"%s" is not a valid algorithm.\n  Supported algorithms are:\n  "HS256", "HS384", "HS512", "RS256", "RS384", "RS512", "PS256", "PS384", "PS512", "ES256", "ES384", "ES512" and "none".';
     var MSG_INVALID_SECRET = "secret must be a string or buffer";
     var MSG_INVALID_VERIFIER_KEY = "key must be a string or a buffer";
     var MSG_INVALID_SIGNER_KEY = "key must be a string, a buffer or an object";
-    var supportsKeyObjects = typeof crypto11.createPublicKey === "function";
+    var supportsKeyObjects = typeof crypto12.createPublicKey === "function";
     if (supportsKeyObjects) {
       MSG_INVALID_VERIFIER_KEY += " or a KeyObject";
       MSG_INVALID_SECRET += "or a KeyObject";
@@ -15444,17 +15444,17 @@ var require_jwa = __commonJS({
       return function sign(thing, secret) {
         checkIsSecretKey(secret);
         thing = normalizeInput(thing);
-        var hmac = crypto11.createHmac("sha" + bits, secret);
+        var hmac = crypto12.createHmac("sha" + bits, secret);
         var sig = (hmac.update(thing), hmac.digest("base64"));
         return fromBase64(sig);
       };
     }
     var bufferEqual;
-    var timingSafeEqual = "timingSafeEqual" in crypto11 ? function timingSafeEqual2(a, b) {
+    var timingSafeEqual = "timingSafeEqual" in crypto12 ? function timingSafeEqual2(a, b) {
       if (a.byteLength !== b.byteLength) {
         return false;
       }
-      return crypto11.timingSafeEqual(a, b);
+      return crypto12.timingSafeEqual(a, b);
     } : function timingSafeEqual2(a, b) {
       if (!bufferEqual) {
         bufferEqual = require_buffer_equal_constant_time();
@@ -15471,7 +15471,7 @@ var require_jwa = __commonJS({
       return function sign(thing, privateKey) {
         checkIsPrivateKey(privateKey);
         thing = normalizeInput(thing);
-        var signer = crypto11.createSign("RSA-SHA" + bits);
+        var signer = crypto12.createSign("RSA-SHA" + bits);
         var sig = (signer.update(thing), signer.sign(privateKey, "base64"));
         return fromBase64(sig);
       };
@@ -15481,7 +15481,7 @@ var require_jwa = __commonJS({
         checkIsPublicKey(publicKey);
         thing = normalizeInput(thing);
         signature = toBase64(signature);
-        var verifier = crypto11.createVerify("RSA-SHA" + bits);
+        var verifier = crypto12.createVerify("RSA-SHA" + bits);
         verifier.update(thing);
         return verifier.verify(publicKey, signature, "base64");
       };
@@ -15490,11 +15490,11 @@ var require_jwa = __commonJS({
       return function sign(thing, privateKey) {
         checkIsPrivateKey(privateKey);
         thing = normalizeInput(thing);
-        var signer = crypto11.createSign("RSA-SHA" + bits);
+        var signer = crypto12.createSign("RSA-SHA" + bits);
         var sig = (signer.update(thing), signer.sign({
           key: privateKey,
-          padding: crypto11.constants.RSA_PKCS1_PSS_PADDING,
-          saltLength: crypto11.constants.RSA_PSS_SALTLEN_DIGEST
+          padding: crypto12.constants.RSA_PKCS1_PSS_PADDING,
+          saltLength: crypto12.constants.RSA_PSS_SALTLEN_DIGEST
         }, "base64"));
         return fromBase64(sig);
       };
@@ -15504,12 +15504,12 @@ var require_jwa = __commonJS({
         checkIsPublicKey(publicKey);
         thing = normalizeInput(thing);
         signature = toBase64(signature);
-        var verifier = crypto11.createVerify("RSA-SHA" + bits);
+        var verifier = crypto12.createVerify("RSA-SHA" + bits);
         verifier.update(thing);
         return verifier.verify({
           key: publicKey,
-          padding: crypto11.constants.RSA_PKCS1_PSS_PADDING,
-          saltLength: crypto11.constants.RSA_PSS_SALTLEN_DIGEST
+          padding: crypto12.constants.RSA_PKCS1_PSS_PADDING,
+          saltLength: crypto12.constants.RSA_PSS_SALTLEN_DIGEST
         }, signature, "base64");
       };
     }
@@ -17667,14 +17667,14 @@ var require_awsrequestsigner = __commonJS({
       }
     };
     exports2.AwsRequestSigner = AwsRequestSigner;
-    async function sign(crypto11, key, msg) {
-      return await crypto11.signWithHmacSha256(key, msg);
+    async function sign(crypto12, key, msg) {
+      return await crypto12.signWithHmacSha256(key, msg);
     }
-    async function getSigningKey(crypto11, key, dateStamp, region, serviceName) {
-      const kDate = await sign(crypto11, `AWS4${key}`, dateStamp);
-      const kRegion = await sign(crypto11, kDate, region);
-      const kService = await sign(crypto11, kRegion, serviceName);
-      const kSigning = await sign(crypto11, kService, "aws4_request");
+    async function getSigningKey(crypto12, key, dateStamp, region, serviceName) {
+      const kDate = await sign(crypto12, `AWS4${key}`, dateStamp);
+      const kRegion = await sign(crypto12, kDate, region);
+      const kService = await sign(crypto12, kRegion, serviceName);
+      const kSigning = await sign(crypto12, kService, "aws4_request");
       return kSigning;
     }
     async function generateAuthenticationHeaderMap(options) {
@@ -19259,24 +19259,24 @@ var require_googleauth = __commonJS({
           const signed = await client.sign(data);
           return signed.signedBlob;
         }
-        const crypto11 = (0, crypto_1.createCrypto)();
+        const crypto12 = (0, crypto_1.createCrypto)();
         if (client instanceof jwtclient_1.JWT && client.key) {
-          const sign = await crypto11.sign(client.key, data);
+          const sign = await crypto12.sign(client.key, data);
           return sign;
         }
         const creds = await this.getCredentials();
         if (!creds.client_email) {
           throw new Error("Cannot sign data without `client_email`.");
         }
-        return this.signBlob(crypto11, creds.client_email, data, endpoint);
+        return this.signBlob(crypto12, creds.client_email, data, endpoint);
       }
-      async signBlob(crypto11, emailOrUniqueId, data, endpoint) {
+      async signBlob(crypto12, emailOrUniqueId, data, endpoint) {
         const url = new URL(endpoint + `${emailOrUniqueId}:signBlob`);
         const res = await this.request({
           method: "POST",
           url: url.href,
           data: {
-            payload: crypto11.encodeBase64StringUtf8(data)
+            payload: crypto12.encodeBase64StringUtf8(data)
           },
           retry: true,
           retryConfig: {
@@ -678094,7 +678094,7 @@ var require_le_unix = __commonJS({
 var require_mime_node = __commonJS({
   "node_modules/nodemailer/lib/mime-node/index.js"(exports2, module2) {
     "use strict";
-    var crypto11 = require("crypto");
+    var crypto12 = require("crypto");
     var fs = require("fs");
     var punycode = require_punycode();
     var { PassThrough } = require("stream");
@@ -678113,7 +678113,7 @@ var require_mime_node = __commonJS({
       constructor(contentType, options) {
         this.nodeCounter = 0;
         options = options || {};
-        this.baseBoundary = options.baseBoundary || crypto11.randomBytes(8).toString("hex");
+        this.baseBoundary = options.baseBoundary || crypto12.randomBytes(8).toString("hex");
         this.boundaryPrefix = options.boundaryPrefix || "--_NmP";
         this.disableFileAccess = !!options.disableFileAccess;
         this.disableUrlAccess = !!options.disableUrlAccess;
@@ -679072,8 +679072,8 @@ var require_mime_node = __commonJS({
       _generateMessageId() {
         return "<" + [2, 2, 2, 6].reduce(
           // crux to generate UUID-like random strings
-          (prev, len) => prev + "-" + crypto11.randomBytes(len).toString("hex"),
-          crypto11.randomBytes(4).toString("hex")
+          (prev, len) => prev + "-" + crypto12.randomBytes(len).toString("hex"),
+          crypto12.randomBytes(4).toString("hex")
         ) + "@" + // try to use the domain of the FROM address or fallback to server hostname
         (this.getEnvelope().from || this.hostname || "localhost").split("@").pop() + ">";
       }
@@ -679668,14 +679668,14 @@ var require_relaxed_body = __commonJS({
   "node_modules/nodemailer/lib/dkim/relaxed-body.js"(exports2, module2) {
     "use strict";
     var { Transform: Transform2 } = require("stream");
-    var crypto11 = require("crypto");
+    var crypto12 = require("crypto");
     var RelaxedBody = class extends Transform2 {
       constructor(options) {
         super();
         options = options || {};
         this.chunkBuffer = [];
         this.chunkBufferLen = 0;
-        this.bodyHash = crypto11.createHash(options.hashAlgo || "sha1");
+        this.bodyHash = crypto12.createHash(options.hashAlgo || "sha1");
         this.remainder = "";
         this.byteLength = 0;
         this.debug = options.debug;
@@ -679778,7 +679778,7 @@ var require_sign2 = __commonJS({
     "use strict";
     var punycode = require_punycode();
     var mimeFuncs = require_mime_funcs();
-    var crypto11 = require("crypto");
+    var crypto12 = require("crypto");
     module2.exports = (headers, hashAlgo, bodyHash, options) => {
       options = options || {};
       const defaultFieldNames = "From:Sender:Reply-To:Subject:Date:Message-ID:To:Cc:MIME-Version:Content-Type:Content-Transfer-Encoding:Content-ID:Content-Description:Resent-Date:Resent-From:Resent-Sender:Resent-To:Resent-Cc:Resent-Message-ID:In-Reply-To:References:List-Id:List-Help:List-Unsubscribe:List-Subscribe:List-Post:List-Owner:List-Archive";
@@ -679786,7 +679786,7 @@ var require_sign2 = __commonJS({
       const canonicalizedHeaderData = relaxedHeaders(headers, fieldNames, options.skipFields);
       const dkimHeader = generateDKIMHeader(options.domainName, options.keySelector, canonicalizedHeaderData.fieldNames, hashAlgo, bodyHash);
       canonicalizedHeaderData.headers += "dkim-signature:" + relaxedHeaderLine(dkimHeader);
-      const signer = crypto11.createSign(("rsa-" + hashAlgo).toUpperCase());
+      const signer = crypto12.createSign(("rsa-" + hashAlgo).toUpperCase());
       signer.update(canonicalizedHeaderData.headers);
       let signature;
       try {
@@ -679855,7 +679855,7 @@ var require_dkim = __commonJS({
     var { PassThrough } = require("stream");
     var fs = require("fs");
     var path2 = require("path");
-    var crypto11 = require("crypto");
+    var crypto12 = require("crypto");
     var DKIM_ALGO = "sha256";
     var MAX_MESSAGE_SIZE = 2 * 1024 * 1024;
     var DKIMSigner = class {
@@ -679868,7 +679868,7 @@ var require_dkim = __commonJS({
         this.chunks = [];
         this.chunklen = 0;
         this.readPos = 0;
-        this.cachePath = this.cacheDir ? path2.join(this.cacheDir, "message." + Date.now() + "-" + crypto11.randomBytes(14).toString("hex")) : false;
+        this.cachePath = this.cacheDir ? path2.join(this.cacheDir, "message." + Date.now() + "-" + crypto12.randomBytes(14).toString("hex")) : false;
         this.cache = false;
         this.headers = false;
         this.bodyHash = false;
@@ -680419,7 +680419,7 @@ var require_mailer = __commonJS({
     var MailMessage = require_mail_message();
     var net = require("net");
     var dns = require("dns");
-    var crypto11 = require("crypto");
+    var crypto12 = require("crypto");
     var Mail = class extends EventEmitter {
       constructor(transporter, options, defaults) {
         super();
@@ -680762,7 +680762,7 @@ var require_mailer = __commonJS({
             html = (html || "").toString().replace(
               /(<img\b[^<>]{0,1024} src\s{0,20}=[\s"']{0,20})(data:([^;]+);[^"'>\s]+)/gi,
               (match, prefix, dataUri, mimeType) => {
-                const cid = crypto11.randomBytes(10).toString("hex") + "@localhost";
+                const cid = crypto12.randomBytes(10).toString("hex") + "@localhost";
                 if (!mail.data.attachments) {
                   mail.data.attachments = [];
                 }
@@ -680889,7 +680889,7 @@ var require_smtp_connection = __commonJS({
     var net = require("net");
     var tls = require("tls");
     var os = require("os");
-    var crypto11 = require("crypto");
+    var crypto12 = require("crypto");
     var DataStream = require_data_stream2();
     var { PassThrough } = require("stream");
     var shared = require_shared();
@@ -680909,7 +680909,7 @@ var require_smtp_connection = __commonJS({
     var SMTPConnection = class extends EventEmitter {
       constructor(options) {
         super(options);
-        this.id = crypto11.randomBytes(8).toString("base64").replace(/\W/g, "");
+        this.id = crypto12.randomBytes(8).toString("base64").replace(/\W/g, "");
         this.stage = "init";
         this.options = options || {};
         this.secureConnection = !!this.options.secure;
@@ -682069,7 +682069,7 @@ var require_smtp_connection = __commonJS({
           );
         }
         const base64decoded = Buffer.from(challengeMatch[1], "base64").toString("ascii");
-        const hmacMD5 = crypto11.createHmac("md5", this._auth.credentials.pass);
+        const hmacMD5 = crypto12.createHmac("md5", this._auth.credentials.pass);
         hmacMD5.update(base64decoded);
         const prepended = this._auth.credentials.user + " " + hmacMD5.digest("hex");
         this._responseActions.push((str2) => {
@@ -682362,7 +682362,7 @@ var require_xoauth2 = __commonJS({
     "use strict";
     var { Stream } = require("stream");
     var nmfetch = require_fetch2();
-    var crypto11 = require("crypto");
+    var crypto12 = require("crypto");
     var shared = require_shared();
     var errors = require_errors2();
     var XOAuth2 = class extends Stream {
@@ -682708,7 +682708,7 @@ var require_xoauth2 = __commonJS({
        */
       jwtSignRS256(payload) {
         payload = ['{"alg":"RS256","typ":"JWT"}', JSON.stringify(payload)].map((val) => this.toBase64URL(val)).join(".");
-        const signature = crypto11.createSign("RSA-SHA256").update(payload).sign(this.options.privateKey);
+        const signature = crypto12.createSign("RSA-SHA256").update(payload).sign(this.options.privateKey);
         return payload + "." + this.toBase64URL(signature);
       }
     };
@@ -703215,6 +703215,7 @@ var v1ChannelInfo = (app) => {
 };
 
 // src/endpoints/v1/youtube/video-list.ts
+var import_node_crypto = __toESM(require("node:crypto"));
 var import_googleapis8 = __toESM(require_src8());
 var UPLOADS_CACHE_MAX = 500;
 var UPLOADS_CACHE_TTL_MS = 10 * 60 * 1e3;
@@ -703289,21 +703290,24 @@ var v1VideoList = (app) => {
         const normalizedHandleKey = (handle.startsWith("@") ? handle : `@${handle}`).toLowerCase();
         let uploadsPlaylistId = getCachedUploadsPlaylistId(normalizedHandleKey);
         if (!uploadsPlaylistId) {
-          const inflightKey = `${normalizedHandleKey}\0${accessToken}`;
+          const tokenDigest = import_node_crypto.default.createHash("sha256").update(accessToken).digest("hex").slice(0, 24);
+          const inflightKey = `${normalizedHandleKey}\0${tokenDigest}`;
           let lookupPromise = inflightUploadsLookups.get(inflightKey);
           if (!lookupPromise) {
             lookupPromise = (async () => {
               const isHandleFormat = handle.startsWith("@");
+              const handleArg = isHandleFormat ? handle : `@${handle}`;
               let channelResponse = await executeYoutubeWithRetry(
-                () => youtube.channels.list(
-                  isHandleFormat ? { part: ["contentDetails"], forHandle: handle } : { part: ["contentDetails"], forUsername: handle }
-                )
+                () => youtube.channels.list({
+                  part: ["contentDetails"],
+                  forHandle: handleArg
+                })
               );
               if (!channelResponse.data.items?.length && !isHandleFormat) {
                 channelResponse = await executeYoutubeWithRetry(
                   () => youtube.channels.list({
                     part: ["contentDetails"],
-                    forHandle: `@${handle}`
+                    forUsername: handle
                   })
                 );
               }
@@ -703317,7 +703321,9 @@ var v1VideoList = (app) => {
                 inflightUploadsLookups.delete(inflightKey);
               }
             });
-            inflightUploadsLookups.set(inflightKey, lookupPromise);
+            if (inflightUploadsLookups.size < UPLOADS_CACHE_MAX) {
+              inflightUploadsLookups.set(inflightKey, lookupPromise);
+            }
           }
           uploadsPlaylistId = await lookupPromise;
         }
@@ -712108,8 +712114,24 @@ var supabaseUntyped = supabaseClient;
 var OpenAICompatibleProvider = class {
   constructor(opts) {
     this.name = opts.name;
-    this.baseUrl = opts.baseUrl.replace(/\/+$/, "");
-    this.apiKey = opts.apiKey.trim();
+    const trimmedBase = String(opts.baseUrl ?? "").trim().replace(/\/+$/, "");
+    let parsedBase;
+    try {
+      parsedBase = new URL(trimmedBase);
+    } catch {
+      throw new Error(`[${opts.name}] invalid baseUrl: "${trimmedBase.slice(0, 100)}"`);
+    }
+    if (parsedBase.protocol !== "http:" && parsedBase.protocol !== "https:" || !parsedBase.hostname) {
+      throw new Error(`[${opts.name}] baseUrl must use http:// or https://`);
+    }
+    this.baseUrl = trimmedBase;
+    const normalizedKey = String(opts.apiKey ?? "").trim().replace(/^bearer\s+/i, "").trim();
+    if (!normalizedKey || /[\s\x00-\x1f\x7f]/.test(normalizedKey) || Array.from(normalizedKey).some((ch) => (ch.codePointAt(0) ?? 0) > 255)) {
+      throw new Error(
+        `[${opts.name}] invalid API key format (must be non-empty ASCII ByteString without whitespace or control characters)`
+      );
+    }
+    this.apiKey = normalizedKey;
     this.defaultModel = opts.defaultModel;
     const sanitizedExtra = {};
     if (opts.extraHeaders) {
@@ -712843,8 +712865,11 @@ async function executeWithResilientFailover(keyStore, keyConfigMap, requestFacto
   const attemptedKeyIds = [];
   const brokenAccountIds = /* @__PURE__ */ new Set();
   let attempt = 0;
+  let loopGuard = 0;
+  const maxLoopIterations = Math.max(maxAttempts * 3, keyConfigMap.size + 4);
   let lastStatusCode = null;
-  while (attempt < maxAttempts) {
+  while (attempt < maxAttempts && loopGuard < maxLoopIterations) {
+    loopGuard++;
     if (clientSignal?.aborted) {
       throw new KeyManagerError(
         "CLIENT_ABORTED: Client disconnected before handshake completed.",
@@ -712853,7 +712878,6 @@ async function executeWithResilientFailover(keyStore, keyConfigMap, requestFacto
         "CLIENT_ABORTED"
       );
     }
-    attempt++;
     const reservation = await keyStore.reserveKey(attemptedKeyIds);
     if (!reservation) {
       const allStates2 = await keyStore.getAllStates().catch(() => []);
@@ -712881,6 +712905,7 @@ async function executeWithResilientFailover(keyStore, keyConfigMap, requestFacto
       );
       continue;
     }
+    attempt++;
     const { signal: attemptSignal, cleanup: cleanupSignal } = createAttemptSignal(
       perAttemptTimeoutMs,
       clientSignal
@@ -713588,9 +713613,23 @@ var RotatingLLMProvider = class {
     let streamCooldownMs = 0;
     let streamErrorMessage = "";
     const classifyInBandError = (json) => {
-      const rawCode = Number(json?.error?.code);
-      const code = Number.isFinite(rawCode) && rawCode > 0 ? rawCode : 502;
-      const errMsg = typeof json?.error?.message === "string" && json.error.message.trim() ? json.error.message.trim() : `Upstream SSE error (${code})`;
+      const errObj = json?.error;
+      const rawCode = Number(errObj?.code ?? errObj?.status);
+      const rawStrCode = typeof errObj?.code === "string" ? errObj.code.trim().toLowerCase() : "";
+      const rawStrType = typeof errObj?.type === "string" ? errObj.type.trim().toLowerCase() : "";
+      let code = Number.isFinite(rawCode) && rawCode > 0 ? rawCode : 0;
+      if (!code) {
+        if (rawStrCode.includes("rate_limit") || rawStrType.includes("rate_limit")) {
+          code = 429;
+        } else if (rawStrCode === "insufficient_quota" || rawStrType === "insufficient_quota" || rawStrCode.includes("billing")) {
+          code = 402;
+        } else if (rawStrCode === "invalid_api_key" || rawStrType === "authentication_error") {
+          code = 401;
+        } else {
+          code = 502;
+        }
+      }
+      const errMsg = typeof errObj === "string" && errObj.trim() ? errObj.trim() : typeof errObj?.message === "string" && errObj.message.trim() ? errObj.message.trim() : `Upstream SSE error (${code})`;
       const outage = HealthAndCooldownEngine.isUpstreamProviderOutage(json);
       if (outage.isOutage && (code === 429 || code === 503)) {
         streamStatusCode = 0;
@@ -714395,6 +714434,7 @@ var UpstashRedisKeyStore = class {
     await this.memoryFallback.resetKeyToActive(keyId);
     if (this.isStorageBreakerOpen()) return;
     try {
+      await this.flushPendingExhaustionsToRedis();
       const pipeline = [];
       for (const targetId of [keyId, ...sibling402Ids]) {
         const hashKey = `openrouter:key:${targetId}`;
@@ -714431,6 +714471,17 @@ var UpstashRedisKeyStore = class {
   async queuePermanentExhaustionIfNeeded(keyId, statusCode, errMsg) {
     if (statusCode !== 402 && statusCode !== 401 && statusCode !== 403) {
       return;
+    }
+    if (statusCode === 402) {
+      const existingPending = this.pendingPermanentExhaustions.get(keyId);
+      if (existingPending && (existingPending.statusCode === 401 || existingPending.statusCode === 403)) {
+        return;
+      }
+      const states = await this.memoryFallback.getAllStates();
+      const memState = states.find((s) => s.id === keyId);
+      if (memState?.status === "EXHAUSTED" && (memState.lastStatusCode === 401 || memState.lastStatusCode === 403)) {
+        return;
+      }
     }
     this.pendingPermanentExhaustions.set(keyId, {
       statusCode,
@@ -715374,17 +715425,28 @@ async function renameThread(threadId, widgetId, title) {
   }
   const cleanTitle = typeof title === "string" ? title.replace(/[\x00-\x1f\x7f]+/g, "").trim() : "";
   const normalized = cleanTitle.length > 0 ? cleanTitle.slice(0, 200) : null;
-  try {
-    const { error } = await supabaseUntyped.from("chat_thread").update({ title: normalized }).eq("id", tid).eq("widget_id", wid).eq("is_deleted", false);
-    if (error) {
-      console.error("[chat-store] renameThread failed:", error.message);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const { error } = await supabaseUntyped.from("chat_thread").update({ title: normalized }).eq("id", tid).eq("widget_id", wid).eq("is_deleted", false);
+      if (error) {
+        if (attempt === 0 && is429OrQuotaError(error)) {
+          await jitterSleep429();
+          continue;
+        }
+        console.error("[chat-store] renameThread failed:", error.message);
+        return false;
+      }
+      return true;
+    } catch (err) {
+      if (attempt === 0 && is429OrQuotaError(err)) {
+        await jitterSleep429();
+        continue;
+      }
+      console.warn("[chat-store] renameThread skipped:", err?.message || err);
       return false;
     }
-    return true;
-  } catch (err) {
-    console.warn("[chat-store] renameThread skipped:", err?.message || err);
-    return false;
   }
+  return false;
 }
 async function updateThreadPrompt(threadId, widgetId, patch) {
   const tid = normalizeStoreId(threadId);
@@ -715402,20 +715464,31 @@ async function updateThreadPrompt(threadId, widgetId, patch) {
     update.context_text = v.length > 0 ? v.slice(0, 2e4) : null;
   }
   if (Object.keys(update).length === 0) return true;
-  try {
-    const { error } = await supabaseUntyped.from("chat_thread").update(update).eq("id", tid).eq("widget_id", wid).eq("is_deleted", false);
-    if (error) {
-      console.error("[chat-store] updateThreadPrompt failed:", error.message);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const { error } = await supabaseUntyped.from("chat_thread").update(update).eq("id", tid).eq("widget_id", wid).eq("is_deleted", false);
+      if (error) {
+        if (attempt === 0 && is429OrQuotaError(error)) {
+          await jitterSleep429();
+          continue;
+        }
+        console.error("[chat-store] updateThreadPrompt failed:", error.message);
+        return false;
+      }
+      return true;
+    } catch (err) {
+      if (attempt === 0 && is429OrQuotaError(err)) {
+        await jitterSleep429();
+        continue;
+      }
+      console.warn(
+        "[chat-store] updateThreadPrompt skipped:",
+        err?.message || err
+      );
       return false;
     }
-    return true;
-  } catch (err) {
-    console.warn(
-      "[chat-store] updateThreadPrompt skipped:",
-      err?.message || err
-    );
-    return false;
   }
+  return false;
 }
 function toWidgetMessage(row) {
   return { role: row.role, content: row.content };
@@ -715757,37 +715830,67 @@ async function upsertWidget(input) {
       patch.chat_bubble_size = null;
     }
   }
-  try {
-    const { data, error } = await supabaseUntyped.from(TABLE).upsert(patch, { onConflict: "id" }).select("*").single();
-    if (error) {
-      console.error("[widget-store] upsertWidget failed:", error.message);
-      return { row: null, error: error.message };
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const { data, error } = await supabaseUntyped.from(TABLE).upsert(patch, { onConflict: "id" }).select("*").single();
+      if (error) {
+        if (attempt === 0 && is429OrQuotaError(error)) {
+          await new Promise(
+            (r) => setTimeout(r, 40 + Math.floor(Math.random() * 80))
+          );
+          continue;
+        }
+        console.error("[widget-store] upsertWidget failed:", error.message);
+        return { row: null, error: error.message };
+      }
+      invalidateWidgetCache(id);
+      return { row: normalizeRow(data) };
+    } catch (err) {
+      if (attempt === 0 && is429OrQuotaError(err)) {
+        await new Promise(
+          (r) => setTimeout(r, 40 + Math.floor(Math.random() * 80))
+        );
+        continue;
+      }
+      const msg = err?.message || String(err);
+      console.warn("[widget-store] upsertWidget skipped:", msg);
+      return { row: null, error: msg };
     }
-    invalidateWidgetCache(id);
-    return { row: normalizeRow(data) };
-  } catch (err) {
-    const msg = err?.message || String(err);
-    console.warn("[widget-store] upsertWidget skipped:", msg);
-    return { row: null, error: msg };
   }
+  return { row: null, error: "upsertWidget retries exhausted" };
 }
 async function deleteWidget(id) {
   const trimmed = (id ?? "").trim();
   if (!trimmed || trimmed.length > MAX_WIDGET_ID_CHARS || /[\x00-\x1f\x7f]/.test(trimmed)) {
     return false;
   }
-  try {
-    const { error } = await supabaseUntyped.from(TABLE).update({ is_deleted: true }).eq("id", trimmed);
-    if (error) {
-      console.error("[widget-store] deleteWidget failed:", error.message);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const { error } = await supabaseUntyped.from(TABLE).update({ is_deleted: true }).eq("id", trimmed);
+      if (error) {
+        if (attempt === 0 && is429OrQuotaError(error)) {
+          await new Promise(
+            (r) => setTimeout(r, 40 + Math.floor(Math.random() * 80))
+          );
+          continue;
+        }
+        console.error("[widget-store] deleteWidget failed:", error.message);
+        return false;
+      }
+      invalidateWidgetCache(trimmed);
+      return true;
+    } catch (err) {
+      if (attempt === 0 && is429OrQuotaError(err)) {
+        await new Promise(
+          (r) => setTimeout(r, 40 + Math.floor(Math.random() * 80))
+        );
+        continue;
+      }
+      console.warn("[widget-store] deleteWidget skipped:", err?.message || err);
       return false;
     }
-    invalidateWidgetCache(trimmed);
-    return true;
-  } catch (err) {
-    console.warn("[widget-store] deleteWidget skipped:", err?.message || err);
-    return false;
   }
+  return false;
 }
 
 // src/endpoints/v2/widget-endpoints.ts
@@ -716295,6 +716398,25 @@ var v2WidgetEndpoints = async (app) => {
             error: "message required"
           };
         }
+        if (request?.signal?.aborted) {
+          set.status = 499;
+          return { success: false, error: "Client aborted request." };
+        }
+        let provider;
+        try {
+          if (process.env.OPENROUTER_API_KEYS?.trim()) {
+            provider = createRotatingOrConfiguredProvider();
+          } else {
+            provider = createLLMProvider();
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          set.status = 500;
+          return {
+            success: false,
+            error: `[LLM configuration error] ${msg}`
+          };
+        }
         const MAX_HISTORY_MESSAGES = 10;
         const MAX_HISTORY_CHARS = 16e3;
         let existingThread = null;
@@ -716351,21 +716473,6 @@ var v2WidgetEndpoints = async (app) => {
           } else {
             break;
           }
-        }
-        let provider;
-        try {
-          if (process.env.OPENROUTER_API_KEYS?.trim()) {
-            provider = createRotatingOrConfiguredProvider();
-          } else {
-            provider = createLLMProvider();
-          }
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          set.status = 500;
-          return {
-            success: false,
-            error: `[LLM configuration error] ${msg}`
-          };
         }
         const threadRow = existingThread;
         const rawSystemContent = threadRow?.system_prompt?.trim() || widgetMaster?.system_prompt?.trim() || process.env.LLM_SYSTEM_PROMPT || [
@@ -717355,15 +717462,17 @@ async function sendNaverMail(input, options) {
   const rawFromName = process.env.NAVER_MAIL_FROM_NAME?.replace(/[\r\n\x00-\x1f\x7f]+/g, " ").replace(/\s+/g, " ").trim();
   const safeFromName = rawFromName ? /[",;<>@()[\]\\:]/.test(rawFromName) ? `"${rawFromName.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"` : rawFromName : "";
   const defaultFrom = safeFromName ? `${safeFromName} <${user}>` : user;
+  const safeSubject = String(input.subject ?? "").replace(/[\r\n\x00-\x1f\x7f]+/g, " ").trim();
+  const safeCustomFrom = input.from ? input.from.replace(/[\r\n\x00-\x1f\x7f]+/g, " ").trim() : "";
   const allowQueue = options?.allowQueue !== false;
   const maxRetries = options?.maxRetries ?? 3;
   try {
     const execRes = await executeWithFallback(
       async () => {
         const info = await transporter.sendMail({
-          from: input.from?.trim() || defaultFrom,
+          from: safeCustomFrom || defaultFrom,
           to: Array.isArray(input.to) ? input.to.join(", ") : input.to,
-          subject: input.subject,
+          subject: safeSubject,
           text: input.text,
           html: input.html
         });
@@ -717522,11 +717631,11 @@ var v2MailEndpoints = async (app) => {
         try {
           const result = await sendNaverMail(
             {
-              to,
+              to: recipients.join(", "),
               subject,
               text: cleanText,
               html: cleanHtml,
-              from: body.from
+              from: body.from?.trim() || void 0
             },
             { idempotencyKey }
           );
@@ -717678,6 +717787,7 @@ function isPushbulletConfigured() {
 }
 var MAX_IDEN_CACHE_ENTRIES = 100;
 var idenCache = /* @__PURE__ */ new Map();
+var inflightIdenLookups = /* @__PURE__ */ new Map();
 async function resolveDeviceIden(base, token, conf, maxRetriesOverride) {
   if (conf.iden) return conf.iden;
   const cacheKey = `${conf.mode}:${token}:${conf.nickname?.toLowerCase() ?? ""}:${base}`;
@@ -717692,55 +717802,69 @@ async function resolveDeviceIden(base, token, conf, maxRetriesOverride) {
       `[${conf.mode}] PUSHBULLET_${conf.mode}_DEVICE_IDEN \uB610\uB294 PUSHBULLET_${conf.mode}_DEVICE_NICKNAME \uC911 \uD558\uB098\uB294 \uC124\uC815\uB3FC\uC57C \uD569\uB2C8\uB2E4. (\uBAA9\uB85D \uD655\uC778: npm run sms:devices)`
     );
   }
-  let res;
-  try {
-    res = await fetchPushbulletWithRetry(
-      `${base}/v2/devices`,
-      {
-        headers: { "access-token": token }
-      },
-      maxRetriesOverride
-    );
-  } catch (err) {
-    const errorObj = err;
-    const isTimeout = errorObj?.name === "TimeoutError" || errorObj?.name === "AbortError" || errorObj?.message?.toLowerCase().includes("timeout") || errorObj?.message?.toLowerCase().includes("aborted") || errorObj?.message?.includes("\uC2DC\uAC04 \uCD08\uACFC");
-    const wrappedError = new Error(
-      `[${conf.mode}] Pushbullet \uAE30\uAE30 \uBAA9\uB85D \uC870\uD68C \uC2E4\uD328 (${isTimeout ? `\uC694\uCCAD \uC2DC\uAC04 \uCD08\uACFC (${DEFAULT_TIMEOUT_MS}ms)` : err instanceof Error ? err.message : String(err)})`
-    );
-    if (isTimeout) {
-      wrappedError.name = "TimeoutError";
+  const existingInflight = inflightIdenLookups.get(cacheKey);
+  if (existingInflight) {
+    return existingInflight;
+  }
+  const lookupPromise = (async () => {
+    let res;
+    try {
+      res = await fetchPushbulletWithRetry(
+        `${base}/v2/devices`,
+        {
+          headers: { "access-token": token }
+        },
+        maxRetriesOverride
+      );
+    } catch (err) {
+      const errorObj = err;
+      const isTimeout = errorObj?.name === "TimeoutError" || errorObj?.name === "AbortError" || errorObj?.message?.toLowerCase().includes("timeout") || errorObj?.message?.toLowerCase().includes("aborted") || errorObj?.message?.includes("\uC2DC\uAC04 \uCD08\uACFC");
+      const wrappedError = new Error(
+        `[${conf.mode}] Pushbullet \uAE30\uAE30 \uBAA9\uB85D \uC870\uD68C \uC2E4\uD328 (${isTimeout ? `\uC694\uCCAD \uC2DC\uAC04 \uCD08\uACFC (${DEFAULT_TIMEOUT_MS}ms)` : err instanceof Error ? err.message : String(err)})`
+      );
+      if (isTimeout) {
+        wrappedError.name = "TimeoutError";
+      }
+      throw wrappedError;
     }
-    throw wrappedError;
-  }
-  if (!res.ok) {
-    const errorData = await res.json().catch(() => ({}));
-    const msg = errorData?.error?.message || `HTTP ${res.status}`;
-    const httpErr = new Error(
-      `[${conf.mode}] Pushbullet \uAE30\uAE30 \uBAA9\uB85D \uC870\uD68C \uC2E4\uD328 (${msg})`
-    );
-    httpErr.status = res.status;
-    if (res.status === 429) {
-      const retryMs = parsePushbulletRetryMs(res.headers);
-      httpErr.retryAfterSeconds = retryMs ? Math.max(1, Math.ceil(retryMs / 1e3)) : 5;
+    if (!res.ok) {
+      const errorData = await res.json().catch(() => ({}));
+      const msg = errorData?.error?.message || `HTTP ${res.status}`;
+      const httpErr = new Error(
+        `[${conf.mode}] Pushbullet \uAE30\uAE30 \uBAA9\uB85D \uC870\uD68C \uC2E4\uD328 (${msg})`
+      );
+      httpErr.status = res.status;
+      if (res.status === 429) {
+        const retryMs = parsePushbulletRetryMs(res.headers);
+        httpErr.retryAfterSeconds = retryMs ? Math.max(1, Math.ceil(retryMs / 1e3)) : 5;
+      }
+      throw httpErr;
     }
-    throw httpErr;
-  }
-  const data = await res.json().catch(() => ({}));
-  const match = (data.devices ?? []).find(
-    (d) => d.active && d.nickname?.toLowerCase() === conf.nickname.toLowerCase()
-  );
-  if (!match?.iden) {
-    const available = (data.devices ?? []).filter((d) => d.active).map((d) => d.nickname).join(", ");
-    throw new Error(
-      `[${conf.mode}] Pushbullet \uAE30\uAE30 "${conf.nickname}" \uB97C \uCC3E\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4. \uD65C\uC131 \uAE30\uAE30: ${available || "(\uC5C6\uC74C)"} (\uBAA9\uB85D \uD655\uC778: npm run sms:devices)`
+    const data = await res.json().catch(() => ({}));
+    const match = (data.devices ?? []).find(
+      (d) => d.active && d.nickname?.toLowerCase() === conf.nickname.toLowerCase()
     );
+    if (!match?.iden) {
+      const available = (data.devices ?? []).filter((d) => d.active).map((d) => d.nickname).join(", ");
+      throw new Error(
+        `[${conf.mode}] Pushbullet \uAE30\uAE30 "${conf.nickname}" \uB97C \uCC3E\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4. \uD65C\uC131 \uAE30\uAE30: ${available || "(\uC5C6\uC74C)"} (\uBAA9\uB85D \uD655\uC778: npm run sms:devices)`
+      );
+    }
+    if (idenCache.size >= MAX_IDEN_CACHE_ENTRIES) {
+      const oldestKey = idenCache.keys().next().value;
+      if (oldestKey !== void 0) idenCache.delete(oldestKey);
+    }
+    idenCache.set(cacheKey, match.iden);
+    return match.iden;
+  })().finally(() => {
+    if (inflightIdenLookups.get(cacheKey) === lookupPromise) {
+      inflightIdenLookups.delete(cacheKey);
+    }
+  });
+  if (inflightIdenLookups.size < MAX_IDEN_CACHE_ENTRIES) {
+    inflightIdenLookups.set(cacheKey, lookupPromise);
   }
-  if (idenCache.size >= MAX_IDEN_CACHE_ENTRIES) {
-    const oldestKey = idenCache.keys().next().value;
-    if (oldestKey !== void 0) idenCache.delete(oldestKey);
-  }
-  idenCache.set(cacheKey, match.iden);
-  return match.iden;
+  return lookupPromise;
 }
 async function sendViaPushbullet({
   phoneNumber,
@@ -718433,6 +718557,7 @@ function inspectRootJsonObject(text) {
   const firstSlice = /* @__PURE__ */ new Map();
   const duplicateValues = /* @__PURE__ */ new Map();
   let rootPropCount = 0;
+  let protoPayloadChars = 0;
   const len = text.length;
   let i = 0;
   const skipWs = () => {
@@ -718459,7 +718584,7 @@ function inspectRootJsonObject(text) {
   };
   skipWs();
   if (i >= len || text.charCodeAt(i) !== 123) {
-    return { rootPropCount: 0, duplicateValues };
+    return { rootPropCount: 0, protoPayloadChars: 0, duplicateValues };
   }
   i++;
   while (i < len) {
@@ -718510,6 +718635,9 @@ function inspectRootJsonObject(text) {
       continue;
     }
     if (typeof keyName !== "string") continue;
+    if (keyName === "__proto__" || keyName === "constructor" || keyName === "prototype") {
+      protoPayloadChars += keyEnd - keyStart + (valEnd - valStart);
+    }
     const prevSlice = firstSlice.get(keyName);
     if (!prevSlice) {
       firstSlice.set(keyName, [valStart, valEnd]);
@@ -718530,7 +718658,7 @@ function inspectRootJsonObject(text) {
       }
     }
   }
-  return { rootPropCount, duplicateValues };
+  return { rootPropCount, protoPayloadChars, duplicateValues };
 }
 var createApp = async (serverless = false) => {
   const app = new Elysia({
@@ -718800,12 +718928,24 @@ var createApp = async (serverless = false) => {
         return {};
       }
       if (Object.prototype.hasOwnProperty.call(parsed, "__proto__")) {
+        if (reqPath === "/v2/widget/view" || reqPath === "/v2/widget/create-thread") {
+          let protoRaw = "";
+          try {
+            const pv = parsed["__proto__"];
+            protoRaw = typeof pv === "string" ? pv : JSON.stringify(pv) ?? "";
+          } catch {
+            throw new Error("PAYLOAD_TOO_LARGE");
+          }
+          if ("__proto__".length + protoRaw.length > 2e3) {
+            throw new Error("PAYLOAD_TOO_LARGE");
+          }
+        }
         delete parsed["__proto__"];
       }
       if (isWidgetPublicRoute) {
-        const { rootPropCount, duplicateValues } = inspectRootJsonObject(text);
+        const { rootPropCount, protoPayloadChars, duplicateValues } = inspectRootJsonObject(text);
         const maxRootProps = reqPath === "/v2/ask" ? 32 : 12;
-        if (rootPropCount > maxRootProps) {
+        if (rootPropCount > maxRootProps || (reqPath === "/v2/widget/view" || reqPath === "/v2/widget/create-thread") && protoPayloadChars > 2e3) {
           throw new Error("PAYLOAD_TOO_LARGE");
         }
         if (duplicateValues.size > 0) {
@@ -718816,6 +718956,17 @@ var createApp = async (serverless = false) => {
           const rec = parsed;
           for (const [dupKey, vals] of duplicateValues.entries()) {
             if (dupKey === "__proto__" || dupKey === "constructor" || dupKey === "prototype") {
+              if (reqPath === "/v2/widget/view" || reqPath === "/v2/widget/create-thread") {
+                let rawDanger = "";
+                try {
+                  rawDanger = JSON.stringify(vals) ?? "";
+                } catch {
+                  throw new Error("PAYLOAD_TOO_LARGE");
+                }
+                if (dupKey.length + rawDanger.length > 2e3) {
+                  throw new Error("PAYLOAD_TOO_LARGE");
+                }
+              }
               continue;
             }
             rec[dupKey] = vals;
@@ -718842,6 +718993,7 @@ var createApp = async (serverless = false) => {
       const isPublicWidgetForm = reqFormPath === "/v2/ask" || reqFormPath === "/v2/widget/create-thread" || reqFormPath === "/v2/widget/view";
       const maxFormPairs = reqFormPath === "/v2/ask" ? 32 : 12;
       let pairCount = 0;
+      let strippedDangerChars = 0;
       const safeObj = {};
       for (const [k, v] of new URLSearchParams(text)) {
         pairCount++;
@@ -718849,6 +719001,13 @@ var createApp = async (serverless = false) => {
           throw new Error("PAYLOAD_TOO_LARGE");
         }
         if (k === "__proto__" || k === "constructor" || k === "prototype") {
+          if (isPublicWidgetForm) {
+            strippedDangerChars += k.length + v.length;
+            const dangerLimit = reqFormPath === "/v2/ask" ? 4e3 : 2e3;
+            if (strippedDangerChars > dangerLimit) {
+              throw new Error("PAYLOAD_TOO_LARGE");
+            }
+          }
           continue;
         }
         if (Object.prototype.hasOwnProperty.call(safeObj, k)) {

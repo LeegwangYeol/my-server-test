@@ -162,21 +162,32 @@ export async function deleteThread(
     return false;
   }
 
-  try {
-    const { error } = await supabaseUntyped
-      .from("chat_thread")
-      .update({ is_deleted: true })
-      .eq("id", tid)
-      .eq("widget_id", wid);
-    if (error) {
-      console.error("[chat-store] deleteThread failed:", error.message);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const { error } = await supabaseUntyped
+        .from("chat_thread")
+        .update({ is_deleted: true })
+        .eq("id", tid)
+        .eq("widget_id", wid);
+      if (error) {
+        if (attempt === 0 && is429OrQuotaError(error)) {
+          await jitterSleep429();
+          continue;
+        }
+        console.error("[chat-store] deleteThread failed:", error.message);
+        return false;
+      }
+      return true;
+    } catch (err: any) {
+      if (attempt === 0 && is429OrQuotaError(err)) {
+        await jitterSleep429();
+        continue;
+      }
+      console.warn("[chat-store] deleteThread skipped:", err?.message || err);
       return false;
     }
-    return true;
-  } catch (err: any) {
-    console.warn("[chat-store] deleteThread skipped:", err?.message || err);
-    return false;
   }
+  return false;
 }
 
 /**
@@ -186,20 +197,31 @@ export async function deleteThread(
 export async function rollbackThread(threadId: string): Promise<boolean> {
   const tid = normalizeStoreId(threadId);
   if (!tid) return false;
-  try {
-    const { error } = await supabaseUntyped
-      .from("chat_thread")
-      .update({ is_deleted: true })
-      .eq("id", tid);
-    if (error) {
-      console.error("[chat-store] rollbackThread failed:", error.message);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const { error } = await supabaseUntyped
+        .from("chat_thread")
+        .update({ is_deleted: true })
+        .eq("id", tid);
+      if (error) {
+        if (attempt === 0 && is429OrQuotaError(error)) {
+          await jitterSleep429();
+          continue;
+        }
+        console.error("[chat-store] rollbackThread failed:", error.message);
+        return false;
+      }
+      return true;
+    } catch (err: any) {
+      if (attempt === 0 && is429OrQuotaError(err)) {
+        await jitterSleep429();
+        continue;
+      }
+      console.warn("[chat-store] rollbackThread skipped:", err?.message || err);
       return false;
     }
-    return true;
-  } catch (err: any) {
-    console.warn("[chat-store] rollbackThread skipped:", err?.message || err);
-    return false;
   }
+  return false;
 }
 
 import {
@@ -660,22 +682,33 @@ export async function renameThread(
       ? title.replace(/[\x00-\x1f\x7f]+/g, "").trim()
       : "";
   const normalized = cleanTitle.length > 0 ? cleanTitle.slice(0, 200) : null;
-  try {
-    const { error } = await supabaseUntyped
-      .from("chat_thread")
-      .update({ title: normalized })
-      .eq("id", tid)
-      .eq("widget_id", wid)
-      .eq("is_deleted", false);
-    if (error) {
-      console.error("[chat-store] renameThread failed:", error.message);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const { error } = await supabaseUntyped
+        .from("chat_thread")
+        .update({ title: normalized })
+        .eq("id", tid)
+        .eq("widget_id", wid)
+        .eq("is_deleted", false);
+      if (error) {
+        if (attempt === 0 && is429OrQuotaError(error)) {
+          await jitterSleep429();
+          continue;
+        }
+        console.error("[chat-store] renameThread failed:", error.message);
+        return false;
+      }
+      return true;
+    } catch (err: any) {
+      if (attempt === 0 && is429OrQuotaError(err)) {
+        await jitterSleep429();
+        continue;
+      }
+      console.warn("[chat-store] renameThread skipped:", err?.message || err);
       return false;
     }
-    return true;
-  } catch (err: any) {
-    console.warn("[chat-store] renameThread skipped:", err?.message || err);
-    return false;
   }
+  return false;
 }
 
 /**
@@ -710,25 +743,36 @@ export async function updateThreadPrompt(
   }
   if (Object.keys(update).length === 0) return true;
 
-  try {
-    const { error } = await supabaseUntyped
-      .from("chat_thread")
-      .update(update)
-      .eq("id", tid)
-      .eq("widget_id", wid)
-      .eq("is_deleted", false);
-    if (error) {
-      console.error("[chat-store] updateThreadPrompt failed:", error.message);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const { error } = await supabaseUntyped
+        .from("chat_thread")
+        .update(update)
+        .eq("id", tid)
+        .eq("widget_id", wid)
+        .eq("is_deleted", false);
+      if (error) {
+        if (attempt === 0 && is429OrQuotaError(error)) {
+          await jitterSleep429();
+          continue;
+        }
+        console.error("[chat-store] updateThreadPrompt failed:", error.message);
+        return false;
+      }
+      return true;
+    } catch (err: any) {
+      if (attempt === 0 && is429OrQuotaError(err)) {
+        await jitterSleep429();
+        continue;
+      }
+      console.warn(
+        "[chat-store] updateThreadPrompt skipped:",
+        err?.message || err,
+      );
       return false;
     }
-    return true;
-  } catch (err: any) {
-    console.warn(
-      "[chat-store] updateThreadPrompt skipped:",
-      err?.message || err,
-    );
-    return false;
   }
+  return false;
 }
 
 /* ─── widget-facing message shape ──────────────────────────────────── */

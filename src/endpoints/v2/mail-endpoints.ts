@@ -141,11 +141,11 @@ export const v2MailEndpoints = async (app: any) => {
         try {
           const result = await sendNaverMail(
             {
-              to,
+              to: recipients.join(", "),
               subject,
               text: cleanText,
               html: cleanHtml,
-              from: body.from,
+              from: body.from?.trim() || undefined,
             },
             { idempotencyKey },
           );

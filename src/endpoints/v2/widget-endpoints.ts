@@ -657,6 +657,29 @@ export const v2WidgetEndpoints = async (app: any) => {
           };
         }
 
+        // ── Guard 2c: 클라이언트 연결 해제 및 LLM 설정 사전 검증 (DB 고아 스레드/메시지 생성 원천 방지) ──
+        if (request?.signal?.aborted) {
+          set.status = 499;
+          return { success: false, error: "Client aborted request." };
+        }
+
+        // Instantiate provider BEFORE touching chat_thread / chat_message (reuses warm cached RotatingLLMProvider singleton)
+        let provider;
+        try {
+          if (process.env.OPENROUTER_API_KEYS?.trim()) {
+            provider = createRotatingOrConfiguredProvider();
+          } else {
+            provider = createLLMProvider();
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          set.status = 500;
+          return {
+            success: false,
+            error: `[LLM configuration error] ${msg}`,
+          };
+        }
+
         // ── Guard 3: 대화 기록 상한 — 다회차(multi-turn) 토큰 폭탄 방어 ──
         const MAX_HISTORY_MESSAGES = 10;
         const MAX_HISTORY_CHARS = 16000;
@@ -735,23 +758,6 @@ export const v2WidgetEndpoints = async (app: any) => {
           } else {
             break;
           }
-        }
-
-        // Instantiate provider (reuses warm cached RotatingLLMProvider singleton)
-        let provider;
-        try {
-          if (process.env.OPENROUTER_API_KEYS?.trim()) {
-            provider = createRotatingOrConfiguredProvider();
-          } else {
-            provider = createLLMProvider();
-          }
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          set.status = 500;
-          return {
-            success: false,
-            error: `[LLM configuration error] ${msg}`,
-          };
         }
 
         // Prepare context & messages (reuse existingThread to avoid duplicate DB RTT)

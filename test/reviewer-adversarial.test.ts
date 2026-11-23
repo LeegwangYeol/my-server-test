@@ -3994,4 +3994,457 @@ describe("Adversarial Reviewer Verification Suite", () => {
       globalThis.fetch = origFetch;
     }
   });
+
+  it("VULN-69: /v2/widget/view and /v2/widget/create-thread reject >2,000-char __proto__, constructor, and prototype payload smuggling across JSON and form-urlencoded with HTTP 413", async () => {
+    const app = await createApp(true);
+
+    // 1. Single oversized __proto__ JSON field on /v2/widget/view & /v2/widget/create-thread -> HTTP 413
+    for (const route of ["/v2/widget/view", "/v2/widget/create-thread"]) {
+      const resProto = await app.handle(
+        new Request(`http://localhost${route}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: `{"__proto__":"${"A".repeat(2500)}"}`,
+        }),
+      );
+      expect(resProto.status).toBe(413);
+
+      // 2. Duplicate constructor / prototype overwrite smuggling (<4,000 total chars, >2,000 first value) -> HTTP 413
+      const resDupCtor = await app.handle(
+        new Request(`http://localhost${route}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: `{"constructor":"${"B".repeat(2200)}","constructor":"x"}`,
+        }),
+      );
+      expect(resDupCtor.status).toBe(413);
+
+      // 3. Form-urlencoded oversized __proto__ / prototype field -> HTTP 413
+      const resFormProto = await app.handle(
+        new Request(`http://localhost${route}`, {
+          method: "POST",
+          headers: { "content-type": "application/x-www-form-urlencoded" },
+          body: `__proto__=${"C".repeat(2500)}`,
+        }),
+      );
+      expect(resFormProto.status).toBe(413);
+    }
+
+    // 4. Small __proto__ probe remains stripped cleanly without false 413
+    const smallProbe = await app.handle(
+      new Request("http://localhost/v2/widget/create-thread", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: '{"__proto__":{"isAdmin":true}}',
+      }),
+    );
+    expect(smallProbe.status).toBe(403);
+  });
+
+  it("VULN-70: /v2/ask validates aborted signal & LLM config before DB writes, OpenAICompatibleProvider normalizes Bearer prefix & rejects malformed URL/API key, and RotatingLLMProvider classifies string SSE errors & quota codes", async () => {
+    const { OpenAICompatibleProvider } = await import("../lib/llm/openai-compatible");
+    const { RotatingLLMProvider } = await import("../lib/llm/rotating-provider");
+    const { MemoryKeyStore } = await import("../lib/llm/key-manager/stores/memory");
+    const realWidgetStore: any = await import("../lib/widget-store?real-v70" as any);
+    const prevSupaUrl = process.env.SUPABASE_URL;
+    const prevSupaKey = process.env.SUPABASE_SERVICE_KEY;
+    const prevLlmProvider = process.env.LLM_PROVIDER;
+    const prevLlmKey = process.env.LLM_API_KEY;
+    const prevOrKeys = process.env.OPENROUTER_API_KEYS;
+    const origFetch = globalThis.fetch;
+
+    try {
+      // 1. OpenAICompatibleProvider strips redundant "Bearer " prefix and rejects bad URLs / control-char keys immediately
+      expect(
+        () =>
+          new OpenAICompatibleProvider({
+            name: "bad-url",
+            baseUrl: "ftp://invalid.local",
+            apiKey: "sk-ok",
+            defaultModel: "m",
+          }),
+      ).toThrow("http:// or https://");
+      expect(
+        () =>
+          new OpenAICompatibleProvider({
+            name: "bad-key",
+            baseUrl: "https://api.openai.com/v1",
+            apiKey: "sk-bad\nnewline",
+            defaultModel: "m",
+          }),
+      ).toThrow("invalid API key format");
+
+      let seenAuthHeader = "";
+      globalThis.fetch = (async (input: any, init?: RequestInit) => {
+        const urlStr = typeof input === "string" ? input : input.url;
+        if (urlStr.includes("mock-bearer-70.local")) {
+          seenAuthHeader = new Headers(init?.headers).get("authorization") || "";
+          return new Response('data: {"choices":[{"delta":{"content":"OK"}}]}\n\ndata: [DONE]\n\n', {
+            status: 200,
+            headers: { "content-type": "text/event-stream" },
+          });
+        }
+        return origFetch(input, init);
+      }) as any;
+
+      const bearerProvider = new OpenAICompatibleProvider({
+        name: "bearer-norm",
+        baseUrl: "https://mock-bearer-70.local/v1",
+        apiKey: "  Bearer   sk-clean-70  ",
+        defaultModel: "gpt-test",
+      });
+      const outTokens: string[] = [];
+      for await (const tk of bearerProvider.stream({ messages: [{ role: "user", content: "hi" }] })) {
+        outTokens.push(tk);
+      }
+      expect(seenAuthHeader).toBe("Bearer sk-clean-70");
+      expect(outTokens).toEqual(["OK"]);
+
+      // 2. /v2/ask checks LLM config & aborted signal BEFORE creating orphan chat_thread / chat_message rows
+      process.env.SUPABASE_URL = "https://mock-supa-70.local";
+      process.env.SUPABASE_SERVICE_KEY = "mock-key-70";
+      delete process.env.OPENROUTER_API_KEYS;
+      realWidgetStore.invalidateWidgetCache();
+
+      let dbWriteCalls = 0;
+      globalThis.fetch = (async (input: any, init?: RequestInit) => {
+        const u = new URL(typeof input === "string" ? input : input.url);
+        if (u.hostname === "mock-supa-70.local") {
+          const method = (init?.method ?? "GET").toUpperCase();
+          if (method !== "GET") dbWriteCalls++;
+          if (u.pathname.endsWith("/widget")) {
+            return new Response(
+              JSON.stringify({
+                id: "registered-valid-widget",
+                name: "Bot",
+                theme: "noir",
+                description: "",
+                welcome_message: "",
+                system_prompt: null,
+                suggested_questions: [],
+                icon_url: null,
+                chat_bubble_size: null,
+                is_deleted: false,
+                created_at: new Date().toISOString(),
+                updated_at: new Date().toISOString(),
+              }),
+              { status: 200, headers: { "content-type": "application/json" } },
+            );
+          }
+          return new Response(JSON.stringify({ id: "orphan-tid" }), {
+            status: 201,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        if (u.hostname === "openrouter.ai") {
+          return new Response(
+            'data: {"error":{"message":"You exceeded your current quota","type":"insufficient_quota","code":"insufficient_quota"}}\n\n',
+            { status: 200, headers: { "content-type": "text/event-stream" } },
+          );
+        }
+        return origFetch(input, init);
+      }) as any;
+
+      const app = await createApp(true);
+      process.env.OPENROUTER_API_KEYS = " , ";
+      process.env.LLM_PROVIDER = "unknown_broken_vendor";
+      process.env.LLM_API_KEY = "sk-test-70";
+
+      const badCfgRes = await app.handle(
+        new Request("http://localhost/v2/ask", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ widgetId: "registered-valid-widget", message: "hello" }),
+        }),
+      );
+      expect(badCfgRes.status).toBe(500);
+      expect(dbWriteCalls).toBe(0); // Zero orphan threads/messages created!
+
+      const preAborted = new AbortController();
+      preAborted.abort();
+      delete process.env.OPENROUTER_API_KEYS;
+      process.env.LLM_PROVIDER = "openai";
+      const abortRes = await app.handle(
+        new Request("http://localhost/v2/ask", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ widgetId: "registered-valid-widget", message: "hello" }),
+          signal: preAborted.signal,
+        }),
+      );
+      expect(abortRes.status).toBe(499);
+      expect(dbWriteCalls).toBe(0);
+
+      // 3. RotatingLLMProvider classifies string code "insufficient_quota" in-band SSE error as 402 EXHAUSTED
+      const mem = new MemoryKeyStore();
+      const rot = new RotatingLLMProvider(
+        mem,
+        new Map([
+          ["k-str-402", { id: "k-str-402", apiKey: "sk-1", accountId: "acc-70", tier: 0, weight: 10, maxConcurrency: 5 }],
+          ["k-str-sib", { id: "k-str-sib", apiKey: "sk-2", accountId: "acc-70", tier: 0, weight: 10, maxConcurrency: 5 }],
+        ]),
+      );
+      let rotStreamErr: Error | null = null;
+      try {
+        for await (const _ of rot.stream({ messages: [{ role: "user", content: "hi" }] })) {
+          /* drain */
+        }
+      } catch (e: any) {
+        rotStreamErr = e;
+      }
+      expect(rotStreamErr?.message).toContain("UPSTREAM_SSE_ERROR (402)");
+      const states70 = await mem.getAllStates();
+      expect(states70.every((s) => s.status === "EXHAUSTED")).toBe(true);
+    } finally {
+      globalThis.fetch = origFetch;
+      realWidgetStore.invalidateWidgetCache();
+      if (prevSupaUrl === undefined) delete process.env.SUPABASE_URL;
+      else process.env.SUPABASE_URL = prevSupaUrl;
+      if (prevSupaKey === undefined) delete process.env.SUPABASE_SERVICE_KEY;
+      else process.env.SUPABASE_SERVICE_KEY = prevSupaKey;
+      if (prevLlmProvider === undefined) delete process.env.LLM_PROVIDER;
+      else process.env.LLM_PROVIDER = prevLlmProvider;
+      if (prevLlmKey === undefined) delete process.env.LLM_API_KEY;
+      else process.env.LLM_API_KEY = prevLlmKey;
+      if (prevOrKeys === undefined) delete process.env.OPENROUTER_API_KEYS;
+      else process.env.OPENROUTER_API_KEYS = prevOrKeys;
+    }
+  });
+
+  it("VULN-71: All 6 idempotent widget-store and chat-store mutations retry transient PostgREST 429 errors", async () => {
+    const prevUrl = process.env.SUPABASE_URL;
+    const prevKey = process.env.SUPABASE_SERVICE_KEY;
+    const origFetch = globalThis.fetch;
+    const realWidgetStore: any = await import("../lib/widget-store?real-v71" as any);
+    const realChatStore: any = await import("../lib/chat-store?real-v71" as any);
+
+    try {
+      process.env.SUPABASE_URL = "https://mock-supa-71.local";
+      process.env.SUPABASE_SERVICE_KEY = "mock-key-71";
+
+      let callCounter = 0;
+      const fixedIso = "2026-11-24T00:00:00.000Z";
+      globalThis.fetch = (async (input: any) => {
+        const u = new URL(typeof input === "string" ? input : input.url);
+        if (u.hostname === "mock-supa-71.local") {
+          callCounter++;
+          // Odd-numbered calls return transient 429; even-numbered calls succeed
+          if (callCounter % 2 === 1) {
+            return new Response(JSON.stringify({ message: "429 Too Many Requests" }), {
+              status: 429,
+              headers: { "content-type": "application/json" },
+            });
+          }
+          if (u.pathname.endsWith("/widget")) {
+            return new Response(
+              JSON.stringify({
+                id: "wid-71",
+                name: "Upserted 71",
+                theme: "noir",
+                description: "d",
+                welcome_message: "w",
+                system_prompt: null,
+                suggested_questions: [],
+                icon_url: null,
+                chat_bubble_size: null,
+                is_deleted: false,
+                created_at: fixedIso,
+                updated_at: fixedIso,
+              }),
+              { status: 200, headers: { "content-type": "application/json" } },
+            );
+          }
+          return new Response("[]", {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return origFetch(input);
+      }) as any;
+
+      const upRes = await realWidgetStore.upsertWidget({ id: "wid-71", name: "Upserted 71" });
+      expect(upRes.row?.id).toBe("wid-71");
+      expect(await realWidgetStore.deleteWidget("wid-71")).toBe(true);
+      expect(await realChatStore.deleteThread("tid-71", "wid-71")).toBe(true);
+      expect(await realChatStore.rollbackThread("tid-71")).toBe(true);
+      expect(await realChatStore.renameThread("tid-71", "wid-71", "Renamed")).toBe(true);
+      expect(
+        await realChatStore.updateThreadPrompt("tid-71", "wid-71", { system_prompt: "Prompt" }),
+      ).toBe(true);
+      // 6 operations * 2 calls each (1st 429 + 2nd 200) = 12 total calls
+      expect(callCounter).toBe(12);
+    } finally {
+      globalThis.fetch = origFetch;
+      if (prevUrl === undefined) delete process.env.SUPABASE_URL;
+      else process.env.SUPABASE_URL = prevUrl;
+      if (prevKey === undefined) delete process.env.SUPABASE_SERVICE_KEY;
+      else process.env.SUPABASE_SERVICE_KEY = prevKey;
+    }
+  });
+
+  it("VULN-72: Pushbullet coalesces concurrent /v2/devices lookups, YouTube /video/list resolves bare handles via forHandle in 1 call, and sendNaverMail sanitizes CRLF/empty recipient segments", async () => {
+    const { sendViaPushbullet, clearPushbulletIdenCache } = await import("../lib/sms/pushbullet");
+    const { clearChannelUploadsCache } = await import("../src/endpoints/v1/youtube/video-list");
+    const { sendNaverMail, resetTransporterCache } = await import("../lib/mail/naver");
+    const nodemailer = (await import("nodemailer")).default;
+    const { google } = await import("googleapis");
+    const origYoutube = google.youtube;
+    const origCreateTransport = nodemailer.createTransport;
+    const origFetch = globalThis.fetch;
+
+    const prevPbUrl = process.env.PUSHBULLET_API_URL;
+    const prevPbTok = process.env.PUSHBULLET_ACCESS_TOKEN;
+    const prevPbIden = process.env.PUSHBULLET_DEVICE_IDEN;
+    const prevPbNick = process.env.PUSHBULLET_DEVICE_NICKNAME;
+    const prevPbTestIden = process.env.PUSHBULLET_TEST_DEVICE_IDEN;
+    const prevAdmin = process.env.ADMIN_TOKEN;
+    const prevMailUser = process.env.NAVER_MAIL_USER;
+    const prevMailPass = process.env.NAVER_MAIL_PASSWORD;
+
+    try {
+      // 1. Pushbullet coalesces 5 concurrent cold-start /v2/devices calls into 1
+      process.env.PUSHBULLET_API_URL = "https://mock-pb-72.local";
+      process.env.PUSHBULLET_ACCESS_TOKEN = "pb-tok-72";
+      delete process.env.PUSHBULLET_DEVICE_IDEN;
+      delete process.env.PUSHBULLET_TEST_DEVICE_IDEN;
+      process.env.PUSHBULLET_DEVICE_NICKNAME = "Galaxy72";
+      clearPushbulletIdenCache();
+
+      let devicesCalls = 0;
+      let textsCalls = 0;
+      globalThis.fetch = (async (input: any) => {
+        const urlStr = typeof input === "string" ? input : input.url;
+        if (urlStr.includes("mock-pb-72.local/v2/devices")) {
+          devicesCalls++;
+          await new Promise((r) => setTimeout(r, 20));
+          return new Response(
+            JSON.stringify({
+              devices: [{ iden: "iden-gal-72", nickname: "Galaxy72", active: true }],
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
+        if (urlStr.includes("mock-pb-72.local/v2/texts")) {
+          textsCalls++;
+          return new Response(JSON.stringify({ iden: "txt-72" }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return origFetch(input);
+      }) as any;
+
+      const pbBatch = await Promise.all(
+        [1, 2, 3, 4, 5].map((i) =>
+          sendViaPushbullet({ phoneNumber: `0100000000${i}`, text: "test" }),
+        ),
+      );
+      expect(pbBatch.every((r) => r.ok)).toBe(true);
+      expect(devicesCalls).toBe(1);
+      expect(textsCalls).toBe(5);
+
+      // 2. YouTube /video/list with bare handle ("lolollol2379" without @) hits forHandle first -> 1 channels.list call
+      clearChannelUploadsCache();
+      const channelParamsLog: any[] = [];
+      (google as any).youtube = () => ({
+        channels: {
+          list: async (params: any) => {
+            channelParamsLog.push(params);
+            if (params.forHandle === "@lolollol2379") {
+              return {
+                data: {
+                  items: [
+                    { contentDetails: { relatedPlaylists: { uploads: "UU-72" } } },
+                  ],
+                },
+              };
+            }
+            return { data: { items: [] } };
+          },
+        },
+        playlistItems: {
+          list: async () => ({
+            data: { items: [{ id: "v-72" }], pageInfo: { totalResults: 1, resultsPerPage: 10 } },
+          }),
+        },
+      });
+
+      const app = await createApp(true);
+      const ytRes = await app.handle(
+        new Request("http://localhost/v1/youtube/video/list", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ handle: "lolollol2379", accessToken: "tok-72" }),
+        }),
+      );
+      expect(ytRes.status).toBe(200);
+      expect(channelParamsLog).toHaveLength(1);
+      expect(channelParamsLog[0].forHandle).toBe("@lolollol2379");
+
+      // 3. /v2/admin/mail/send normalizes empty comma segments and sendNaverMail strips CRLF in direct calls
+      process.env.ADMIN_TOKEN = "test-admin-v72";
+      process.env.NAVER_MAIL_USER = "sender@naver.com";
+      process.env.NAVER_MAIL_PASSWORD = "pass";
+      resetTransporterCache();
+
+      let capturedMail: any = null;
+      (nodemailer as any).createTransport = () => ({
+        on: () => {},
+        close: () => {},
+        sendMail: async (opts: any) => {
+          capturedMail = opts;
+          return { messageId: "m-72", accepted: [opts.to], rejected: [] };
+        },
+      });
+
+      const mailRes = await app.handle(
+        new Request("http://localhost/v2/admin/mail/send", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-admin-token": "test-admin-v72",
+          },
+          body: JSON.stringify({
+            to: "a@example.com, , b@example.com , ",
+            subject: "Normalized",
+            text: "Hello",
+          }),
+        }),
+      );
+      expect(mailRes.status).toBe(200);
+      expect(capturedMail?.to).toBe("a@example.com, b@example.com");
+
+      await sendNaverMail({
+        to: "direct@example.com",
+        subject: "Line1\r\nBcc: evil@example.com",
+        text: "Direct call",
+        from: "Custom\r\nHeader <sender@naver.com>",
+      });
+      expect(capturedMail?.subject).toBe("Line1 Bcc: evil@example.com");
+      expect(capturedMail?.from).toBe("Custom Header <sender@naver.com>");
+    } finally {
+      google.youtube = origYoutube;
+      nodemailer.createTransport = origCreateTransport;
+      resetTransporterCache();
+      clearChannelUploadsCache();
+      clearPushbulletIdenCache();
+      globalThis.fetch = origFetch;
+      if (prevPbUrl === undefined) delete process.env.PUSHBULLET_API_URL;
+      else process.env.PUSHBULLET_API_URL = prevPbUrl;
+      if (prevPbTok === undefined) delete process.env.PUSHBULLET_ACCESS_TOKEN;
+      else process.env.PUSHBULLET_ACCESS_TOKEN = prevPbTok;
+      if (prevPbIden === undefined) delete process.env.PUSHBULLET_DEVICE_IDEN;
+      else process.env.PUSHBULLET_DEVICE_IDEN = prevPbIden;
+      if (prevPbNick === undefined) delete process.env.PUSHBULLET_DEVICE_NICKNAME;
+      else process.env.PUSHBULLET_DEVICE_NICKNAME = prevPbNick;
+      if (prevPbTestIden === undefined) delete process.env.PUSHBULLET_TEST_DEVICE_IDEN;
+      else process.env.PUSHBULLET_TEST_DEVICE_IDEN = prevPbTestIden;
+      if (prevAdmin === undefined) delete process.env.ADMIN_TOKEN;
+      else process.env.ADMIN_TOKEN = prevAdmin;
+      if (prevMailUser === undefined) delete process.env.NAVER_MAIL_USER;
+      else process.env.NAVER_MAIL_USER = prevMailUser;
+      if (prevMailPass === undefined) delete process.env.NAVER_MAIL_PASSWORD;
+      else process.env.NAVER_MAIL_PASSWORD = prevMailPass;
+    }
+  });
 });

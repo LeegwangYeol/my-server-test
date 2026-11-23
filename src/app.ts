@@ -130,11 +130,13 @@ async function readBoundedBodyText(
  */
 function inspectRootJsonObject(text: string): {
   rootPropCount: number;
+  protoPayloadChars: number;
   duplicateValues: Map<string, unknown[]>;
 } {
   const firstSlice = new Map<string, [number, number]>();
   const duplicateValues = new Map<string, unknown[]>();
   let rootPropCount = 0;
+  let protoPayloadChars = 0;
   const len = text.length;
   let i = 0;
 
@@ -164,7 +166,7 @@ function inspectRootJsonObject(text: string): {
 
   skipWs();
   if (i >= len || text.charCodeAt(i) !== 123) {
-    return { rootPropCount: 0, duplicateValues };
+    return { rootPropCount: 0, protoPayloadChars: 0, duplicateValues };
   }
   i++; // enter root '{'
 
@@ -221,6 +223,14 @@ function inspectRootJsonObject(text: string): {
     }
     if (typeof keyName !== "string") continue;
 
+    if (
+      keyName === "__proto__" ||
+      keyName === "constructor" ||
+      keyName === "prototype"
+    ) {
+      protoPayloadChars += keyEnd - keyStart + (valEnd - valStart);
+    }
+
     const prevSlice = firstSlice.get(keyName);
     if (!prevSlice) {
       firstSlice.set(keyName, [valStart, valEnd]);
@@ -242,7 +252,7 @@ function inspectRootJsonObject(text: string): {
     }
   }
 
-  return { rootPropCount, duplicateValues };
+  return { rootPropCount, protoPayloadChars, duplicateValues };
 }
 
 export const createApp = async (serverless = false) => {
@@ -574,12 +584,30 @@ export const createApp = async (serverless = false) => {
           return {};
         }
         if (Object.prototype.hasOwnProperty.call(parsed, "__proto__")) {
+          if (reqPath === "/v2/widget/view" || reqPath === "/v2/widget/create-thread") {
+            let protoRaw = "";
+            try {
+              const pv = (parsed as Record<string, unknown>)["__proto__"];
+              protoRaw = typeof pv === "string" ? pv : (JSON.stringify(pv) ?? "");
+            } catch {
+              throw new Error("PAYLOAD_TOO_LARGE");
+            }
+            if ("__proto__".length + protoRaw.length > 2000) {
+              throw new Error("PAYLOAD_TOO_LARGE");
+            }
+          }
           delete (parsed as Record<string, unknown>)["__proto__"];
         }
         if (isWidgetPublicRoute) {
-          const { rootPropCount, duplicateValues } = inspectRootJsonObject(text);
+          const { rootPropCount, protoPayloadChars, duplicateValues } =
+            inspectRootJsonObject(text);
           const maxRootProps = reqPath === "/v2/ask" ? 32 : 12;
-          if (rootPropCount > maxRootProps) {
+          if (
+            rootPropCount > maxRootProps ||
+            ((reqPath === "/v2/widget/view" ||
+              reqPath === "/v2/widget/create-thread") &&
+              protoPayloadChars > 2000)
+          ) {
             throw new Error("PAYLOAD_TOO_LARGE");
           }
           if (duplicateValues.size > 0) {
@@ -594,6 +622,17 @@ export const createApp = async (serverless = false) => {
                 dupKey === "constructor" ||
                 dupKey === "prototype"
               ) {
+                if (reqPath === "/v2/widget/view" || reqPath === "/v2/widget/create-thread") {
+                  let rawDanger = "";
+                  try {
+                    rawDanger = JSON.stringify(vals) ?? "";
+                  } catch {
+                    throw new Error("PAYLOAD_TOO_LARGE");
+                  }
+                  if (dupKey.length + rawDanger.length > 2000) {
+                    throw new Error("PAYLOAD_TOO_LARGE");
+                  }
+                }
                 continue;
               }
               rec[dupKey] = vals;
@@ -625,6 +664,7 @@ export const createApp = async (serverless = false) => {
           reqFormPath === "/v2/widget/view";
         const maxFormPairs = reqFormPath === "/v2/ask" ? 32 : 12;
         let pairCount = 0;
+        let strippedDangerChars = 0;
         const safeObj: Record<string, string | string[]> = {};
         for (const [k, v] of new URLSearchParams(text)) {
           pairCount++;
@@ -632,6 +672,13 @@ export const createApp = async (serverless = false) => {
             throw new Error("PAYLOAD_TOO_LARGE");
           }
           if (k === "__proto__" || k === "constructor" || k === "prototype") {
+            if (isPublicWidgetForm) {
+              strippedDangerChars += k.length + v.length;
+              const dangerLimit = reqFormPath === "/v2/ask" ? 4000 : 2000;
+              if (strippedDangerChars > dangerLimit) {
+                throw new Error("PAYLOAD_TOO_LARGE");
+              }
+            }
             continue;
           }
           if (Object.prototype.hasOwnProperty.call(safeObj, k)) {
