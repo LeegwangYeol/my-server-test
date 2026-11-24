@@ -7,6 +7,7 @@ import {
 } from "./endpoints/v2/widget-endpoints";
 import { v2MailEndpoints } from "./endpoints/v2/mail-endpoints";
 import { v2SmsEndpoints } from "./endpoints/v2/sms-endpoints";
+import { v2LlmEndpoints } from "./endpoints/v2/llm-endpoints";
 import { healthzEndpoint } from "./endpoints/healthz";
 
 import {
@@ -427,7 +428,9 @@ export const createApp = async (serverless = false) => {
           errPath = "/";
         }
         if (errPath.startsWith("/v2/admin/")) {
-          const token = (request?.headers?.get?.("x-admin-token") || "").trim();
+          const rawBearer = (request?.headers?.get?.("authorization") || "").trim();
+          const bearerMatch = /^Bearer\s+(.+)$/i.exec(rawBearer);
+          const token = (request?.headers?.get?.("x-admin-token") || "").trim() || (bearerMatch ? bearerMatch[1].trim() : "");
 
           if (errPath === "/v2/admin/mail/send") {
             const mailToken = process.env.MAIL_SEND_TOKEN?.trim();
@@ -442,6 +445,25 @@ export const createApp = async (serverless = false) => {
             }
             const ok =
               (!!mailToken && timingSafeMatch(token, mailToken)) ||
+              (!!adminToken && timingSafeMatch(token, adminToken));
+            if (!ok) {
+              set.status = 401;
+              attachOriginCors();
+              return { success: false, error: "unauthorized" };
+            }
+          } else if (errPath === "/v2/admin/llm/generate") {
+            const genToken = process.env.LLM_GENERATE_TOKEN?.trim();
+            const adminToken = process.env.ADMIN_TOKEN?.trim();
+            if (!genToken && !adminToken) {
+              set.status = 500;
+              attachOriginCors();
+              return {
+                success: false,
+                error: "neither LLM_GENERATE_TOKEN nor ADMIN_TOKEN is set on server",
+              };
+            }
+            const ok =
+              (!!genToken && timingSafeMatch(token, genToken)) ||
               (!!adminToken && timingSafeMatch(token, adminToken));
             if (!ok) {
               set.status = 401;
@@ -720,6 +742,7 @@ export const createApp = async (serverless = false) => {
   await v2WidgetEndpoints(app);
   await v2MailEndpoints(app);
   await v2SmsEndpoints(app);
+  await v2LlmEndpoints(app);
   await healthzEndpoint(app);
 
   // Platform sanity stub for local parity with Vercel api/hello.js

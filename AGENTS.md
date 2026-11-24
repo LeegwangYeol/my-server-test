@@ -16,8 +16,8 @@
   2. **임베드형 채팅 위젯 백엔드** (`/v2/*`) — LLM 스트리밍 + 대화 이력 영속화
 
 ### 프로덕션 URL
-- ✅ **정상 동작: `https://my-server-mocha.vercel.app/`**
-- ⚠️ `https://my-server-test.vercel.app/` 는 현재 **HTTP 402 (`DEPLOYMENT_DISABLED`)** 상태이며, `https://my-server-pearl-eta.vercel.app/` 는 옛 깨진 deploy에 핀된 alias다. 테스트·헬스체크는 항상 `my-server-mocha.vercel.app` 도메인으로 수행할 것.
+- ✅ **정규 프로덕션 도메인 (정상 동작): `https://my-server-test.vercel.app/`** (구 계정 402 잠금 해제 후 `bpscokr003-6892s-projects/my-server`에 정식 승계 완료)
+- ✅ 하위 호환 별칭: `https://my-server-mocha.vercel.app/` (기존 임베드 위젯 호환을 위해 병행 유지)
 - 루트 `/` 는 Swagger(Scalar) API 문서 UI.
 
 ---
@@ -160,6 +160,7 @@ curl -s https://my-server-mocha.vercel.app/v1/heartbeat        # → {"status":"
 | `/v2/admin/db/migrate` | POST | SQL 마이그레이션 실행 (self-serve runner) 🔒⚠️ |
 | `/v2/admin/mail/send` | POST | 네이버 SMTP 메일 발송 🔒 (`X-Admin-Token`: `MAIL_SEND_TOKEN` 또는 `ADMIN_TOKEN`) |
 | `/v2/admin/sms/send` | POST | SMS 발송 🔒 — 백엔드는 **Pushbullet 단일**(서버리스에서 도는 유일한 경로). 맥 전용 경로는 `test/sms-local/` 로 분리됨 |
+| `/v2/admin/llm/generate` | POST | **공통 멀티모달 LLM 텍스트 생성** 🔒 (`X-Admin-Token`: `LLM_GENERATE_TOKEN` 또는 `ADMIN_TOKEN`, `imageUrls` 최대 5장 지원, 스레드 비저장) |
 
 🔒 = `x-admin-token` 헤더 필수 (7번 절 참고). 토큰 없거나 불일치 → `{success:false, error:"unauthorized"}`.
 

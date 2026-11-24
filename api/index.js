@@ -10217,7 +10217,7 @@ var require_dist2 = __commonJS({
     };
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.Agent = void 0;
-    var net = __importStar2(require("net"));
+    var net2 = __importStar2(require("net"));
     var http = __importStar2(require("http"));
     var https_1 = require("https");
     __exportStar2(require_helpers(), exports2);
@@ -10257,7 +10257,7 @@ var require_dist2 = __commonJS({
         if (!this.sockets[name]) {
           this.sockets[name] = [];
         }
-        const fakeSocket = new net.Socket({ writable: false });
+        const fakeSocket = new net2.Socket({ writable: false });
         this.sockets[name].push(fakeSocket);
         this.totalSocketCount++;
         return fakeSocket;
@@ -10469,7 +10469,7 @@ var require_dist3 = __commonJS({
     };
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.HttpsProxyAgent = void 0;
-    var net = __importStar2(require("net"));
+    var net2 = __importStar2(require("net"));
     var tls = __importStar2(require("tls"));
     var assert_1 = __importDefault2(require("assert"));
     var debug_1 = __importDefault2(require_src());
@@ -10478,7 +10478,7 @@ var require_dist3 = __commonJS({
     var parse_proxy_response_1 = require_parse_proxy_response();
     var debug2 = (0, debug_1.default)("https-proxy-agent");
     var setServernameFromNonIpHost = (options) => {
-      if (options.servername === void 0 && options.host && !net.isIP(options.host)) {
+      if (options.servername === void 0 && options.host && !net2.isIP(options.host)) {
         return {
           ...options,
           servername: options.host
@@ -10518,10 +10518,10 @@ var require_dist3 = __commonJS({
           socket = tls.connect(setServernameFromNonIpHost(this.connectOpts));
         } else {
           debug2("Creating `net.Socket`: %o", this.connectOpts);
-          socket = net.connect(this.connectOpts);
+          socket = net2.connect(this.connectOpts);
         }
         const headers = typeof this.proxyHeaders === "function" ? this.proxyHeaders() : { ...this.proxyHeaders };
-        const host = net.isIPv6(opts.host) ? `[${opts.host}]` : opts.host;
+        const host = net2.isIPv6(opts.host) ? `[${opts.host}]` : opts.host;
         let payload = `CONNECT ${host}:${opts.port} HTTP/1.1\r
 `;
         if (proxy.username || proxy.password) {
@@ -10554,7 +10554,7 @@ var require_dist3 = __commonJS({
           return socket;
         }
         socket.destroy();
-        const fakeSocket = new net.Socket({ writable: false });
+        const fakeSocket = new net2.Socket({ writable: false });
         fakeSocket.readable = true;
         req.once("socket", (s) => {
           debug2("Replaying proxy buffer for failed request");
@@ -673827,7 +673827,7 @@ var require_fetch2 = __commonJS({
     var { PassThrough } = require("stream");
     var Cookies = require_cookies();
     var packageData = require_package4();
-    var net = require("net");
+    var net2 = require("net");
     var errors = require_errors2();
     var MAX_REDIRECTS = 5;
     module2.exports = function(url, options) {
@@ -673927,7 +673927,7 @@ var require_fetch2 = __commonJS({
       if (options.tls) {
         Object.assign(reqOptions, options.tls);
       }
-      if (parsed.protocol === "https:" && parsed.hostname && parsed.hostname !== reqOptions.host && !net.isIP(parsed.hostname) && !reqOptions.servername) {
+      if (parsed.protocol === "https:" && parsed.hostname && parsed.hostname !== reqOptions.host && !net2.isIP(parsed.hostname) && !reqOptions.servername) {
         reqOptions.servername = parsed.hostname;
       }
       try {
@@ -674063,7 +674063,7 @@ var require_shared = __commonJS({
     var nmfetch = require_fetch2();
     var errors = require_errors2();
     var dns = require("dns");
-    var net = require("net");
+    var net2 = require("net");
     var os = require("os");
     var DNS_TTL = 5 * 60 * 1e3;
     var CACHE_CLEANUP_INTERVAL = 30 * 1e3;
@@ -674131,7 +674131,7 @@ var require_shared = __commonJS({
       if (!options.host && options.servername) {
         options.host = options.servername;
       }
-      if (!options.host || net.isIP(options.host)) {
+      if (!options.host || net2.isIP(options.host)) {
         const value = {
           addresses: [options.host],
           servername: options.servername || false
@@ -680044,7 +680044,7 @@ var require_dkim = __commonJS({
 var require_http_proxy_client = __commonJS({
   "node_modules/nodemailer/lib/smtp-connection/http-proxy-client.js"(exports2, module2) {
     "use strict";
-    var net = require("net");
+    var net2 = require("net");
     var tls = require("tls");
     var urllib = require("url");
     var errors = require_errors2();
@@ -680059,7 +680059,7 @@ var require_http_proxy_client = __commonJS({
         options.rejectUnauthorized = false;
         connect = tls.connect.bind(tls);
       } else {
-        connect = net.connect.bind(net);
+        connect = net2.connect.bind(net2);
       }
       let socket;
       let finished = false;
@@ -680417,7 +680417,7 @@ var require_mailer = __commonJS({
     var urllib = require("url");
     var packageData = require_package4();
     var MailMessage = require_mail_message();
-    var net = require("net");
+    var net2 = require("net");
     var dns = require("dns");
     var crypto12 = require("crypto");
     var Mail = class extends EventEmitter {
@@ -680730,7 +680730,7 @@ var require_mailer = __commonJS({
                   });
                 });
               };
-              if (net.isIP(proxy.hostname)) {
+              if (net2.isIP(proxy.hostname)) {
                 return connect(proxy.hostname);
               }
               return dns.resolve(proxy.hostname, (err2, address) => {
@@ -680886,7 +680886,7 @@ var require_smtp_connection = __commonJS({
     "use strict";
     var packageInfo = require_package4();
     var { EventEmitter } = require("events");
-    var net = require("net");
+    var net2 = require("net");
     var tls = require("tls");
     var os = require("os");
     var crypto12 = require("crypto");
@@ -680916,7 +680916,7 @@ var require_smtp_connection = __commonJS({
         this.alreadySecured = !!this.options.secured;
         this.port = Number(this.options.port) || (this.secureConnection ? 465 : 587);
         this.host = this.options.host || "localhost";
-        this.servername = this.options.servername ? this.options.servername : !net.isIP(this.host) ? this.host : false;
+        this.servername = this.options.servername ? this.options.servername : !net2.isIP(this.host) ? this.host : false;
         this.allowInternalNetworkInterfaces = this.options.allowInternalNetworkInterfaces || false;
         if (typeof this.options.secure === "undefined" && this.port === 465) {
           this.secureConnection = true;
@@ -681075,7 +681075,7 @@ var require_smtp_connection = __commonJS({
       _connectToHost(opts, secure) {
         this._connectionAttemptId++;
         const currentAttemptId = this._connectionAttemptId;
-        const connectFn = secure ? tls.connect : net.connect;
+        const connectFn = secure ? tls.connect : net2.connect;
         try {
           this._socket = connectFn(opts, () => {
             if (this._connectionAttemptId !== currentAttemptId) {
@@ -718156,6 +718156,327 @@ var v2SmsEndpoints = async (app) => {
   });
 };
 
+// src/endpoints/v2/llm-endpoints.ts
+var import_net = __toESM(require("net"));
+var MAX_SYSTEM_CHARS = 2e4;
+var MAX_PROMPT_CHARS = 3e4;
+var MAX_IMAGES = 5;
+var MAX_REMOTE_IMAGE_BYTES = 6 * 1024 * 1024;
+var MAX_DATA_URI_CHARS = 95e4;
+function isPrivateOrReservedIpv4(ip) {
+  const parts = ip.split(".").map((x) => Number(x));
+  if (parts.length !== 4 || parts.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) {
+    return true;
+  }
+  const [a, b, c] = parts;
+  if (a === 0 || a === 10 || a === 127) return true;
+  if (a === 169 && b === 254) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 100 && b >= 64 && b <= 127) return true;
+  if (a === 192 && b === 0 && (c === 0 || c === 2)) return true;
+  if (a === 198 && (b === 18 || b === 19 || b === 51 && c === 100)) return true;
+  if (a === 203 && b === 0 && c === 113) return true;
+  if (a >= 224) return true;
+  return false;
+}
+function isBlockedHost(rawHost) {
+  const host = rawHost.trim().toLowerCase().replace(/^\[|\]$/g, "");
+  if (!host) return true;
+  if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local") || host.endsWith(".internal") || host === "metadata.google.internal") {
+    return true;
+  }
+  if (/^(?:0x[0-9a-f]+|\d+)$/i.test(host)) return true;
+  if (/^[0-9.]+$/.test(host)) {
+    return import_net.default.isIPv4(host) ? isPrivateOrReservedIpv4(host) : true;
+  }
+  if (host.includes(":") || import_net.default.isIPv6(host)) {
+    return true;
+  }
+  return false;
+}
+function sniffImageMime(bytes) {
+  if (bytes.byteLength < 12) return null;
+  if (bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255) {
+    return "image/jpeg";
+  }
+  if (bytes[0] === 137 && bytes[1] === 80 && bytes[2] === 78 && bytes[3] === 71 && bytes[4] === 13 && bytes[5] === 10 && bytes[6] === 26 && bytes[7] === 10) {
+    return "image/png";
+  }
+  if (bytes[0] === 71 && bytes[1] === 73 && bytes[2] === 70 && bytes[3] === 56 && (bytes[4] === 55 || bytes[4] === 57) && bytes[5] === 97) {
+    return "image/gif";
+  }
+  if (bytes[0] === 82 && bytes[1] === 73 && bytes[2] === 70 && bytes[3] === 70 && bytes[8] === 87 && bytes[9] === 69 && bytes[10] === 66 && bytes[11] === 80) {
+    return "image/webp";
+  }
+  return null;
+}
+function validateRemoteImageUrl(raw) {
+  const trimmed = raw.trim();
+  if (!trimmed || trimmed.length > 2048 || /[\s<>"'`\\\x00-\x1f\x7f]/.test(trimmed)) {
+    return null;
+  }
+  let parsed;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== "https:") return null;
+  if (parsed.username || parsed.password) return null;
+  if (parsed.port && parsed.port !== "443") return null;
+  if (isBlockedHost(parsed.hostname)) return null;
+  return parsed;
+}
+async function resolveImageDataUri(raw) {
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return { ok: false, fatal: true, error: "empty imageUrl entry" };
+  }
+  if (trimmed.startsWith("data:")) {
+    if (trimmed.length > MAX_DATA_URI_CHARS) {
+      return { ok: false, fatal: true, error: "data URI image exceeds maximum allowed size" };
+    }
+    const m = /^data:(image\/(?:jpeg|png|webp|gif));base64,([A-Za-z0-9+/=]+)$/i.exec(trimmed);
+    if (!m) {
+      return { ok: false, fatal: true, error: "invalid data URI format (must be base64 jpeg/png/webp/gif)" };
+    }
+    const buf = Buffer.from(m[2], "base64");
+    const sniffed = sniffImageMime(buf);
+    if (!sniffed) {
+      return { ok: false, fatal: true, error: "data URI payload is not a valid image binary" };
+    }
+    return { ok: true, dataUri: `data:${sniffed};base64,${buf.toString("base64")}` };
+  }
+  const validUrl = validateRemoteImageUrl(trimmed);
+  if (!validUrl) {
+    return {
+      ok: false,
+      fatal: true,
+      error: "disallowed imageUrl (must be public HTTPS port 443 URL without private/IP literals)"
+    };
+  }
+  try {
+    const resp = await fetch(validUrl.toString(), {
+      method: "GET",
+      redirect: "error",
+      signal: AbortSignal.timeout(8e3)
+    });
+    if (!resp.ok) {
+      return { ok: false, fatal: false, error: `upstream image HTTP ${resp.status}` };
+    }
+    const cl = Number(resp.headers.get("content-length") ?? "0");
+    if (cl > MAX_REMOTE_IMAGE_BYTES) {
+      return { ok: false, fatal: false, error: "remote image exceeds 6MB limit" };
+    }
+    if (!resp.body) {
+      return { ok: false, fatal: false, error: "empty image body" };
+    }
+    const reader = resp.body.getReader();
+    const chunks = [];
+    let total = 0;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value && value.byteLength > 0) {
+          total += value.byteLength;
+          if (total > MAX_REMOTE_IMAGE_BYTES) {
+            await reader.cancel().catch(() => {
+            });
+            return { ok: false, fatal: false, error: "remote image stream exceeded 6MB limit" };
+          }
+          chunks.push(value);
+        }
+      }
+    } finally {
+      try {
+        reader.releaseLock();
+      } catch {
+      }
+    }
+    const merged = Buffer.concat(chunks.map((c) => Buffer.from(c)));
+    const mime2 = sniffImageMime(merged);
+    if (!mime2) {
+      return { ok: false, fatal: false, error: "remote file is not a supported image (jpeg/png/webp/gif)" };
+    }
+    return { ok: true, dataUri: `data:${mime2};base64,${merged.toString("base64")}` };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, fatal: false, error: msg };
+  }
+}
+function extractAdminCandidate(headers) {
+  const xToken = (headers["x-admin-token"] || "").trim();
+  if (xToken) return xToken;
+  const auth = (headers["authorization"] || "").trim();
+  const m = /^Bearer\s+(.+)$/i.exec(auth);
+  return m ? m[1].trim() : "";
+}
+var v2LlmEndpoints = async (app) => {
+  app.group("/v2", (app2) => {
+    app2.post(
+      "/admin/llm/generate",
+      async ({
+        headers,
+        body,
+        set
+      }) => {
+        const genToken = process.env.LLM_GENERATE_TOKEN?.trim();
+        const adminToken = process.env.ADMIN_TOKEN?.trim();
+        if (!genToken && !adminToken) {
+          set.status = 500;
+          return {
+            success: false,
+            error: "neither LLM_GENERATE_TOKEN nor ADMIN_TOKEN is set on server"
+          };
+        }
+        const token = extractAdminCandidate(headers);
+        const authorized = !!genToken && timingSafeMatch(token, genToken) || !!adminToken && timingSafeMatch(token, adminToken);
+        if (!authorized) {
+          set.status = 401;
+          return { success: false, error: "unauthorized" };
+        }
+        const prompt = typeof body?.prompt === "string" ? body.prompt.replace(/\x00+/g, "").trim() : "";
+        if (!prompt) {
+          set.status = 400;
+          return { success: false, error: "prompt required" };
+        }
+        if (prompt.length > MAX_PROMPT_CHARS) {
+          set.status = 400;
+          return { success: false, error: `prompt exceeds maximum length of ${MAX_PROMPT_CHARS} characters` };
+        }
+        const system = typeof body?.system === "string" ? body.system.replace(/\x00+/g, "").trim() : "";
+        if (system.length > MAX_SYSTEM_CHARS) {
+          set.status = 400;
+          return { success: false, error: `system exceeds maximum length of ${MAX_SYSTEM_CHARS} characters` };
+        }
+        const rawImages = Array.isArray(body?.imageUrls) ? body.imageUrls : [];
+        if (rawImages.length > MAX_IMAGES) {
+          set.status = 400;
+          return { success: false, error: `too many images (maximum ${MAX_IMAGES})` };
+        }
+        const modelOverride = typeof body?.model === "string" ? body.model.trim() : void 0;
+        if (modelOverride && (modelOverride.length > 120 || /[\s\x00-\x1f\x7f]/.test(modelOverride))) {
+          set.status = 400;
+          return { success: false, error: "invalid model identifier" };
+        }
+        const maxTokens = typeof body?.maxTokens === "number" && Number.isFinite(body.maxTokens) ? Math.max(1, Math.min(4096, Math.floor(body.maxTokens))) : 1600;
+        const temperature = typeof body?.temperature === "number" && Number.isFinite(body.temperature) ? Math.max(0, Math.min(2, body.temperature)) : 0.4;
+        const provider = createLLMProvider();
+        if (!provider) {
+          set.status = 503;
+          return { success: false, error: "LLM provider is not configured on server" };
+        }
+        const resolvedParts = [];
+        let loadedImages = 0;
+        if (rawImages.length > 0) {
+          const results = await Promise.all(
+            rawImages.map(
+              (item) => typeof item === "string" ? resolveImageDataUri(item) : Promise.resolve({ ok: false, fatal: true, error: "imageUrls items must be strings" })
+            )
+          );
+          for (const res of results) {
+            if (!res.ok) {
+              if (res.fatal) {
+                set.status = 400;
+                return { success: false, error: res.error };
+              }
+              console.warn("[v2/admin/llm/generate] skipped unreachable image:", res.error);
+              continue;
+            }
+            resolvedParts.push({ type: "image_url", image_url: { url: res.dataUri } });
+            loadedImages++;
+          }
+        }
+        const messages = [];
+        if (system) {
+          messages.push({ role: "system", content: system });
+        }
+        if (resolvedParts.length > 0) {
+          messages.push({
+            role: "user",
+            content: [{ type: "text", text: prompt }, ...resolvedParts]
+          });
+        } else {
+          messages.push({ role: "user", content: prompt });
+        }
+        try {
+          const chunks = [];
+          for await (const chunk of provider.stream(
+            {
+              messages,
+              model: modelOverride || void 0,
+              maxTokens,
+              temperature
+            },
+            AbortSignal.timeout(35e3)
+          )) {
+            chunks.push(chunk);
+          }
+          const text = chunks.join("").trim();
+          if (!text) {
+            set.status = 502;
+            return { success: false, error: "LLM returned empty text" };
+          }
+          return {
+            success: true,
+            text,
+            provider: provider.name,
+            imagesUsed: loadedImages
+          };
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          console.error("[v2/admin/llm/generate] failed:", message);
+          const status2 = err?.status === 429 || err?.statusCode === 429 ? 429 : 502;
+          set.status = status2;
+          return { success: false, error: message };
+        }
+      },
+      {
+        body: t.Object(
+          {
+            system: t.Optional(t.String({ description: "\uC2DC\uC2A4\uD15C \uD504\uB86C\uD504\uD2B8 (\uC120\uD0DD)" })),
+            prompt: t.String({ description: "\uC0AC\uC6A9\uC790 \uD504\uB86C\uD504\uD2B8 (\uD544\uC218)" }),
+            imageUrls: t.Optional(
+              t.Array(t.String(), {
+                description: "\uBA40\uD2F0\uBAA8\uB2EC \uC774\uBBF8\uC9C0 HTTPS URL \uB610\uB294 base64 data URI \uBC30\uC5F4 (\uCD5C\uB300 5\uC7A5)"
+              })
+            ),
+            maxTokens: t.Optional(t.Number({ description: "\uCD5C\uB300 \uCD9C\uB825 \uD1A0\uD070 \uC218 (\uAE30\uBCF8 1600, \uCD5C\uB300 4096)" })),
+            temperature: t.Optional(t.Number({ description: "\uC0D8\uD50C\uB9C1 \uC628\uB3C4 0~2 (\uAE30\uBCF8 0.4)" })),
+            model: t.Optional(t.String({ description: "\uBAA8\uB378 \uC624\uBC84\uB77C\uC774\uB4DC (\uC0DD\uB7B5 \uC2DC \uC11C\uBC84 LLM_MODEL \uC0AC\uC6A9)" }))
+          },
+          {
+            examples: [
+              {
+                system: "\uC815\uC911\uD55C \uD569\uB2C8\uB2E4\uCCB4 \uC804\uBB38\uAC00 \uC791\uC5C5 \uAE30\uB85D\uC744 \uC791\uC131\uD558\uC2ED\uC2DC\uC624.",
+                prompt: "\uBA54\uBAA8: \uAD11\uC8FC\uC2DC \uACBD\uC548\uB3D9 4\uCE35 \uC0C1\uAC00 \uC678\uBCBD \uCF54\uD0B9 \uC791\uC5C5",
+                imageUrls: [],
+                maxTokens: 1200
+              }
+            ]
+          }
+        ),
+        detail: {
+          tags: ["API"],
+          description: "\uACF5\uD1B5 \uBA40\uD2F0\uBAA8\uB2EC LLM \uD14D\uC2A4\uD2B8 \uC0DD\uC131 API (\uC2A4\uB808\uB4DC \uBE44\uC800\uC7A5). X-Admin-Token \uD5E4\uB354 \uD544\uC218 (LLM_GENERATE_TOKEN \uB610\uB294 ADMIN_TOKEN).",
+          parameters: [
+            {
+              name: "X-Admin-Token",
+              in: "header",
+              required: true,
+              description: "\uC778\uC99D \uD1A0\uD070 \u2014 \uC11C\uBC84\uC758 LLM_GENERATE_TOKEN \uB610\uB294 ADMIN_TOKEN\uACFC \uC77C\uCE58\uD574\uC57C \uD569\uB2C8\uB2E4.",
+              schema: { type: "string" }
+            }
+          ]
+        }
+      }
+    );
+    return app2;
+  });
+};
+
 // src/endpoints/healthz.ts
 var processStartedAt = Date.now();
 var healthzEndpoint = async (app) => {
@@ -718362,7 +718683,7 @@ function resolvePolicy(pathname, method = "GET") {
     }
     if (p === "/v2/admin/widgets/upload-icon") return ROUTE_POLICIES.adminUpload;
     if (p === "/v2/admin/db/migrate") return ROUTE_POLICIES.adminCritical;
-    if (p.endsWith("/upsert") || p.endsWith("/delete") || p.endsWith("/update") || p.endsWith("/rename")) {
+    if (p === "/v2/admin/llm/generate" || p.endsWith("/upsert") || p.endsWith("/delete") || p.endsWith("/update") || p.endsWith("/rename")) {
       return ROUTE_POLICIES.adminWrite;
     }
     return ROUTE_POLICIES.adminRead;
@@ -718804,7 +719125,9 @@ var createApp = async (serverless = false) => {
         errPath = "/";
       }
       if (errPath.startsWith("/v2/admin/")) {
-        const token = (request?.headers?.get?.("x-admin-token") || "").trim();
+        const rawBearer = (request?.headers?.get?.("authorization") || "").trim();
+        const bearerMatch = /^Bearer\s+(.+)$/i.exec(rawBearer);
+        const token = (request?.headers?.get?.("x-admin-token") || "").trim() || (bearerMatch ? bearerMatch[1].trim() : "");
         if (errPath === "/v2/admin/mail/send") {
           const mailToken = process.env.MAIL_SEND_TOKEN?.trim();
           const adminToken = process.env.ADMIN_TOKEN?.trim();
@@ -718817,6 +719140,23 @@ var createApp = async (serverless = false) => {
             };
           }
           const ok = !!mailToken && timingSafeMatch(token, mailToken) || !!adminToken && timingSafeMatch(token, adminToken);
+          if (!ok) {
+            set.status = 401;
+            attachOriginCors();
+            return { success: false, error: "unauthorized" };
+          }
+        } else if (errPath === "/v2/admin/llm/generate") {
+          const genToken = process.env.LLM_GENERATE_TOKEN?.trim();
+          const adminToken = process.env.ADMIN_TOKEN?.trim();
+          if (!genToken && !adminToken) {
+            set.status = 500;
+            attachOriginCors();
+            return {
+              success: false,
+              error: "neither LLM_GENERATE_TOKEN nor ADMIN_TOKEN is set on server"
+            };
+          }
+          const ok = !!genToken && timingSafeMatch(token, genToken) || !!adminToken && timingSafeMatch(token, adminToken);
           if (!ok) {
             set.status = 401;
             attachOriginCors();
@@ -719045,6 +719385,7 @@ var createApp = async (serverless = false) => {
   await v2WidgetEndpoints(app);
   await v2MailEndpoints(app);
   await v2SmsEndpoints(app);
+  await v2LlmEndpoints(app);
   await healthzEndpoint(app);
   app.get("/api/hello", ({ request }) => ({
     ok: true,

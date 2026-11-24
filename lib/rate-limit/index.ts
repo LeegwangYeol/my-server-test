@@ -233,6 +233,7 @@ export function resolvePolicy(pathname: string, method: string = "GET"): RouteLi
     if (p === "/v2/admin/widgets/upload-icon") return ROUTE_POLICIES.adminUpload;
     if (p === "/v2/admin/db/migrate") return ROUTE_POLICIES.adminCritical;
     if (
+      p === "/v2/admin/llm/generate" ||
       p.endsWith("/upsert") ||
       p.endsWith("/delete") ||
       p.endsWith("/update") ||
